@@ -20,7 +20,7 @@ class TerminalSocketSingleton {
   private manualClosing = false;
 
   private makeSessionKey(session: SessionInfo) {
-    return `${session.host}:${session.wsPort}:${session.token}`;
+    return `${window.location.origin}:${session.token}`;
   }
 
   private emitStatus(next: TerminalSocketStatus) {

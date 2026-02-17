@@ -24,7 +24,7 @@ class LogSocketSingleton {
   private reconnectMs = 1500;
 
   private makeSessionKey(session: SessionInfo) {
-    return `${session.host}:${session.wsPort}:${session.token}`;
+    return `${window.location.origin}:${session.token}`;
   }
 
   private clearReconnectTimer() {

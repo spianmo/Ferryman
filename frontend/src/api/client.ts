@@ -161,13 +161,8 @@ export async function getScreenCapabilities(token: string) {
 }
 
 export function wsUrl(session: SessionInfo, path: "/ws/terminal" | "/ws/webrtc" | "/ws/logs"): string {
-  // @ts-ignore
-  if (import.meta.env.DEV) {
-    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-    return `${protocol}://${window.location.host}${path}?token=${encodeURIComponent(session.token)}`;
-  }
-  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-  const host = window.location.hostname;
-  const port = Number.isFinite(session.httpPort) ? session.httpPort : session.wsPort;
-  return `${protocol}://${host}:${port}${path}?token=${encodeURIComponent(session.token)}`;
+  const url = new URL(path, window.location.origin);
+  url.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  url.searchParams.set("token", session.token);
+  return url.toString();
 }
