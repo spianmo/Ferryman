@@ -1,0 +1,13 @@
+.vscode/
+.idea/
+cmake-build-*/
+build/
+frontend/node_modules/
+frontend/dist/
+.npm-cache/
+.npmrc.local
+.vcpkg-downloads/
+.vcpkg-binary-cache/
+vcpkg_installed/
+.DS_Store
+libhv.*.log

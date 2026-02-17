@@ -1,0 +1,114 @@
+#pragma once
+
+#include "ferryman/core/AuditLogger.hpp"
+#include "ferryman/core/ConfigManager.hpp"
+#include "ferryman/core/FileService.hpp"
+#include "ferryman/core/SessionManager.hpp"
+#include "ferryman/pty/PtyManager.hpp"
+#include "ferryman/task/TaskManager.hpp"
+#include "ferryman/web/ScreenService.hpp"
+#include "ferryman/web/WebRtcSignalingService.hpp"
+
+#include <atomic>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <unordered_map>
+
+#if !defined(FERRYMAN_WITH_LIBHV)
+#define FERRYMAN_WITH_LIBHV 0
+#endif
+
+#if FERRYMAN_WITH_LIBHV
+#include "hv/HttpServer.h"
+#include "hv/WebSocketServer.h"
+#endif
+
+namespace ferryman::web {
+
+class ServerApp {
+ public:
+  explicit ServerApp(core::AppConfig config);
+  ~ServerApp();
+
+  bool Start();
+  void Stop();
+
+ private:
+#if FERRYMAN_WITH_LIBHV
+  struct WsClient {
+    std::string channel_type;
+    std::string session_token;
+    std::string terminal_id;
+    std::string room_id;
+    std::string peer_id;
+    bool native_stream_subscribed = false;
+    WebSocketChannelPtr channel;
+  };
+#endif
+
+  bool RegisterHttpRoutes();
+  bool RegisterWsHandlers();
+
+#if FERRYMAN_WITH_LIBHV
+  int HandleLogin(HttpRequest* req, HttpResponse* resp);
+  int HandleSessionMe(HttpRequest* req, HttpResponse* resp);
+  int HandleFileList(HttpRequest* req, HttpResponse* resp);
+  int HandleFileRead(HttpRequest* req, HttpResponse* resp);
+  int HandleFileWrite(HttpRequest* req, HttpResponse* resp);
+  int HandleTaskStart(HttpRequest* req, HttpResponse* resp);
+  int HandleTaskList(HttpRequest* req, HttpResponse* resp);
+  int HandleTaskGet(HttpRequest* req, HttpResponse* resp);
+  int HandleLogsTail(HttpRequest* req, HttpResponse* resp);
+  int HandleScreenCaps(HttpRequest* req, HttpResponse* resp);
+  int HandleScreenInput(HttpRequest* req, HttpResponse* resp);
+  int HandleHealth(HttpRequest* req, HttpResponse* resp);
+  int HandleStaticAsset(HttpRequest* req, HttpResponse* resp);
+
+  std::string HeaderOf(HttpRequest* req, const std::string& key) const;
+  std::string QueryOf(HttpRequest* req, const std::string& key) const;
+  std::optional<core::SessionSnapshot> RequireSession(HttpRequest* req, HttpResponse* resp);
+
+  int Json(HttpResponse* resp, int status, const std::string& body) const;
+  int Text(HttpResponse* resp, int status, const std::string& body,
+           const std::string& content_type = "text/plain; charset=utf-8") const;
+
+  void HandleWsOpen(const WebSocketChannelPtr& channel, const HttpRequestPtr& req);
+  void HandleWsMessage(const WebSocketChannelPtr& channel, const std::string& message);
+  void HandleWsClose(const WebSocketChannelPtr& channel);
+
+  void HandleTerminalWsMessage(std::uintptr_t channel_key, const std::string& message);
+  void HandleWebRtcWsMessage(std::uintptr_t channel_key, const std::string& message);
+  void BroadcastTerminalOutput(const std::string& terminal_id, const std::string& chunk);
+  void BroadcastNativeFrames();
+  void SendToWs(std::uintptr_t channel_key, const std::string& payload);
+#endif
+
+  core::AppConfig config_;
+  core::SessionManager session_manager_;
+  core::AuditLogger audit_logger_;
+  core::FileService file_service_;
+  task::TaskManager task_manager_;
+  pty::PtyManager pty_manager_;
+  ScreenService screen_service_;
+  WebRtcSignalingService signaling_service_;
+
+  std::atomic<bool> running_{false};
+
+#if FERRYMAN_WITH_LIBHV
+  HttpService http_service_;
+  http_server_t http_server_{};
+  hv::WebSocketService ws_service_;
+  hv::WebSocketServer ws_server_;
+
+  std::thread http_thread_;
+  std::thread ws_thread_;
+  std::thread native_screen_thread_;
+
+  std::mutex ws_mu_;
+  std::unordered_map<std::uintptr_t, WsClient> ws_clients_;
+#endif
+};
+
+}  // namespace ferryman::web
