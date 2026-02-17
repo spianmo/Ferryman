@@ -80,7 +80,9 @@ class ServerApp {
 
   void HandleTerminalWsMessage(std::uintptr_t channel_key, const std::string& message);
   void HandleWebRtcWsMessage(std::uintptr_t channel_key, const std::string& message);
+  void HandleLogsWsMessage(std::uintptr_t channel_key, const std::string& message);
   void BroadcastTerminalOutput(const std::string& terminal_id, const std::string& chunk);
+  void BroadcastLogEntry(const std::string& serialized_entry);
   void BroadcastNativeFrames();
   void SendToWs(std::uintptr_t channel_key, const std::string& payload);
 #endif
@@ -100,10 +102,8 @@ class ServerApp {
   HttpService http_service_;
   http_server_t http_server_{};
   hv::WebSocketService ws_service_;
-  hv::WebSocketServer ws_server_;
 
   std::thread http_thread_;
-  std::thread ws_thread_;
   std::thread native_screen_thread_;
 
   std::mutex ws_mu_;

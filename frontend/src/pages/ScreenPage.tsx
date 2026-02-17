@@ -4,8 +4,7 @@ import type {
   MouseEvent as ReactMouseEvent,
   WheelEvent as ReactWheelEvent,
 } from "react";
-import { toast } from "../toast";
-import { FiCast, FiMonitor, FiSend, FiPlay, FiPause, FiMaximize, FiMinimize } from "react-icons/fi";
+import { FiMaximize, FiMinimize, FiMonitor, FiPause, FiPlay } from "react-icons/fi";
 
 import { emitUnauthorized, wsUrl } from "../api/client";
 import { useI18n } from "../i18n";
@@ -19,17 +18,12 @@ type Props = {
 export default function ScreenPage({ session }: Props) {
   const { t } = useI18n();
   const wsRef = useRef<WebSocket | null>(null);
-  const pcRef = useRef<RTCPeerConnection | null>(null);
-  const localStreamRef = useRef<MediaStream | null>(null);
-  const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
-  const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const nativeSurfaceRef = useRef<HTMLDivElement | null>(null);
   const lastMouseMoveAtRef = useRef(0);
+  const nativeWantedRef = useRef(false);
+  const [dotState, setDotState] = useState<"idle" | "connecting" | "active" | "error">("idle");
 
-  const [roomId, setRoomId] = useState("default-room");
   const [status, setStatus] = useState(t("terminal.disconnected"));
-  const [peerId, setPeerId] = useState("");
-  const [peers, setPeers] = useState<string[]>([]);
   const [nativeStreaming, setNativeStreaming] = useState(false);
   const [nativeFrameUrl, setNativeFrameUrl] = useState("");
   const [nativeInputFocused, setNativeInputFocused] = useState(false);
@@ -38,8 +32,7 @@ export default function ScreenPage({ session }: Props) {
   useEffect(() => {
     return () => {
       wsRef.current?.close();
-      pcRef.current?.close();
-      localStreamRef.current?.getTracks().forEach((track) => track.stop());
+      wsRef.current = null;
     };
   }, []);
 
@@ -53,69 +46,51 @@ export default function ScreenPage({ session }: Props) {
 
   const send = (payload: Record<string, unknown>) => {
     const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      return;
-    }
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
     ws.send(JSON.stringify(payload));
   };
 
-  const setupPc = () => {
-    if (pcRef.current) {
-      return pcRef.current;
-    }
-
-    const pc = new RTCPeerConnection({
-      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-    });
-
-    pc.onicecandidate = (event) => {
-      if (!event.candidate) return;
-      send({
-        action: "signal",
-        signal_type: "candidate",
-        payload: JSON.stringify(event.candidate),
-      });
-    };
-
-    pc.ontrack = (event) => {
-      if (!remoteVideoRef.current) return;
-      remoteVideoRef.current.srcObject = event.streams[0];
-    };
-
-    const stream = localStreamRef.current;
-    if (stream) {
-      stream.getTracks().forEach((track) => pc.addTrack(track, stream));
-    }
-
-    pcRef.current = pc;
-    return pc;
-  };
-
-  const joinRoom = () => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      send({ action: "join", room_id: roomId });
+  const connectWs = () => {
+    const current = wsRef.current;
+    if (
+      current &&
+      (current.readyState === WebSocket.OPEN || current.readyState === WebSocket.CONNECTING)
+    ) {
       return;
     }
 
     const ws = new WebSocket(wsUrl(session, "/ws/webrtc"));
     wsRef.current = ws;
     setStatus(t("terminal.connecting"));
+    setDotState("connecting");
 
     ws.onopen = () => {
       setStatus(t("terminal.connected"));
-      send({ action: "join", room_id: roomId });
+      if (!nativeWantedRef.current) {
+        setDotState("idle");
+      }
+      if (nativeWantedRef.current) {
+        send({ action: "native_subscribe" });
+      }
     };
 
     ws.onerror = () => {
       setStatus(t("terminal.failed"));
+      setDotState("error");
     };
 
     ws.onclose = () => {
-      setStatus(t("terminal.closed"));
+      if (wsRef.current === ws) {
+        wsRef.current = null;
+      }
+      nativeWantedRef.current = false;
       setNativeStreaming(false);
+      setNativeFrameUrl("");
+      setStatus(t("terminal.closed"));
+      setDotState("idle");
     };
 
-    ws.onmessage = async (event) => {
+    ws.onmessage = (event) => {
       let payload: Record<string, unknown>;
       try {
         payload = JSON.parse(event.data as string) as Record<string, unknown>;
@@ -129,104 +104,67 @@ export default function ScreenPage({ session }: Props) {
           emitUnauthorized({ reason: typeof reason === "string" ? reason : undefined });
         }
         setStatus(String(payload.error ?? t("toast.request_failed")));
+        setDotState("error");
         return;
       }
 
       const eventType = String(payload.event ?? "");
-      if (eventType === "joined") {
-        setPeerId(String(payload.peer_id ?? ""));
-        const existingPeers = (payload.peers ?? []) as string[];
-        setPeers(existingPeers);
-        setStatus(`${t("screen.join")} ${roomId}`);
-      }
-
-      if (eventType === "peer_join") {
-        const id = String(payload.peer_id ?? "");
-        setPeers((prev) => (prev.includes(id) ? prev : [...prev, id]));
-      }
-
       if (eventType === "native_subscribed") {
+        nativeWantedRef.current = true;
         setNativeStreaming(true);
         setStatus(t("screen.native_start"));
+        setDotState("active");
+        return;
       }
-
       if (eventType === "native_unsubscribed") {
+        nativeWantedRef.current = false;
         setNativeStreaming(false);
+        setNativeFrameUrl("");
+        setStatus(t("terminal.connected"));
+        setDotState("idle");
+        return;
       }
-
       if (eventType === "native_frame") {
         const frame = String(payload.jpeg_base64 ?? "");
         if (frame.length > 0) {
           setNativeFrameUrl(`data:image/jpeg;base64,${frame}`);
         }
       }
-
-      if (eventType === "signal") {
-        const signalType = String(payload.signal_type ?? "");
-        const fromPeerId = String(payload.from_peer_id ?? "");
-        const raw = String(payload.payload ?? "{}");
-        const signalData = JSON.parse(raw) as RTCSessionDescriptionInit | RTCIceCandidateInit;
-
-        const pc = setupPc();
-
-        if (signalType === "offer") {
-          await pc.setRemoteDescription(signalData as RTCSessionDescriptionInit);
-          const answer = await pc.createAnswer();
-          await pc.setLocalDescription(answer);
-          send({
-            action: "signal",
-            target_peer_id: fromPeerId,
-            signal_type: "answer",
-            payload: JSON.stringify(answer),
-          });
-        } else if (signalType === "answer") {
-          await pc.setRemoteDescription(signalData as RTCSessionDescriptionInit);
-        } else if (signalType === "candidate") {
-          await pc.addIceCandidate(signalData as RTCIceCandidateInit);
-        }
-      }
     };
   };
 
-  const shareScreen = async () => {
-    let stream: MediaStream;
-    try {
-      stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
-    } catch (err) {
-      toast.error(String((err as Error)?.message ?? t("toast.request_failed")));
+  const toggleNativeStreaming = () => {
+    const nextWanted = !nativeWantedRef.current;
+    nativeWantedRef.current = nextWanted;
+    setDotState(nextWanted ? "connecting" : "idle");
+
+    const ws = wsRef.current;
+    if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+      if (!nextWanted) {
+        setNativeStreaming(false);
+        setNativeFrameUrl("");
+        setDotState("idle");
+        return;
+      }
+      connectWs();
       return;
     }
-    localStreamRef.current = stream;
-    if (localVideoRef.current) {
-      localVideoRef.current.srcObject = stream;
+
+    if (ws.readyState === WebSocket.OPEN) {
+      send({ action: nextWanted ? "native_subscribe" : "native_unsubscribe" });
+      if (!nextWanted) {
+        setNativeStreaming(false);
+        setNativeFrameUrl("");
+        setDotState("idle");
+      }
+      return;
     }
 
-    const pc = setupPc();
-    stream.getTracks().forEach((track) => pc.addTrack(track, stream));
-
-    if (peers.length > 0) {
-      const targetPeer = peers[0];
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      send({
-        action: "signal",
-        target_peer_id: targetPeer,
-        signal_type: "offer",
-        payload: JSON.stringify(offer),
-      });
-      setStatus(`${t("screen.share")} -> ${targetPeer}`);
-    } else {
-      setStatus(t("screen.share"));
+    if (!nextWanted) {
+      setNativeStreaming(false);
+      setNativeFrameUrl("");
+      setDotState("idle");
     }
-  };
-
-  const startNative = () => {
-    send({ action: "native_subscribe" });
-  };
-
-  const stopNative = () => {
-    send({ action: "native_unsubscribe" });
-    setNativeStreaming(false);
   };
 
   const toggleNativeFullscreen = async () => {
@@ -305,41 +243,41 @@ export default function ScreenPage({ session }: Props) {
   };
 
   return (
-    <section className="rounded-3xl bg-white/70 p-4 shadow-soft ring-1 ring-slate-200/70 backdrop-blur dark:bg-slate-900/55 dark:ring-slate-800/70">
+    <section className="flex h-full min-h-[460px] flex-col rounded-3xl bg-white/70 p-4 shadow-soft ring-1 ring-slate-200/70 backdrop-blur dark:bg-slate-900/55 dark:ring-slate-800/70">
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <h2 className="inline-flex items-center gap-2 text-base font-semibold tracking-tight text-slate-900 dark:text-slate-50">
-          <FiMonitor /> {t("screen.title")}
-        </h2>
+        <div>
+          <div className="inline-flex items-center gap-2">
+            <h2 className="inline-flex items-center gap-2 text-base font-semibold tracking-tight text-slate-900 dark:text-slate-50">
+              <FiMonitor />
+              {t("screen.title")}
+            </h2>
+            <span className="inline-flex h-2.5 w-2.5 shrink-0 items-center justify-center">
+              <span
+                className={cn(
+                  "block h-2.5 w-2.5 rounded-full border border-white/90 transition-all duration-300 ease-out dark:border-slate-900/90",
+                  dotState === "active" &&
+                    "scale-100 bg-emerald-500 shadow-[0_0_0_3px_rgba(16,185,129,0.20)]",
+                  dotState === "connecting" && "animate-pulse scale-95 bg-amber-400",
+                  dotState === "error" && "scale-100 bg-rose-500 shadow-[0_0_0_3px_rgba(244,63,94,0.16)]",
+                  dotState === "idle" && "scale-90 bg-slate-400 dark:bg-slate-500"
+                )}
+                title={status}
+                aria-label={`${t("terminal.status")}: ${status}`}
+              />
+            </span>
+          </div>
+          <div className="mt-1 text-xs font-semibold text-slate-500 dark:text-slate-400">
+            {t("screen.native_stream")}
+          </div>
+        </div>
 
         <div className="flex w-full flex-col gap-2 sm:flex-row sm:items-center lg:w-auto lg:flex-row lg:flex-wrap">
-          <input
-            value={roomId}
-            onChange={(event) => setRoomId(event.target.value)}
-            className="h-10 w-full rounded-2xl border border-slate-200 bg-white px-3 text-sm text-slate-900 shadow-sm outline-none placeholder:text-slate-400 focus:border-slate-300 dark:border-slate-800 dark:bg-slate-950/40 dark:text-slate-50 dark:placeholder:text-slate-500 dark:focus:border-slate-700 sm:w-52"
-          />
           <button
             className="inline-flex h-10 items-center justify-center gap-2 rounded-2xl bg-slate-900 px-4 text-sm font-semibold text-white shadow-sm hover:bg-slate-800 dark:bg-slate-50 dark:text-slate-900 dark:hover:bg-white"
-            onClick={joinRoom}
+            onClick={toggleNativeStreaming}
           >
-            <FiSend /> {t("screen.join")}
-          </button>
-          <button
-            className="inline-flex h-10 items-center justify-center gap-2 rounded-2xl bg-slate-100 px-4 text-sm font-semibold text-slate-700 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-100 dark:hover:bg-slate-700"
-            onClick={() => void shareScreen()}
-          >
-            <FiCast /> {t("screen.share")}
-          </button>
-          <button
-            className="inline-flex h-10 items-center justify-center gap-2 rounded-2xl bg-slate-100 px-4 text-sm font-semibold text-slate-700 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-100 dark:hover:bg-slate-700"
-            onClick={startNative}
-          >
-            <FiPlay /> {t("screen.native_start")}
-          </button>
-          <button
-            className="inline-flex h-10 items-center justify-center gap-2 rounded-2xl bg-slate-100 px-4 text-sm font-semibold text-slate-700 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-100 dark:hover:bg-slate-700"
-            onClick={stopNative}
-          >
-            <FiPause /> {t("screen.native_stop")}
+            {nativeStreaming ? <FiPause /> : <FiPlay />}{" "}
+            {nativeStreaming ? t("screen.native_stop") : t("screen.native_start")}
           </button>
           <button
             className="inline-flex h-10 items-center justify-center gap-2 rounded-2xl bg-slate-100 px-4 text-sm font-semibold text-slate-700 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-100 dark:hover:bg-slate-700"
@@ -351,49 +289,11 @@ export default function ScreenPage({ session }: Props) {
         </div>
       </div>
 
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <span className="inline-flex items-center gap-2 rounded-full bg-white/70 px-3 py-1 text-xs font-semibold text-slate-700 shadow-sm ring-1 ring-slate-200/60 dark:bg-slate-950/30 dark:text-slate-100 dark:ring-slate-800/70">
-          {t("terminal.status")}: {status}
-        </span>
-        {peerId ? (
-          <span className="inline-flex items-center gap-2 rounded-full bg-white/70 px-3 py-1 font-mono text-[11px] text-slate-600 shadow-sm ring-1 ring-slate-200/60 dark:bg-slate-950/30 dark:text-slate-200 dark:ring-slate-800/70">
-            {t("screen.me")}: {peerId}
-          </span>
-        ) : null}
-        <span className="inline-flex items-center gap-2 rounded-full bg-white/70 px-3 py-1 text-xs font-semibold text-slate-700 shadow-sm ring-1 ring-slate-200/60 dark:bg-slate-950/30 dark:text-slate-100 dark:ring-slate-800/70">
-          {t("screen.peers")}: {peers.length}
-        </span>
-        <span className="inline-flex items-center gap-2 rounded-full bg-white/70 px-3 py-1 text-xs font-semibold text-slate-700 shadow-sm ring-1 ring-slate-200/60 dark:bg-slate-950/30 dark:text-slate-100 dark:ring-slate-800/70">
-          {t("screen.native")}: {nativeStreaming ? t("common.on") : t("common.off")}
-        </span>
-        <span className="inline-flex items-center gap-2 rounded-full bg-white/70 px-3 py-1 text-xs font-semibold text-slate-700 shadow-sm ring-1 ring-slate-200/60 dark:bg-slate-950/30 dark:text-slate-100 dark:ring-slate-800/70">
-          {t("screen.keyboard")}: {nativeInputFocused ? t("common.on") : t("common.off")}
-        </span>
-      </div>
-
-      <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-2">
-        <div className="rounded-3xl bg-white/70 p-3 shadow-sm ring-1 ring-slate-200/60 dark:bg-slate-950/20 dark:ring-slate-800/70">
-          <div className="mb-2 text-xs font-semibold text-slate-500 dark:text-slate-400">
-            {t("screen.webrtc_source")}
-          </div>
-          <video ref={localVideoRef} autoPlay playsInline muted className="h-[260px] w-full rounded-2xl bg-slate-950 object-contain" />
-        </div>
-        <div className="rounded-3xl bg-white/70 p-3 shadow-sm ring-1 ring-slate-200/60 dark:bg-slate-950/20 dark:ring-slate-800/70">
-          <div className="mb-2 text-xs font-semibold text-slate-500 dark:text-slate-400">
-            {t("screen.webrtc_sink")}
-          </div>
-          <video ref={remoteVideoRef} autoPlay playsInline className="h-[260px] w-full rounded-2xl bg-slate-950 object-contain" />
-        </div>
-      </div>
-
-      <div className="mt-4">
-        <div className="mb-2 text-xs font-semibold text-slate-500 dark:text-slate-400">
-          {t("screen.native_stream")}
-        </div>
+      <div className="mt-4 flex min-h-0 flex-1 flex-col">
         <div
           ref={nativeSurfaceRef}
           className={cn(
-            "native-surface rounded-2xl bg-slate-950 shadow-sm ring-1 ring-slate-200/70 outline-none dark:ring-slate-800/70",
+            "native-surface min-h-0 flex-1 rounded-2xl bg-slate-950 shadow-sm ring-1 ring-slate-200/70 outline-none dark:ring-slate-800/70",
             nativeInputFocused && "ring-2 ring-slate-900/70 dark:ring-slate-50/70"
           )}
           tabIndex={0}
@@ -406,7 +306,7 @@ export default function ScreenPage({ session }: Props) {
           {nativeFrameUrl ? (
             <img
               src={nativeFrameUrl}
-              className="h-[320px] w-full select-none rounded-2xl object-contain"
+              className="block h-full w-full select-none rounded-2xl object-contain"
               alt="native screen frame"
               onMouseMove={onNativeMouseMove}
               onClick={onNativeClick}
@@ -415,7 +315,7 @@ export default function ScreenPage({ session }: Props) {
               draggable={false}
             />
           ) : (
-            <div className="grid h-[320px] place-items-center rounded-2xl bg-slate-950 text-sm text-slate-300">
+            <div className="grid h-full w-full place-items-center rounded-2xl bg-slate-950 text-sm text-slate-300">
               {nativeStreaming ? t("screen.native_wait") : t("screen.native_start_hint")}
             </div>
           )}

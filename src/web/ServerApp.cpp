@@ -135,7 +135,13 @@ int JsonInt(const std::optional<json>& payload, const char* key, int fallback = 
 ServerApp::ServerApp(core::AppConfig config)
     : config_(std::move(config)),
       audit_logger_(config_.audit_log_path),
-      file_service_(config_.workspace_root) {}
+      file_service_(config_.workspace_root) {
+#if FERRYMAN_WITH_LIBHV
+  audit_logger_.SetRealtimeCallback([this](const std::string& serialized_entry) {
+    BroadcastLogEntry(serialized_entry);
+  });
+#endif
+}
 
 ServerApp::~ServerApp() {
   Stop();
@@ -149,6 +155,9 @@ bool ServerApp::Start() {
   if (running_.exchange(true)) {
     return true;
   }
+
+  // WebSocket and HTTP share one listener.
+  config_.ws_port = config_.http_port;
 
   if (!RegisterHttpRoutes() || !RegisterWsHandlers()) {
     audit_logger_.AppendSystem("error", "server.start", "failed to register HTTP/WS routes");
@@ -169,20 +178,12 @@ bool ServerApp::Start() {
   });
 
   http_server_.service = &http_service_;
+  http_server_.ws = &ws_service_;
   std::snprintf(http_server_.host, sizeof(http_server_.host), "%s", config_.http_host.c_str());
   http_server_.port = config_.http_port;
 
-  ws_server_.registerWebSocketService(&ws_service_);
-  ws_server_.setHost(config_.http_host.c_str());
-  ws_server_.setPort(config_.ws_port);
-  ws_server_.setThreadNum(1);
-
   http_thread_ = std::thread([this]() {
     http_server_run(&http_server_);
-  });
-
-  ws_thread_ = std::thread([this]() {
-    ws_server_.run();
   });
 
   native_screen_thread_ = std::thread([this]() {
@@ -204,13 +205,9 @@ void ServerApp::Stop() {
   was_running = running_.exchange(false);
   if (was_running) {
     http_server_stop(&http_server_);
-    ws_server_.stop();
 
     if (http_thread_.joinable()) {
       http_thread_.join();
-    }
-    if (ws_thread_.joinable()) {
-      ws_thread_.join();
     }
   }
 
@@ -668,6 +665,8 @@ void ServerApp::HandleWsOpen(const WebSocketChannelPtr& channel, const HttpReque
     channel_type = "terminal";
   } else if (ws_path == "/ws/webrtc") {
     channel_type = "webrtc";
+  } else if (ws_path == "/ws/logs") {
+    channel_type = "logs";
   } else {
     audit_logger_.Append(session->token, "ws.open.reject", "unknown path: " + req->path);
     channel->send(api::Error("unknown websocket path"));
@@ -690,6 +689,14 @@ void ServerApp::HandleWsOpen(const WebSocketChannelPtr& channel, const HttpReque
       {"event", "connected", false},
       {"channel", channel_type, false},
   }));
+
+  if (channel_type == "logs") {
+    const std::string snapshot = api::Success({
+        {"event", "logs_snapshot", false},
+        {"items", audit_logger_.Tail(300), true},
+    });
+    channel->send(snapshot);
+  }
 }
 
 void ServerApp::HandleWsMessage(const WebSocketChannelPtr& channel, const std::string& message) {
@@ -708,6 +715,8 @@ void ServerApp::HandleWsMessage(const WebSocketChannelPtr& channel, const std::s
     HandleTerminalWsMessage(key, message);
   } else if (channel_type == "webrtc") {
     HandleWebRtcWsMessage(key, message);
+  } else if (channel_type == "logs") {
+    HandleLogsWsMessage(key, message);
   } else {
     audit_logger_.AppendSystem("warn", "ws.message.reject", "unknown channel type");
   }
@@ -911,6 +920,30 @@ void ServerApp::BroadcastTerminalOutput(const std::string& terminal_id, const st
       {"data", util::Base64Encode(chunk), false},
   });
 
+  for (auto& channel : channels) {
+    channel->send(payload);
+  }
+}
+
+void ServerApp::BroadcastLogEntry(const std::string& serialized_entry) {
+  std::vector<WebSocketChannelPtr> channels;
+  {
+    std::lock_guard<std::mutex> lock(ws_mu_);
+    for (const auto& [_, client] : ws_clients_) {
+      if (client.channel_type == "logs" && client.channel) {
+        channels.push_back(client.channel);
+      }
+    }
+  }
+
+  if (channels.empty()) {
+    return;
+  }
+
+  const std::string payload = api::Success({
+      {"event", "log_entry", false},
+      {"item", serialized_entry, true},
+  });
   for (auto& channel : channels) {
     channel->send(payload);
   }
@@ -1128,6 +1161,43 @@ void ServerApp::HandleWebRtcWsMessage(std::uintptr_t channel_key, const std::str
 
   SendToWs(channel_key, api::Error("unknown webrtc action"));
   audit_logger_.Append(client.session_token, "webrtc.ws.invalid_action", action);
+}
+
+void ServerApp::HandleLogsWsMessage(std::uintptr_t channel_key, const std::string& message) {
+  const auto payload = ParseJsonOrNull(message);
+  if (!payload.has_value() || !payload->is_object()) {
+    SendToWs(channel_key, api::Error("invalid json payload"));
+    return;
+  }
+
+  WsClient client;
+  {
+    std::lock_guard<std::mutex> lock(ws_mu_);
+    auto it = ws_clients_.find(channel_key);
+    if (it == ws_clients_.end()) {
+      return;
+    }
+    client = it->second;
+  }
+
+  auto session = session_manager_.GetSession(client.session_token);
+  if (!session.has_value()) {
+    SendToWs(channel_key, api::Error("session expired", "unauthorized"));
+    return;
+  }
+  (void)session;
+
+  const std::string action = JsonString(payload, "action", "tail");
+  if (action == "tail" || action == "snapshot") {
+    const int lines = std::clamp(JsonInt(payload, "lines", 300), 1, 2000);
+    SendToWs(channel_key, api::Success({
+        {"event", "logs_snapshot", false},
+        {"items", audit_logger_.Tail(static_cast<size_t>(lines)), true},
+    }));
+    return;
+  }
+
+  SendToWs(channel_key, api::Error("unknown logs action"));
 }
 
 #endif

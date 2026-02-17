@@ -160,8 +160,13 @@ export async function getScreenCapabilities(token: string) {
   );
 }
 
-export function wsUrl(session: SessionInfo, path: "/ws/terminal" | "/ws/webrtc"): string {
+export function wsUrl(session: SessionInfo, path: "/ws/terminal" | "/ws/webrtc" | "/ws/logs"): string {
+  if (import.meta.env.DEV) {
+    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+    return `${protocol}://${window.location.host}${path}?token=${encodeURIComponent(session.token)}`;
+  }
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
   const host = window.location.hostname;
-  return `${protocol}://${host}:${session.wsPort}${path}?token=${encodeURIComponent(session.token)}`;
+  const port = Number.isFinite(session.httpPort) ? session.httpPort : session.wsPort;
+  return `${protocol}://${host}:${port}${path}?token=${encodeURIComponent(session.token)}`;
 }

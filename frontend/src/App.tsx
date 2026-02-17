@@ -44,6 +44,24 @@ const navItems: NavItem[] = [
 ];
 
 const SESSION_KEY = "ferryman.session";
+const SIDEBAR_COLLAPSED_KEY = "ferryman.sidebar.collapsed";
+const DEFAULT_TAB: TabKey = "files";
+
+const VALID_TABS: TabKey[] = ["files", "terminal", "tasks", "screen", "logs"];
+
+function isTabKey(value: string): value is TabKey {
+  return VALID_TABS.includes(value as TabKey);
+}
+
+function tabFromHash(hash: string): TabKey | null {
+  const normalized = hash.replace(/^#\/?/, "").trim();
+  if (!normalized) return null;
+  return isTabKey(normalized) ? normalized : null;
+}
+
+function hashForTab(tab: TabKey) {
+  return `#/${tab}`;
+}
 
 function loadStoredSession(): SessionInfo | null {
   const raw = localStorage.getItem(SESSION_KEY);
@@ -68,10 +86,17 @@ export default function App() {
   const { theme, toggle: toggleTheme } = useTheme();
 
   const [session, setSession] = useState<SessionInfo | null>(() => loadStoredSession());
-  const [activeTab, setActiveTab] = useState<TabKey>("files");
+  const [activeTab, setActiveTab] = useState<TabKey>(() => {
+    if (typeof window === "undefined") return DEFAULT_TAB;
+    return tabFromHash(window.location.hash) ?? DEFAULT_TAB;
+  });
   const [loadingLogin, setLoadingLogin] = useState(false);
   const [navOpen, setNavOpen] = useState(false);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    if (typeof window === "undefined") return false;
+    const raw = window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY);
+    return raw === "1" || raw === "true";
+  });
   const [search, setSearch] = useState("");
 
   useEffect(() => {
@@ -90,6 +115,38 @@ export default function App() {
     window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized as EventListener);
     return () => window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized as EventListener);
   }, [t]);
+
+  useEffect(() => {
+    const onHashChange = () => {
+      const next = tabFromHash(window.location.hash);
+      if (next) {
+        setActiveTab(next);
+      }
+    };
+    window.addEventListener("hashchange", onHashChange);
+
+    const initial = tabFromHash(window.location.hash);
+    if (initial) {
+      setActiveTab(initial);
+    } else {
+      window.history.replaceState(null, "", hashForTab(activeTab));
+    }
+
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, sidebarCollapsed ? "1" : "0");
+  }, [sidebarCollapsed]);
+
+  const goTab = (tab: TabKey) => {
+    setActiveTab(tab);
+    const nextHash = hashForTab(tab);
+    if (window.location.hash !== nextHash) {
+      window.location.hash = nextHash;
+    }
+  };
 
   const doLogin = async (accessKey: string) => {
     setLoadingLogin(true);
@@ -126,7 +183,7 @@ export default function App() {
       case "screen":
         return <ScreenPage session={session} />;
       case "logs":
-        return <LogsPage token={session.token} />;
+        return <LogsPage session={session} />;
       default:
         return null;
     }
@@ -165,7 +222,7 @@ export default function App() {
                     activeTab === item.key &&
                       "bg-slate-900 text-white hover:bg-slate-900 dark:bg-slate-50 dark:text-slate-900 dark:hover:bg-slate-50"
                   )}
-                  onClick={() => setActiveTab(item.key)}
+                  onClick={() => goTab(item.key)}
                   title={t(item.labelKey)}
                 >
                   {item.icon}
@@ -196,7 +253,7 @@ export default function App() {
                         activeTab === item.key &&
                           "bg-slate-900 text-white hover:bg-slate-900 dark:bg-slate-50 dark:text-slate-900 dark:hover:bg-slate-50"
                       )}
-                      onClick={() => setActiveTab(item.key)}
+                      onClick={() => goTab(item.key)}
                     >
                       <span className="text-base">{item.icon}</span>
                       <span>{t(item.labelKey)}</span>
@@ -218,7 +275,7 @@ export default function App() {
           </aside>
           ) : null}
 
-          <main className="min-w-0">
+          <main className="min-w-0 flex h-[calc(100vh-2rem)] flex-col overflow-hidden">
             <header className="sticky top-0 z-20">
               <div className="rounded-3xl bg-white/70 px-3 py-2 shadow-soft ring-1 ring-slate-200/70 backdrop-blur dark:bg-slate-900/55 dark:ring-slate-800/70">
                 <div className="flex items-center gap-3">
@@ -292,7 +349,7 @@ export default function App() {
               </div>
             </header>
 
-            <div className="mt-4">{page}</div>
+            <div className="mt-4 min-h-0 flex-1 overflow-y-auto">{page}</div>
           </main>
         </div>
       </div>
@@ -345,7 +402,7 @@ export default function App() {
                         "bg-slate-900 text-white hover:bg-slate-900 dark:bg-slate-50 dark:text-slate-900 dark:hover:bg-slate-50"
                     )}
                     onClick={() => {
-                      setActiveTab(item.key);
+                      goTab(item.key);
                       setNavOpen(false);
                     }}
                   >

@@ -83,6 +83,37 @@ make run
 
 On first run, access key is printed to stdout and written to `~/.ferryman/config.ini`.
 
+## Frontend debug (split mode)
+
+Run backend and frontend in separate terminals:
+
+Terminal 1 (backend only):
+
+```bash
+make dev-backend
+```
+
+Terminal 2 (Vite dev server on `:5173`):
+
+```bash
+make dev-frontend
+```
+
+Then open `http://127.0.0.1:5173`.
+
+In dev mode, Vite proxies:
+- `/api/*` -> `http://127.0.0.1:18080`
+- `/ws/*` -> `ws://127.0.0.1:18080`
+
+Override proxy targets if needed:
+
+```bash
+cd frontend
+VITE_BACKEND_HTTP_URL=http://127.0.0.1:28080 \
+VITE_BACKEND_WS_URL=ws://127.0.0.1:28080 \
+npm run dev -- --host
+```
+
 ## One-command release build
 
 ```bash

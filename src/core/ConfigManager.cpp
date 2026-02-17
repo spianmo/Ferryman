@@ -98,6 +98,11 @@ bool ConfigManager::LoadFromDisk(const std::filesystem::path& path) {
       config_.ws_port = std::stoi(value);
     }
   }
+  if (config_.http_port <= 0) {
+    config_.http_port = 18080;
+  }
+  // WebSocket and HTTP now share one listener/port.
+  config_.ws_port = config_.http_port;
   return true;
 }
 
@@ -111,7 +116,7 @@ bool ConfigManager::WriteDefaultConfig(const std::filesystem::path& path, const 
   file << "access_key=" << access_key << '\n';
   file << "http_host=0.0.0.0\n";
   file << "http_port=18080\n";
-  file << "ws_port=18081\n";
+  file << "ws_port=18080\n";
   return true;
 }
 

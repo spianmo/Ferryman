@@ -1,140 +1,135 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { FiTerminal, FiPower, FiLink2 } from "react-icons/fi";
 import { Terminal } from "xterm";
 import { FitAddon } from "xterm-addon-fit";
 import "xterm/css/xterm.css";
 
 import type { SessionInfo } from "../types";
-import { emitUnauthorized, wsUrl } from "../api/client";
 import { useI18n } from "../i18n";
 import { useTheme } from "../theme";
 import { decodeBase64Utf8, encodeBase64Utf8 } from "../util/codec";
+import { getTerminalSocket, type TerminalSocketStatus } from "../ws/terminalSocket";
 
 type Props = {
   session: SessionInfo;
 };
 
+function terminalTheme(mode: "light" | "dark") {
+  return mode === "dark"
+    ? { background: "#0b1220", foreground: "#e5e7eb", cursor: "#60a5fa" }
+    : { background: "#ffffff", foreground: "#0b1220", cursor: "#1d4ed8" };
+}
+
 export default function TerminalPage({ session }: Props) {
   const { t } = useI18n();
   const { theme } = useTheme();
+  const themeRef = useRef(theme);
 
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
-  const wsRef = useRef<WebSocket | null>(null);
-  const [status, setStatus] = useState<{ kind: "disconnected" | "connecting" | "connected" | "closed" | "failed" | "error"; message?: string }>({ kind: "disconnected" });
+  const [status, setStatus] = useState<TerminalSocketStatus>({ kind: "disconnected" });
   const [terminalId, setTerminalId] = useState("");
 
   useEffect(() => {
     if (!hostRef.current) return;
 
-    const darkTheme = {
-      background: "#0b1220",
-      foreground: "#e5e7eb",
-      cursor: "#60a5fa",
-    };
-    const lightTheme = {
-      background: "#ffffff",
-      foreground: "#0b1220",
-      cursor: "#1d4ed8",
-    };
+    let disposed = false;
+    let initialFitTimer: number | null = null;
+    let onResize: (() => void) | null = null;
+    let dataDisposable: { dispose: () => void } | null = null;
 
-    const terminal = new Terminal({
-      convertEol: true,
-      cursorBlink: true,
-      fontFamily: "IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace",
-      fontSize: 13,
-      theme: theme === "dark" ? darkTheme : lightTheme,
-    });
-    const fitAddon = new FitAddon();
-    terminal.loadAddon(fitAddon);
-    terminal.open(hostRef.current);
-    fitAddon.fit();
+    const initTimer = window.setTimeout(() => {
+      if (disposed) return;
+      const host = hostRef.current;
+      if (!host) return;
 
-    const disposable = terminal.onData((data) => {
-      const ws = wsRef.current;
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
-      ws.send(JSON.stringify({ action: "input", data: encodeBase64Utf8(data) }));
-    });
+      const terminal = new Terminal({
+        convertEol: true,
+        cursorBlink: true,
+        fontFamily: "IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace",
+        fontSize: 13,
+        theme: terminalTheme(themeRef.current),
+      });
+      const fitAddon = new FitAddon();
+      terminal.loadAddon(fitAddon);
+      terminal.open(host);
 
-    termRef.current = terminal;
-    fitRef.current = fitAddon;
+      const safeFit = () => {
+        if (disposed) return;
+        try {
+          fitAddon.fit();
+        } catch {
+          // xterm can race with React StrictMode throwaway mounts in dev.
+        }
+      };
+      const syncResize = () => {
+        getTerminalSocket().send({ action: "resize", cols: terminal.cols, rows: terminal.rows });
+      };
+      initialFitTimer = window.setTimeout(() => {
+        // Delay initial fit so React StrictMode's throwaway mount can cleanly unmount.
+        safeFit();
+        syncResize();
+      }, 0);
 
-    const onResize = () => {
-      fitAddon.fit();
-      const ws = wsRef.current;
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ action: "resize", cols: terminal.cols, rows: terminal.rows }));
-      }
-    };
-    window.addEventListener("resize", onResize);
+      dataDisposable = terminal.onData((data) => {
+        getTerminalSocket().send({ action: "input", data: encodeBase64Utf8(data) });
+      });
+
+      termRef.current = terminal;
+      fitRef.current = fitAddon;
+
+      onResize = () => {
+        safeFit();
+        syncResize();
+      };
+      window.addEventListener("resize", onResize);
+    }, 0);
 
     return () => {
-      window.removeEventListener("resize", onResize);
-      disposable.dispose();
-      terminal.dispose();
+      disposed = true;
+      window.clearTimeout(initTimer);
+      if (initialFitTimer !== null) {
+        window.clearTimeout(initialFitTimer);
+      }
+      if (onResize) {
+        window.removeEventListener("resize", onResize);
+      }
+      dataDisposable?.dispose();
+
+      const terminal = termRef.current;
       termRef.current = null;
       fitRef.current = null;
+      if (terminal) {
+        // xterm internally schedules viewport sync with setTimeout while opening.
+        // Dispose one tick later to avoid reading renderer dimensions after disposal.
+        window.setTimeout(() => terminal.dispose(), 0);
+      }
     };
   }, []);
 
   useEffect(() => {
+    themeRef.current = theme;
     const terminal = termRef.current;
     if (!terminal) return;
-    terminal.setOption(
-      "theme",
-      theme === "dark"
-        ? { background: "#0b1220", foreground: "#e5e7eb", cursor: "#60a5fa" }
-        : { background: "#ffffff", foreground: "#0b1220", cursor: "#1d4ed8" }
-    );
+    terminal.options.theme = terminalTheme(theme);
   }, [theme]);
 
   useEffect(() => {
-    return () => {
-      wsRef.current?.close();
-      wsRef.current = null;
-    };
-  }, []);
+    const socket = getTerminalSocket();
+    const unsubscribeStatus = socket.subscribeStatus((next) => {
+      setStatus(next);
+    });
 
-  const connect = () => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      return;
-    }
-
-    const ws = new WebSocket(wsUrl(session, "/ws/terminal"));
-    wsRef.current = ws;
-    setStatus({ kind: "connecting" });
-
-    ws.onopen = () => {
-      setStatus({ kind: "connected" });
-    };
-
-    ws.onmessage = (event) => {
-      let payload: Record<string, unknown>;
-      try {
-        payload = JSON.parse(event.data as string) as Record<string, unknown>;
-      } catch {
-        return;
-      }
-
-      if (payload.ok === false) {
-        if (String(payload.code ?? "") === "unauthorized") {
-          const reason = payload.error;
-          emitUnauthorized({ reason: typeof reason === "string" ? reason : undefined });
-        }
-        setStatus({ kind: "error", message: String(payload.error ?? "WS error") });
-        return;
-      }
-
+    const unsubscribeMessages = socket.subscribeMessages((payload) => {
       const eventType = String(payload.event ?? "");
       if (eventType === "connected") {
         const cols = termRef.current?.cols ?? 120;
         const rows = termRef.current?.rows ?? 30;
-        ws.send(JSON.stringify({ action: "open", cols, rows }));
+        socket.send({ action: "open", cols, rows });
       } else if (eventType === "terminal_open") {
         const id = String(payload.terminal_id ?? "");
         setTerminalId(id);
-        termRef.current?.writeln(`\r\n[session: ${id}]`);
       } else if (eventType === "terminal_output") {
         const data = String(payload.data ?? "");
         termRef.current?.write(decodeBase64Utf8(data));
@@ -142,31 +137,33 @@ export default function TerminalPage({ session }: Props) {
         termRef.current?.writeln("\r\n[terminal closed]");
         setTerminalId("");
       }
-    };
+    });
 
-    ws.onclose = () => {
-      setStatus({ kind: "closed" });
+    socket.connect(session);
+    return () => {
+      unsubscribeMessages();
+      unsubscribeStatus();
+      socket.disconnect();
+      setTerminalId("");
     };
+  }, [session]);
 
-    ws.onerror = () => {
-      setStatus({ kind: "failed" });
-    };
-  };
+  const connect = useCallback(() => {
+    getTerminalSocket().connect(session);
+  }, [session]);
 
   const close = () => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify({ action: "close" }));
-    ws.close();
-    wsRef.current = null;
-    setStatus({ kind: "disconnected" });
+    const socket = getTerminalSocket();
+    socket.send({ action: "close" });
+    socket.disconnect();
+    setTerminalId("");
   };
 
   const statusText =
     status.kind === "error" && status.message ? status.message : t(`terminal.${status.kind}`);
 
   return (
-    <section className="rounded-3xl bg-white/70 p-4 shadow-soft ring-1 ring-slate-200/70 backdrop-blur dark:bg-slate-900/55 dark:ring-slate-800/70">
+    <section className="flex h-full min-h-[460px] flex-col overflow-y-auto rounded-3xl bg-white/70 p-4 shadow-soft ring-1 ring-slate-200/70 backdrop-blur dark:bg-slate-900/55 dark:ring-slate-800/70">
       <div className="flex items-start justify-between gap-3">
         <h2 className="inline-flex items-center gap-2 text-base font-semibold tracking-tight text-slate-900 dark:text-slate-50">
           <FiTerminal /> {t("terminal.title")}
@@ -200,7 +197,7 @@ export default function TerminalPage({ session }: Props) {
 
       <div
         ref={hostRef}
-        className="mt-4 h-[560px] overflow-hidden rounded-2xl bg-white shadow-sm ring-1 ring-slate-200/70 dark:bg-slate-950/40 dark:ring-slate-800/70"
+        className="mt-4 min-h-0 flex-1 overflow-hidden rounded-2xl bg-white shadow-sm ring-1 ring-slate-200/70 dark:bg-slate-950/40 dark:ring-slate-800/70"
       />
     </section>
   );

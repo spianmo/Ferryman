@@ -18,7 +18,7 @@ ifneq ("$(wildcard $(VCPKG_TOOLCHAIN))","")
 	CMAKE_RELEASE_ARGS += -DCMAKE_TOOLCHAIN_FILE=$(VCPKG_TOOLCHAIN)
 endif
 
-.PHONY: configure build run clean frontend dev-frontend dev release deps deps-proxy
+.PHONY: configure build run run-backend dev-backend clean frontend dev-frontend dev release deps deps-proxy
 
 configure:
 	$(CMAKE) -S . -B $(BUILD_DIR) $(CMAKE_DEBUG_ARGS)
@@ -28,6 +28,11 @@ build: configure
 
 run: build
 	./$(BUILD_DIR)/Ferryman
+
+run-backend: build
+	./$(BUILD_DIR)/Ferryman
+
+dev-backend: run-backend
 
 frontend:
 	@mkdir -p $(NPM_CACHE_DIR)

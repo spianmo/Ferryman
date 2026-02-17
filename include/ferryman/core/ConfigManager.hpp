@@ -9,7 +9,7 @@ namespace ferryman::core {
 struct AppConfig {
   std::string http_host = "0.0.0.0";
   int http_port = 18080;
-  int ws_port = 18081;
+  int ws_port = 18080;
   std::string access_key;
   std::filesystem::path workspace_root;
   std::filesystem::path config_path;

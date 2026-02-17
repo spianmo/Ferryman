@@ -48,13 +48,13 @@ export default function ToastHost() {
         <div
           key={item.id}
           className={cn(
-            "pointer-events-auto flex items-start gap-3 rounded-2xl bg-white/90 p-3 shadow-soft ring-1 ring-slate-200/70 backdrop-blur",
+            "pointer-events-auto flex items-center gap-3 rounded-2xl bg-white/90 p-3 shadow-soft ring-1 ring-slate-200/70 backdrop-blur",
             "dark:bg-slate-900/80 dark:ring-slate-800/70"
           )}
         >
-          <div className="mt-0.5 text-lg">{iconFor(item.kind)}</div>
+          <div className="text-lg">{iconFor(item.kind)}</div>
           <div className="min-w-0 flex-1">
-            <div className="break-words text-sm font-semibold text-slate-900 dark:text-slate-50">
+            <div className="break-words text-sm font-semibold leading-5 text-slate-900 dark:text-slate-50">
               {item.message}
             </div>
           </div>
@@ -70,4 +70,3 @@ export default function ToastHost() {
     </div>
   );
 }
-

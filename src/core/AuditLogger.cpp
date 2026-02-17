@@ -5,6 +5,7 @@
 
 #include <iostream>
 #include <sstream>
+#include <utility>
 
 namespace ferryman::core {
 
@@ -50,8 +51,15 @@ bool AuditLogger::Append(const std::string& session_token, const std::string& ac
   const std::string serialized = BuildEntry("info", session_token, action, detail);
   PrintImmediate("info", session_token, action, detail);
 
-  std::lock_guard<std::mutex> lock(mu_);
-  PushEntry(serialized);
+  RealtimeCallback callback;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    PushEntry(serialized);
+    callback = realtime_callback_;
+  }
+  if (callback) {
+    callback(serialized);
+  }
   return true;
 }
 
@@ -61,8 +69,15 @@ bool AuditLogger::AppendSystem(const std::string& level, const std::string& acti
   const std::string serialized = BuildEntry(normalized_level, "", action, detail);
   PrintImmediate(normalized_level, "", action, detail);
 
-  std::lock_guard<std::mutex> lock(mu_);
-  PushEntry(serialized);
+  RealtimeCallback callback;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    PushEntry(serialized);
+    callback = realtime_callback_;
+  }
+  if (callback) {
+    callback(serialized);
+  }
   return true;
 }
 
@@ -83,6 +98,11 @@ std::string AuditLogger::Tail(size_t max_lines) const {
   }
   out << ']';
   return out.str();
+}
+
+void AuditLogger::SetRealtimeCallback(RealtimeCallback callback) {
+  std::lock_guard<std::mutex> lock(mu_);
+  realtime_callback_ = std::move(callback);
 }
 
 }  // namespace ferryman::core
