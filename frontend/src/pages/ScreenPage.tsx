@@ -243,44 +243,44 @@ export default function ScreenPage({ session }: Props) {
   };
 
   return (
-    <section className="flex h-full min-h-[460px] flex-col rounded-3xl bg-white/70 p-4 shadow-soft ring-1 ring-slate-200/70 backdrop-blur dark:bg-slate-900/55 dark:ring-slate-800/70">
+    <section className="flex h-full min-h-[460px] flex-col rounded-3xl bg-white/70 p-4 shadow-soft ring-1 ring-slate-200/70 backdrop-blur dark:bg-neutral-900/55 dark:ring-neutral-800/70">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <div className="inline-flex items-center gap-2">
-            <h2 className="inline-flex items-center gap-2 text-base font-semibold tracking-tight text-slate-900 dark:text-slate-50">
+            <h2 className="inline-flex items-center gap-2 text-base font-semibold tracking-tight text-slate-900 dark:text-neutral-50">
               <FiMonitor />
               {t("screen.title")}
             </h2>
             <span className="inline-flex h-2.5 w-2.5 shrink-0 items-center justify-center">
               <span
                 className={cn(
-                  "block h-2.5 w-2.5 rounded-full border border-white/90 transition-all duration-300 ease-out dark:border-slate-900/90",
+                  "block h-2.5 w-2.5 rounded-full border border-white/90 transition-all duration-300 ease-out dark:border-neutral-900/90",
                   dotState === "active" &&
                     "scale-100 bg-emerald-500 shadow-[0_0_0_3px_rgba(16,185,129,0.20)]",
                   dotState === "connecting" && "animate-pulse scale-95 bg-amber-400",
                   dotState === "error" && "scale-100 bg-rose-500 shadow-[0_0_0_3px_rgba(244,63,94,0.16)]",
-                  dotState === "idle" && "scale-90 bg-slate-400 dark:bg-slate-500"
+                  dotState === "idle" && "scale-90 bg-slate-400 dark:bg-neutral-500"
                 )}
                 title={status}
                 aria-label={`${t("terminal.status")}: ${status}`}
               />
             </span>
           </div>
-          <div className="mt-1 text-xs font-semibold text-slate-500 dark:text-slate-400">
+          <div className="mt-1 text-xs font-semibold text-slate-500 dark:text-neutral-400">
             {t("screen.native_stream")}
           </div>
         </div>
 
         <div className="flex w-full flex-col gap-2 sm:flex-row sm:items-center lg:w-auto lg:flex-row lg:flex-wrap">
           <button
-            className="inline-flex h-10 items-center justify-center gap-2 rounded-2xl bg-slate-900 px-4 text-sm font-semibold text-white shadow-sm hover:bg-slate-800 dark:bg-slate-50 dark:text-slate-900 dark:hover:bg-white"
+            className="inline-flex h-10 items-center justify-center gap-2 rounded-2xl bg-slate-900 px-4 text-sm font-semibold text-white shadow-sm hover:bg-slate-800 dark:bg-neutral-50 dark:text-neutral-900 dark:hover:bg-white"
             onClick={toggleNativeStreaming}
           >
             {nativeStreaming ? <FiPause /> : <FiPlay />}{" "}
             {nativeStreaming ? t("screen.native_stop") : t("screen.native_start")}
           </button>
           <button
-            className="inline-flex h-10 items-center justify-center gap-2 rounded-2xl bg-slate-100 px-4 text-sm font-semibold text-slate-700 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-100 dark:hover:bg-slate-700"
+            className="inline-flex h-10 items-center justify-center gap-2 rounded-2xl bg-slate-100 px-4 text-sm font-semibold text-slate-700 hover:bg-slate-200 dark:bg-neutral-800 dark:text-neutral-100 dark:hover:bg-neutral-700"
             onClick={() => void toggleNativeFullscreen()}
           >
             {nativeFullscreen ? <FiMinimize /> : <FiMaximize />}{" "}
@@ -293,8 +293,8 @@ export default function ScreenPage({ session }: Props) {
         <div
           ref={nativeSurfaceRef}
           className={cn(
-            "native-surface min-h-0 flex-1 rounded-2xl bg-slate-950 shadow-sm ring-1 ring-slate-200/70 outline-none dark:ring-slate-800/70",
-            nativeInputFocused && "ring-2 ring-slate-900/70 dark:ring-slate-50/70"
+            "native-surface min-h-0 flex-1 rounded-2xl bg-neutral-950 shadow-sm ring-1 ring-slate-200/70 outline-none dark:ring-neutral-800/70",
+            nativeInputFocused && "ring-2 ring-slate-900/70 dark:ring-neutral-50/70"
           )}
           tabIndex={0}
           onMouseDown={() => nativeSurfaceRef.current?.focus()}
@@ -315,7 +315,7 @@ export default function ScreenPage({ session }: Props) {
               draggable={false}
             />
           ) : (
-            <div className="grid h-full w-full place-items-center rounded-2xl bg-slate-950 text-sm text-slate-300">
+            <div className="grid h-full w-full place-items-center rounded-2xl bg-neutral-950 text-sm text-neutral-300">
               {nativeStreaming ? t("screen.native_wait") : t("screen.native_start_hint")}
             </div>
           )}

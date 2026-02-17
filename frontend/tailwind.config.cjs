@@ -9,7 +9,7 @@ module.exports = {
         mono: ["IBM Plex Mono", "ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
       },
       boxShadow: {
-        soft: "0 18px 48px rgba(2, 6, 23, 0.10)",
+        soft: "0 10px 24px rgba(2, 6, 23, 0.08)",
       },
     },
   },

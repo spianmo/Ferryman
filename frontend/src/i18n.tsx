@@ -41,6 +41,8 @@ const DICTS: Record<Lang, Dict> = {
 
     "files.title": "Files",
     "files.editor": "Editor",
+    "files.view_list": "List view",
+    "files.view_grid": "Grid view",
     "files.empty": "No entries.",
     "files.no_match": "No matches.",
     "files.select_file": "Select a file to view/edit.",
@@ -119,6 +121,8 @@ const DICTS: Record<Lang, Dict> = {
 
     "files.title": "文件",
     "files.editor": "编辑",
+    "files.view_list": "列表视图",
+    "files.view_grid": "网格视图",
     "files.empty": "目录为空。",
     "files.no_match": "未匹配到文件。",
     "files.select_file": "选择一个文件进行查看与编辑。",

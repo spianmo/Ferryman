@@ -13,7 +13,7 @@ type ToastItem = {
 function iconFor(kind: ToastKind) {
   if (kind === "success") return <FiCheckCircle className="text-emerald-500" />;
   if (kind === "error") return <FiXCircle className="text-rose-500" />;
-  return <FiInfo className="text-sky-500" />;
+  return <FiInfo className="text-neutral-500" />;
 }
 
 export default function ToastHost() {
@@ -49,17 +49,17 @@ export default function ToastHost() {
           key={item.id}
           className={cn(
             "pointer-events-auto flex items-center gap-3 rounded-2xl bg-white/90 p-3 shadow-soft ring-1 ring-slate-200/70 backdrop-blur",
-            "dark:bg-slate-900/80 dark:ring-slate-800/70"
+            "dark:bg-neutral-900/80 dark:ring-neutral-800/70"
           )}
         >
           <div className="text-lg">{iconFor(item.kind)}</div>
           <div className="min-w-0 flex-1">
-            <div className="break-words text-sm font-semibold leading-5 text-slate-900 dark:text-slate-50">
+            <div className="break-words text-sm font-semibold leading-5 text-slate-900 dark:text-neutral-50">
               {item.message}
             </div>
           </div>
           <button
-            className="grid h-8 w-8 place-items-center rounded-xl text-slate-500 hover:bg-slate-100 hover:text-slate-700 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-slate-50"
+            className="grid h-8 w-8 place-items-center rounded-xl text-slate-500 hover:bg-slate-100 hover:text-slate-700 dark:text-neutral-300 dark:hover:bg-neutral-800 dark:hover:text-neutral-50"
             onClick={() => setItems((prev) => prev.filter((t) => t.id !== item.id))}
             title="Close"
           >

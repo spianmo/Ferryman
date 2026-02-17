@@ -161,6 +161,7 @@ export async function getScreenCapabilities(token: string) {
 }
 
 export function wsUrl(session: SessionInfo, path: "/ws/terminal" | "/ws/webrtc" | "/ws/logs"): string {
+  // @ts-ignore
   if (import.meta.env.DEV) {
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
     return `${protocol}://${window.location.host}${path}?token=${encodeURIComponent(session.token)}`;

@@ -12,15 +12,15 @@ export default function LoginPage({ loading, onLogin }: Props) {
   const [key, setKey] = useState("");
 
   return (
-    <div className="min-h-screen bg-slate-50 px-4 py-12 dark:bg-slate-950">
+    <div className="min-h-screen bg-slate-50 px-4 py-12 dark:bg-neutral-950">
       <div className="mx-auto w-full max-w-md">
-        <div className="rounded-3xl bg-white/80 p-6 shadow-soft ring-1 ring-slate-200/70 backdrop-blur dark:bg-slate-900/60 dark:ring-slate-800/70">
+        <div className="rounded-3xl bg-white/80 p-6 shadow-soft ring-1 ring-slate-200/70 backdrop-blur dark:bg-neutral-900/60 dark:ring-neutral-800/70">
           <div className="flex items-center justify-between">
-            <h1 className="text-lg font-semibold tracking-tight text-slate-900 dark:text-slate-50">
+            <h1 className="text-lg font-semibold tracking-tight text-slate-900 dark:text-neutral-50">
               {t("login.title")}
             </h1>
           </div>
-          <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">{t("login.subtitle")}</p>
+          <p className="mt-2 text-sm text-slate-500 dark:text-neutral-400">{t("login.subtitle")}</p>
         <form
           onSubmit={async (event) => {
             event.preventDefault();
@@ -28,7 +28,7 @@ export default function LoginPage({ loading, onLogin }: Props) {
           }}
           className="mt-6 space-y-3"
         >
-          <label className="block text-sm font-semibold text-slate-800 dark:text-slate-100" htmlFor="access-key">
+          <label className="block text-sm font-semibold text-slate-800 dark:text-neutral-100" htmlFor="access-key">
             {t("login.access_key")}
           </label>
           <input
@@ -39,12 +39,12 @@ export default function LoginPage({ loading, onLogin }: Props) {
             autoComplete="off"
             required
             placeholder={t("login.placeholder")}
-            className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm outline-none placeholder:text-slate-400 focus:border-slate-300 dark:border-slate-800 dark:bg-slate-950/40 dark:text-slate-50 dark:placeholder:text-slate-500 dark:focus:border-slate-700"
+            className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm outline-none placeholder:text-slate-400 focus:border-slate-300 dark:border-neutral-800 dark:bg-neutral-950/40 dark:text-neutral-50 dark:placeholder:text-neutral-500 dark:focus:border-neutral-700"
           />
           <button
             type="submit"
             disabled={loading || key.trim().length === 0}
-            className="inline-flex w-full items-center justify-center rounded-2xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 disabled:opacity-50 dark:bg-slate-50 dark:text-slate-900 dark:hover:bg-white"
+            className="inline-flex w-full items-center justify-center rounded-2xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 disabled:opacity-50 dark:bg-neutral-50 dark:text-neutral-900 dark:hover:bg-white"
           >
             {loading ? t("login.submitting") : t("login.submit")}
           </button>

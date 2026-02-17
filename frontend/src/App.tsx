@@ -200,27 +200,27 @@ export default function App() {
       <div className="mx-auto max-w-[1560px] p-3 sm:p-4">
         <div
           className={cn(
-            "grid grid-cols-1 gap-4",
-            sidebarCollapsed ? "lg:grid-cols-[72px_1fr]" : "lg:grid-cols-[72px_280px_1fr]"
+            "grid grid-cols-1 gap-4 lg:transition-[grid-template-columns] lg:duration-300 lg:ease-in-out",
+            sidebarCollapsed ? "lg:grid-cols-[72px_0px_1fr]" : "lg:grid-cols-[72px_280px_1fr]"
           )}
         >
           <aside className="hidden lg:flex">
-            <div className="flex w-full flex-col items-center gap-2 rounded-3xl bg-white/70 p-2 shadow-soft ring-1 ring-slate-200/70 backdrop-blur dark:bg-slate-900/55 dark:ring-slate-800/70">
+            <div className="flex w-full flex-col items-center gap-2 rounded-3xl bg-white/70 p-2 shadow-soft ring-1 ring-slate-200/70 backdrop-blur dark:bg-neutral-900/55 dark:ring-neutral-800/70">
               <button
-                className="grid h-11 w-11 place-items-center rounded-2xl bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-100 dark:hover:bg-slate-700"
+                className="grid h-11 w-11 place-items-center rounded-2xl bg-slate-100 text-slate-700 transition-colors duration-200 hover:bg-slate-200 dark:bg-neutral-800 dark:text-neutral-100 dark:hover:bg-neutral-700"
                 onClick={() => setSidebarCollapsed((prev) => !prev)}
                 title="Toggle"
               >
                 <FiMenu />
               </button>
-              <div className="my-1 h-px w-10 bg-slate-200/70 dark:bg-slate-800/70" />
+              <div className="my-1 h-px w-10 bg-slate-200/70 dark:bg-neutral-800/70" />
               {navItems.map((item) => (
                 <button
                   key={item.key}
                   className={cn(
-                    "grid h-11 w-11 place-items-center rounded-2xl text-slate-700 hover:bg-slate-100 dark:text-slate-100 dark:hover:bg-slate-800",
+                    "grid h-11 w-11 place-items-center rounded-2xl text-slate-700 transition-[background-color,color,transform,box-shadow] duration-200 ease-out hover:bg-slate-100 active:scale-95 dark:text-neutral-100 dark:hover:bg-neutral-800",
                     activeTab === item.key &&
-                      "bg-slate-900 text-white hover:bg-slate-900 dark:bg-slate-50 dark:text-slate-900 dark:hover:bg-slate-50"
+                      "bg-slate-900 text-white shadow-sm hover:bg-slate-900 dark:bg-neutral-50 dark:text-neutral-900 dark:hover:bg-neutral-50"
                   )}
                   onClick={() => goTab(item.key)}
                   title={t(item.labelKey)}
@@ -231,14 +231,20 @@ export default function App() {
             </div>
           </aside>
 
-          {!sidebarCollapsed ? (
           <aside className="hidden lg:flex">
-            <div className="flex w-full min-h-[calc(100vh-2rem)] flex-col justify-between rounded-3xl bg-white/70 p-4 shadow-soft ring-1 ring-slate-200/70 backdrop-blur dark:bg-slate-900/55 dark:ring-slate-800/70">
+            <div
+              className={cn(
+                "flex w-[280px] min-w-[280px] shrink-0 min-h-[calc(100vh-2rem)] flex-col justify-between rounded-3xl bg-white/70 p-4 shadow-soft ring-1 ring-slate-200/70 backdrop-blur transition-[opacity,transform] duration-300 ease-out dark:bg-neutral-900/55 dark:ring-neutral-800/70",
+                sidebarCollapsed ? "pointer-events-none -translate-x-3 opacity-0" : "translate-x-0 opacity-100"
+              )}
+            >
               <div>
                 <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <div className="text-base font-semibold tracking-tight">{t("app.name")}</div>
-                    <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                  <div className="min-w-0">
+                    <div className="truncate whitespace-nowrap text-base font-semibold tracking-tight">
+                      {t("app.name")}
+                    </div>
+                    <div className="mt-1 truncate whitespace-nowrap text-xs text-slate-500 dark:text-neutral-400">
                       {window.location.hostname}
                     </div>
                   </div>
@@ -249,21 +255,23 @@ export default function App() {
                     <button
                       key={item.key}
                       className={cn(
-                        "flex w-full items-center gap-3 rounded-2xl border border-transparent px-3 py-2 text-left text-sm font-semibold text-slate-700 hover:bg-slate-100 dark:text-slate-100 dark:hover:bg-slate-800",
+                        "flex w-full min-w-0 items-center gap-3 rounded-2xl border border-transparent px-3 py-2 text-left text-sm font-semibold text-slate-700 transition-[background-color,color,transform,box-shadow] duration-200 ease-out hover:bg-slate-100 active:scale-[0.99] dark:text-neutral-100 dark:hover:bg-neutral-800",
                         activeTab === item.key &&
-                          "bg-slate-900 text-white hover:bg-slate-900 dark:bg-slate-50 dark:text-slate-900 dark:hover:bg-slate-50"
+                          "bg-slate-900 text-white shadow-sm hover:bg-slate-900 dark:bg-neutral-50 dark:text-neutral-900 dark:hover:bg-neutral-50"
                       )}
                       onClick={() => goTab(item.key)}
                     >
                       <span className="text-base">{item.icon}</span>
-                      <span>{t(item.labelKey)}</span>
+                      <span className="min-w-0 flex-1 truncate whitespace-nowrap">
+                        {t(item.labelKey)}
+                      </span>
                     </button>
                   ))}
                 </div>
               </div>
 
               <button
-                className="flex items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-950/40 dark:text-slate-100 dark:hover:bg-slate-900"
+                className="flex items-center justify-center gap-2 whitespace-nowrap rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 transition-colors duration-200 hover:bg-slate-50 dark:border-neutral-800 dark:bg-neutral-950/40 dark:text-neutral-100 dark:hover:bg-neutral-900"
                 onClick={() => {
                   setSession(null);
                   saveSession(null);
@@ -273,25 +281,24 @@ export default function App() {
               </button>
             </div>
           </aside>
-          ) : null}
 
-          <main className="min-w-0 flex h-[calc(100vh-2rem)] flex-col overflow-hidden">
+          <main className="min-w-0 flex h-[calc(100vh-2rem)] flex-col">
             <header className="sticky top-0 z-20">
-              <div className="rounded-3xl bg-white/70 px-3 py-2 shadow-soft ring-1 ring-slate-200/70 backdrop-blur dark:bg-slate-900/55 dark:ring-slate-800/70">
+              <div className="rounded-3xl bg-white/70 px-3 py-2 shadow-[0_8px_20px_rgba(2,6,23,0.06)] ring-1 ring-slate-200/70 backdrop-blur dark:bg-neutral-900/55 dark:ring-neutral-800/70">
                 <div className="flex items-center gap-3">
                   <button
-                    className="grid h-10 w-10 place-items-center rounded-2xl bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-100 dark:hover:bg-slate-700 lg:hidden"
+                    className="grid h-10 w-10 place-items-center rounded-2xl bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-neutral-800 dark:text-neutral-100 dark:hover:bg-neutral-700 lg:hidden"
                     onClick={() => setNavOpen(true)}
                     title="Menu"
                   >
                     <FiMenu />
                   </button>
 
-                  <div className="min-w-0">
-                    <div className="truncate text-sm font-semibold text-slate-900 dark:text-slate-50">
+                  <div className="min-w-0 flex-1 md:flex-none">
+                    <div className="truncate text-sm font-semibold text-slate-900 dark:text-neutral-50">
                       {t(activeItem.labelKey)}
                     </div>
-                    <div className="mt-0.5 truncate font-mono text-[11px] text-slate-500 dark:text-slate-400">
+                    <div className="mt-0.5 truncate font-mono text-[11px] text-slate-500 dark:text-neutral-400">
                       {session.token.slice(0, 10)}…
                     </div>
                   </div>
@@ -303,28 +310,28 @@ export default function App() {
                         value={search}
                         onChange={(e) => setSearch(e.target.value)}
                         placeholder={t("top.search")}
-                        className="w-full rounded-2xl border border-slate-200 bg-white/80 py-2 pl-10 pr-3 text-sm text-slate-900 shadow-sm outline-none ring-0 placeholder:text-slate-400 focus:border-slate-300 dark:border-slate-800 dark:bg-slate-950/40 dark:text-slate-50 dark:placeholder:text-slate-500 dark:focus:border-slate-700"
+                        className="w-full rounded-2xl border border-slate-200 bg-white/80 py-2 pl-10 pr-3 text-sm text-slate-900 shadow-sm outline-none ring-0 placeholder:text-slate-400 focus:border-slate-300 dark:border-neutral-800 dark:bg-neutral-950/40 dark:text-neutral-50 dark:placeholder:text-neutral-500 dark:focus:border-neutral-700"
                       />
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2">
+                  <div className="ml-auto flex shrink-0 items-center gap-2">
                     <button
-                      className="grid h-10 w-10 place-items-center rounded-2xl bg-white text-slate-700 shadow-sm ring-1 ring-slate-200 hover:bg-slate-50 dark:bg-slate-950/40 dark:text-slate-100 dark:ring-slate-800 dark:hover:bg-slate-900"
+                      className="grid h-10 w-10 place-items-center rounded-2xl bg-white text-slate-700 shadow-sm ring-1 ring-slate-200 hover:bg-slate-50 dark:bg-neutral-950/40 dark:text-neutral-100 dark:ring-neutral-800 dark:hover:bg-neutral-900"
                       onClick={() => setLang(lang === "en" ? "zh-CN" : "en")}
                       title={t("top.lang")}
                     >
                       <FiGlobe />
                     </button>
                     <button
-                      className="grid h-10 w-10 place-items-center rounded-2xl bg-white text-slate-700 shadow-sm ring-1 ring-slate-200 hover:bg-slate-50 dark:bg-slate-950/40 dark:text-slate-100 dark:ring-slate-800 dark:hover:bg-slate-900"
+                      className="grid h-10 w-10 place-items-center rounded-2xl bg-white text-slate-700 shadow-sm ring-1 ring-slate-200 hover:bg-slate-50 dark:bg-neutral-950/40 dark:text-neutral-100 dark:ring-neutral-800 dark:hover:bg-neutral-900"
                       onClick={toggleTheme}
                       title={t("top.theme")}
                     >
                       {theme === "dark" ? <FiSun /> : <FiMoon />}
                     </button>
                     <button
-                      className="hidden h-10 items-center gap-2 rounded-2xl bg-slate-900 px-4 text-sm font-semibold text-white shadow-sm hover:bg-slate-800 dark:bg-slate-50 dark:text-slate-900 dark:hover:bg-white sm:inline-flex"
+                      className="hidden h-10 items-center gap-2 rounded-2xl bg-slate-900 px-4 text-sm font-semibold text-white shadow-sm hover:bg-slate-800 dark:bg-neutral-50 dark:text-neutral-900 dark:hover:bg-white sm:inline-flex"
                       onClick={() => {
                         setSession(null);
                         saveSession(null);
@@ -342,14 +349,18 @@ export default function App() {
                       value={search}
                       onChange={(e) => setSearch(e.target.value)}
                       placeholder={t("top.search")}
-                      className="w-full rounded-2xl border border-slate-200 bg-white/80 py-2 pl-10 pr-3 text-sm text-slate-900 shadow-sm outline-none ring-0 placeholder:text-slate-400 focus:border-slate-300 dark:border-slate-800 dark:bg-slate-950/40 dark:text-slate-50 dark:placeholder:text-slate-500 dark:focus:border-slate-700"
+                      className="w-full rounded-2xl border border-slate-200 bg-white/80 py-2 pl-10 pr-3 text-sm text-slate-900 shadow-sm outline-none ring-0 placeholder:text-slate-400 focus:border-slate-300 dark:border-neutral-800 dark:bg-neutral-950/40 dark:text-neutral-50 dark:placeholder:text-neutral-500 dark:focus:border-neutral-700"
                     />
                   </div>
                 </div>
               </div>
             </header>
 
-            <div className="mt-4 min-h-0 flex-1 overflow-y-auto">{page}</div>
+            <div className="mt-4 min-h-0 flex-1">
+              <div className="h-[calc(100%+1.5rem)] -mx-3 -my-3 overflow-y-auto px-3 py-3">
+                {page}
+              </div>
+            </div>
           </main>
         </div>
       </div>
@@ -362,7 +373,7 @@ export default function App() {
       >
         <div
           className={cn(
-            "absolute inset-0 bg-slate-950/30 backdrop-blur-sm transition-opacity",
+            "absolute inset-0 bg-neutral-950/30 backdrop-blur-sm transition-opacity",
             navOpen ? "opacity-100" : "opacity-0"
           )}
           onClick={() => setNavOpen(false)}
@@ -374,17 +385,17 @@ export default function App() {
             navOpen ? "translate-x-0" : "-translate-x-full"
           )}
         >
-          <div className="flex h-full flex-col justify-between rounded-3xl bg-white p-4 shadow-soft ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-800">
+          <div className="flex h-full flex-col justify-between rounded-3xl bg-white p-4 shadow-soft ring-1 ring-slate-200 dark:bg-neutral-900 dark:ring-neutral-800">
             <div>
               <div className="flex items-center justify-between">
                 <div>
                   <div className="text-base font-semibold tracking-tight">{t("app.name")}</div>
-                  <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                  <div className="mt-1 text-xs text-slate-500 dark:text-neutral-400">
                     {window.location.hostname}
                   </div>
                 </div>
                 <button
-                  className="grid h-10 w-10 place-items-center rounded-2xl bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-100 dark:hover:bg-slate-700"
+                  className="grid h-10 w-10 place-items-center rounded-2xl bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-neutral-800 dark:text-neutral-100 dark:hover:bg-neutral-700"
                   onClick={() => setNavOpen(false)}
                   title="Close"
                 >
@@ -397,9 +408,9 @@ export default function App() {
                   <button
                     key={item.key}
                     className={cn(
-                      "flex w-full items-center gap-3 rounded-2xl border border-transparent px-3 py-2 text-left text-sm font-semibold text-slate-700 hover:bg-slate-100 dark:text-slate-100 dark:hover:bg-slate-800",
+                      "flex w-full items-center gap-3 rounded-2xl border border-transparent px-3 py-2 text-left text-sm font-semibold text-slate-700 transition-[background-color,color,transform,box-shadow] duration-200 ease-out hover:bg-slate-100 active:scale-[0.99] dark:text-neutral-100 dark:hover:bg-neutral-800",
                       activeTab === item.key &&
-                        "bg-slate-900 text-white hover:bg-slate-900 dark:bg-slate-50 dark:text-slate-900 dark:hover:bg-slate-50"
+                        "bg-slate-900 text-white shadow-sm hover:bg-slate-900 dark:bg-neutral-50 dark:text-neutral-900 dark:hover:bg-neutral-50"
                     )}
                     onClick={() => {
                       goTab(item.key);
@@ -414,7 +425,7 @@ export default function App() {
             </div>
 
             <button
-              className="flex items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-950/40 dark:text-slate-100 dark:hover:bg-slate-900"
+              className="flex items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 dark:border-neutral-800 dark:bg-neutral-950/40 dark:text-neutral-100 dark:hover:bg-neutral-900"
               onClick={() => {
                 setSession(null);
                 saveSession(null);

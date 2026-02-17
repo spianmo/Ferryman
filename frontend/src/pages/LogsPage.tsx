@@ -188,26 +188,26 @@ export default function LogsPage({ session }: Props) {
           : "idle";
 
   return (
-    <section className="flex h-full max-h-full min-h-0 flex-col overflow-hidden rounded-3xl bg-white/70 p-4 shadow-soft ring-1 ring-slate-200/70 backdrop-blur dark:bg-slate-900/55 dark:ring-slate-800/70">
+    <section className="flex h-full max-h-full min-h-0 flex-col overflow-hidden rounded-3xl bg-white/70 p-4 shadow-soft ring-1 ring-slate-200/70 backdrop-blur dark:bg-neutral-900/55 dark:ring-neutral-800/70">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="inline-flex items-center gap-2">
-          <h2 className="inline-flex items-center gap-2 text-base font-semibold tracking-tight text-slate-900 dark:text-slate-50">
+          <h2 className="inline-flex items-center gap-2 text-base font-semibold tracking-tight text-slate-900 dark:text-neutral-50">
             {t("logs.title")}
           </h2>
           <span className="inline-flex h-2.5 w-2.5 shrink-0 items-center justify-center">
             <span
               className={cn(
-                "block h-2.5 w-2.5 rounded-full border border-white/90 transition-all duration-300 ease-out dark:border-slate-900/90",
+                "block h-2.5 w-2.5 rounded-full border border-white/90 transition-all duration-300 ease-out dark:border-neutral-900/90",
                 dotKind === "active" && "scale-100 bg-emerald-500 shadow-[0_0_0_3px_rgba(16,185,129,0.20)]",
                 dotKind === "connecting" && "animate-pulse scale-95 bg-amber-400",
                 dotKind === "error" && "scale-100 bg-rose-500 shadow-[0_0_0_3px_rgba(244,63,94,0.16)]",
-                dotKind === "idle" && "scale-90 bg-slate-400 dark:bg-slate-500"
+                dotKind === "idle" && "scale-90 bg-slate-400 dark:bg-neutral-500"
               )}
               title={statusLabel}
               aria-label={`${t("terminal.status")}: ${statusLabel}`}
             />
           </span>
-          <span className="inline-flex items-center rounded-full bg-white/70 px-2 py-0.5 font-mono text-[11px] text-slate-600 shadow-sm ring-1 ring-slate-200/60 dark:bg-slate-950/30 dark:text-slate-200 dark:ring-slate-800/70">
+          <span className="inline-flex items-center rounded-full bg-white/70 px-2 py-0.5 font-mono text-[11px] text-slate-600 shadow-sm ring-1 ring-slate-200/60 dark:bg-neutral-950/30 dark:text-neutral-200 dark:ring-neutral-800/70">
             {lines.length}
           </span>
         </div>
@@ -215,10 +215,10 @@ export default function LogsPage({ session }: Props) {
 
       <div
         ref={viewportRef}
-        className="mt-4 min-h-0 flex-1 overflow-auto rounded-2xl bg-slate-950 p-3 font-mono text-[12px] leading-relaxed shadow-inner ring-1 ring-slate-800/80"
+        className="mt-4 min-h-0 flex-1 overflow-auto rounded-2xl bg-neutral-950 p-3 font-mono text-[12px] leading-relaxed shadow-inner ring-1 ring-neutral-800/80"
       >
         {lines.length === 0 ? (
-          <div className="grid h-full w-full place-items-center text-sm text-slate-300">
+          <div className="grid h-full w-full place-items-center text-sm text-neutral-300">
             {t("logs.empty")}
           </div>
         ) : (
@@ -229,7 +229,7 @@ export default function LogsPage({ session }: Props) {
                 "whitespace-pre-wrap break-words",
                 line.level === "error" && "text-rose-300",
                 line.level === "warn" && "text-amber-300",
-                line.level === "debug" && "text-sky-300",
+                line.level === "debug" && "text-neutral-300",
                 (line.level === "info" || line.level === "other") && "text-emerald-200"
               )}
             >
