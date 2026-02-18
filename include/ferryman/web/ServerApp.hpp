@@ -44,7 +44,20 @@ class ServerApp {
     std::string room_id;
     std::string peer_id;
     bool native_stream_subscribed = false;
+    std::string native_stream_codec = "jpeg";
+    int native_stream_fps = 8;
+    int native_stream_scale_percent = 100;
+    int native_stream_h264_bitrate_bps = 3'000'000;
     WebSocketChannelPtr channel;
+  };
+
+  struct NativeCaptureDemand {
+    size_t subscriber_count = 0;
+    bool want_jpeg = false;
+    bool want_h264 = false;
+    int fps = 0;
+    int scale_percent = 0;
+    int h264_bitrate_bps = 0;
   };
 #endif
 
@@ -85,6 +98,8 @@ class ServerApp {
   void BroadcastLogEntry(const std::string& serialized_entry);
   void BroadcastNativeFrames();
   void SendToWs(std::uintptr_t channel_key, const std::string& payload);
+  NativeCaptureDemand CollectNativeCaptureDemandLocked() const;
+  void RefreshNativeCaptureState();
 #endif
 
   core::AppConfig config_;
@@ -108,6 +123,9 @@ class ServerApp {
 
   std::mutex ws_mu_;
   std::unordered_map<std::uintptr_t, WsClient> ws_clients_;
+  std::atomic<int> active_capture_fps_{0};
+  std::atomic<int> active_capture_scale_percent_{75};
+  std::atomic<int> active_capture_h264_bitrate_bps_{3'000'000};
 #endif
 };
 

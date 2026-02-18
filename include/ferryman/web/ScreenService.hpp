@@ -25,7 +25,9 @@ class ScreenService {
     int width = 0;
     int height = 0;
     int64_t captured_at_ms = 0;
-    std::string jpeg_base64;
+    std::string jpeg_bytes;
+    std::string h264_bytes;
+    bool h264_keyframe = false;
   };
 
   ScreenService();
@@ -40,6 +42,9 @@ class ScreenService {
   void StopCapture();
   std::optional<EncodedFrame> LatestFrame() const;
   bool IsCapturing() const { return capture_running_.load(); }
+  void SetEncodingTargets(bool enable_jpeg, bool enable_h264);
+  void SetEncodingProfile(int scale_percent, int h264_bitrate_bps);
+  bool SupportsH264() const;
 
  private:
   void CaptureLoop(int fps);
@@ -54,10 +59,18 @@ class ScreenService {
 
   std::atomic<bool> capture_running_{false};
   std::thread capture_thread_;
+  int capture_fps_ = 10;
+  std::atomic<bool> encode_jpeg_{false};
+  std::atomic<bool> encode_h264_{false};
+  std::atomic<int> capture_scale_percent_{75};
+  std::atomic<int> h264_bitrate_bps_{3'000'000};
 
 #if defined(__APPLE__)
   std::unique_ptr<ScreenCaptureKitBridge> capture_bridge_;
 #endif
+
+  struct H264EncoderContext;
+  std::unique_ptr<H264EncoderContext> h264_encoder_;
 
   std::mutex pointer_mu_;
   double last_pointer_x_ = 0.0;

@@ -11,6 +11,8 @@ class ScreenCaptureKitBridge {
   struct RawFrame {
     int width = 0;
     int height = 0;
+    int stride_bytes = 0;
+    std::string bgra_bytes;
     std::string jpeg_bytes;
   };
 

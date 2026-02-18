@@ -19,6 +19,19 @@ namespace ferryman::web {
 namespace {
 
 using nlohmann::json;
+constexpr int kNativeCaptureFps = 8;
+constexpr int kNativeCaptureMinFps = 1;
+constexpr int kNativeCaptureMaxFps = 30;
+constexpr int kNativeScaleMinPercent = 40;
+constexpr int kNativeScaleMaxPercent = 100;
+constexpr int kNativeScaleDefaultPercent = 75;
+constexpr int kNativeBitrateMinBps = 500'000;
+constexpr int kNativeBitrateMaxBps = 12'000'000;
+constexpr int kNativeBitrateDefaultBps = 3'000'000;
+
+constexpr uint32_t kNativeBinaryMagic = 0x314D5246U;  // "FRM1" little-endian
+constexpr uint8_t kNativeBinaryCodecJpeg = 1;
+constexpr uint8_t kNativeBinaryCodecH264 = 2;
 
 std::string ToLower(std::string value) {
   std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
@@ -130,6 +143,85 @@ int JsonInt(const std::optional<json>& payload, const char* key, int fallback = 
   return fallback;
 }
 
+int ParseNativeScalePercent(const std::string& resolution_tier, int fallback) {
+  const std::string tier = ToLower(resolution_tier);
+  if (tier == "full") {
+    return 100;
+  }
+  if (tier == "balanced") {
+    return 75;
+  }
+  if (tier == "performance") {
+    return 50;
+  }
+  return std::clamp(fallback, kNativeScaleMinPercent, kNativeScaleMaxPercent);
+}
+
+std::string NativeResolutionTierFromScale(int scale_percent) {
+  if (scale_percent >= 90) {
+    return "full";
+  }
+  if (scale_percent >= 63) {
+    return "balanced";
+  }
+  return "performance";
+}
+
+int ParseNativeBitrateBps(const std::string& bitrate_tier, int fallback) {
+  const std::string tier = ToLower(bitrate_tier);
+  if (tier == "sd") {
+    return 1'500'000;
+  }
+  if (tier == "hd") {
+    return 3'000'000;
+  }
+  if (tier == "uhd") {
+    return 6'000'000;
+  }
+  return std::clamp(fallback, kNativeBitrateMinBps, kNativeBitrateMaxBps);
+}
+
+std::string NativeBitrateTierFromBps(int bitrate_bps) {
+  if (bitrate_bps >= 4'500'000) {
+    return "uhd";
+  }
+  if (bitrate_bps >= 2'250'000) {
+    return "hd";
+  }
+  return "sd";
+}
+
+void AppendUint32Le(std::string* output, uint32_t value) {
+  output->push_back(static_cast<char>(value & 0xFF));
+  output->push_back(static_cast<char>((value >> 8) & 0xFF));
+  output->push_back(static_cast<char>((value >> 16) & 0xFF));
+  output->push_back(static_cast<char>((value >> 24) & 0xFF));
+}
+
+void AppendUint64Le(std::string* output, uint64_t value) {
+  for (int idx = 0; idx < 8; ++idx) {
+    output->push_back(static_cast<char>((value >> (idx * 8)) & 0xFF));
+  }
+}
+
+std::string BuildNativeBinaryFramePacket(uint8_t codec, bool keyframe, uint64_t sequence, int64_t captured_at_ms,
+                                         int width, int height, const std::string& payload_bytes) {
+  std::string packet;
+  packet.reserve(36 + payload_bytes.size());
+  AppendUint32Le(&packet, kNativeBinaryMagic);
+  packet.push_back(static_cast<char>(codec));
+  packet.push_back(static_cast<char>(keyframe ? 1 : 0));
+  packet.push_back('\0');
+  packet.push_back('\0');
+  AppendUint64Le(&packet, sequence);
+  AppendUint64Le(&packet, static_cast<uint64_t>(captured_at_ms));
+  AppendUint32Le(&packet, static_cast<uint32_t>(std::max(width, 0)));
+  AppendUint32Le(&packet, static_cast<uint32_t>(std::max(height, 0)));
+  AppendUint32Le(&packet, static_cast<uint32_t>(payload_bytes.size()));
+  packet.append(payload_bytes);
+  return packet;
+}
+
 }  // namespace
 
 ServerApp::ServerApp(core::AppConfig config)
@@ -164,14 +256,7 @@ bool ServerApp::Start() {
     running_ = false;
     return false;
   }
-
-  std::string screen_error;
-  if (!screen_service_.StartCapture(8, &screen_error)) {
-    std::cerr << "[ferryman] native screen capture disabled: " << screen_error << '\n';
-    audit_logger_.AppendSystem("warn", "screen.capture", screen_error);
-  } else {
-    audit_logger_.AppendSystem("info", "screen.capture", "native capture started");
-  }
+  screen_service_.SetEncodingTargets(false, false);
 
   pty_manager_.SetOutputCallback([this](const std::string& terminal_id, const std::string& chunk) {
     BroadcastTerminalOutput(terminal_id, chunk);
@@ -216,6 +301,11 @@ void ServerApp::Stop() {
   }
 #endif
   screen_service_.StopCapture();
+#if FERRYMAN_WITH_LIBHV
+  active_capture_fps_ = 0;
+  active_capture_scale_percent_ = kNativeScaleDefaultPercent;
+  active_capture_h264_bitrate_bps_ = kNativeBitrateDefaultBps;
+#endif
   pty_manager_.Shutdown();
   if (was_running) {
     audit_logger_.AppendSystem("info", "server.stop", "runtime shutdown completed");
@@ -638,6 +728,88 @@ void ServerApp::SendToWs(std::uintptr_t channel_key, const std::string& payload)
   }
 }
 
+ServerApp::NativeCaptureDemand ServerApp::CollectNativeCaptureDemandLocked() const {
+  NativeCaptureDemand demand;
+  for (const auto& [_, client] : ws_clients_) {
+    if (client.channel_type != "webrtc" || !client.native_stream_subscribed || !client.channel) {
+      continue;
+    }
+    demand.subscriber_count += 1;
+    demand.fps = std::max(demand.fps, std::clamp(client.native_stream_fps, kNativeCaptureMinFps,
+                                                 kNativeCaptureMaxFps));
+    if (client.native_stream_codec == "h264") {
+      demand.want_h264 = true;
+    } else {
+      demand.want_jpeg = true;
+    }
+    demand.scale_percent =
+        std::max(demand.scale_percent, std::clamp(client.native_stream_scale_percent, kNativeScaleMinPercent,
+                                                  kNativeScaleMaxPercent));
+    demand.h264_bitrate_bps =
+        std::max(demand.h264_bitrate_bps,
+                 std::clamp(client.native_stream_h264_bitrate_bps, kNativeBitrateMinBps, kNativeBitrateMaxBps));
+  }
+  return demand;
+}
+
+void ServerApp::RefreshNativeCaptureState() {
+  NativeCaptureDemand demand;
+  {
+    std::lock_guard<std::mutex> lock(ws_mu_);
+    demand = CollectNativeCaptureDemandLocked();
+  }
+
+  screen_service_.SetEncodingTargets(demand.want_jpeg, demand.want_h264);
+
+  if (demand.subscriber_count == 0) {
+    if (screen_service_.IsCapturing()) {
+      screen_service_.StopCapture();
+      audit_logger_.AppendSystem("info", "screen.capture", "native capture stopped (no subscribers)");
+    }
+    active_capture_fps_ = 0;
+    active_capture_scale_percent_ = kNativeScaleDefaultPercent;
+    active_capture_h264_bitrate_bps_ = kNativeBitrateDefaultBps;
+    return;
+  }
+
+  const int target_fps = std::clamp(demand.fps > 0 ? demand.fps : kNativeCaptureFps, kNativeCaptureMinFps,
+                                    kNativeCaptureMaxFps);
+  const int target_scale_percent =
+      std::clamp(demand.scale_percent > 0 ? demand.scale_percent : kNativeScaleDefaultPercent,
+                 kNativeScaleMinPercent, kNativeScaleMaxPercent);
+  const int target_h264_bitrate_bps =
+      std::clamp(demand.h264_bitrate_bps > 0 ? demand.h264_bitrate_bps : kNativeBitrateDefaultBps,
+                 kNativeBitrateMinBps, kNativeBitrateMaxBps);
+
+  screen_service_.SetEncodingProfile(target_scale_percent, target_h264_bitrate_bps);
+  active_capture_scale_percent_ = target_scale_percent;
+  active_capture_h264_bitrate_bps_ = target_h264_bitrate_bps;
+
+  if (screen_service_.IsCapturing() && active_capture_fps_ == target_fps) {
+    return;
+  }
+
+  if (screen_service_.IsCapturing()) {
+    screen_service_.StopCapture();
+    active_capture_fps_ = 0;
+  }
+
+  std::string screen_error;
+  if (!screen_service_.StartCapture(target_fps, &screen_error)) {
+    std::cerr << "[ferryman] native screen capture unavailable: " << screen_error << '\n';
+    audit_logger_.AppendSystem("warn", "screen.capture", screen_error);
+    return;
+  }
+  active_capture_fps_ = target_fps;
+
+  audit_logger_.AppendSystem("info", "screen.capture",
+                             "native capture started (subscribers=" +
+                                 std::to_string(demand.subscriber_count) +
+                                 ", fps=" + std::to_string(target_fps) +
+                                 ", scale=" + std::to_string(target_scale_percent) +
+                                 ", bitrate=" + std::to_string(target_h264_bitrate_bps) + ")");
+}
+
 void ServerApp::HandleWsOpen(const WebSocketChannelPtr& channel, const HttpRequestPtr& req) {
   const std::uintptr_t key = reinterpret_cast<std::uintptr_t>(channel.get());
   std::string token;
@@ -726,12 +898,14 @@ void ServerApp::HandleWsClose(const WebSocketChannelPtr& channel) {
   const std::uintptr_t key = reinterpret_cast<std::uintptr_t>(channel.get());
   WsClient client;
   bool found = false;
+  bool should_refresh_capture = false;
 
   {
     std::lock_guard<std::mutex> lock(ws_mu_);
     auto it = ws_clients_.find(key);
     if (it != ws_clients_.end()) {
       client = it->second;
+      should_refresh_capture = client.channel_type == "webrtc" && client.native_stream_subscribed;
       ws_clients_.erase(it);
       found = true;
     }
@@ -748,6 +922,10 @@ void ServerApp::HandleWsClose(const WebSocketChannelPtr& channel) {
 
   if (client.channel_type == "webrtc") {
     signaling_service_.Leave(key);
+  }
+
+  if (should_refresh_capture) {
+    RefreshNativeCaptureState();
   }
 
   audit_logger_.Append(client.session_token, "ws.close", client.channel_type);
@@ -959,30 +1137,46 @@ void ServerApp::BroadcastNativeFrames() {
     }
     last_sequence = frame->sequence;
 
-    std::vector<WebSocketChannelPtr> channels;
+    struct Target {
+      WebSocketChannelPtr channel;
+      std::string codec;
+    };
+    std::vector<Target> targets;
     {
       std::lock_guard<std::mutex> lock(ws_mu_);
       for (const auto& [_, client] : ws_clients_) {
         if (client.channel_type == "webrtc" && client.native_stream_subscribed && client.channel) {
-          channels.push_back(client.channel);
+          targets.push_back({client.channel, client.native_stream_codec});
         }
       }
     }
-    if (channels.empty()) {
+    if (targets.empty()) {
       continue;
     }
 
-    const std::string payload = api::Success({
-        {"event", "native_frame", false},
-        {"sequence", std::to_string(frame->sequence), true},
-        {"width", std::to_string(frame->width), true},
-        {"height", std::to_string(frame->height), true},
-        {"captured_at_ms", std::to_string(frame->captured_at_ms), true},
-        {"jpeg_base64", frame->jpeg_base64, false},
-    });
+    const bool has_h264 = !frame->h264_bytes.empty();
+    const bool has_jpeg = !frame->jpeg_bytes.empty();
+    if (!has_h264 && !has_jpeg) {
+      continue;
+    }
 
-    for (auto& channel : channels) {
-      channel->send(payload);
+    const std::string h264_payload = has_h264
+        ? BuildNativeBinaryFramePacket(kNativeBinaryCodecH264, frame->h264_keyframe, frame->sequence,
+                                       frame->captured_at_ms, frame->width, frame->height, frame->h264_bytes)
+        : "";
+    const std::string jpeg_payload = has_jpeg
+        ? BuildNativeBinaryFramePacket(kNativeBinaryCodecJpeg, false, frame->sequence,
+                                       frame->captured_at_ms, frame->width, frame->height, frame->jpeg_bytes)
+        : "";
+
+    for (auto& target : targets) {
+      if (target.codec == "h264" && !h264_payload.empty()) {
+        target.channel->send(h264_payload, WS_OPCODE_BINARY);
+        continue;
+      }
+      if (!jpeg_payload.empty()) {
+        target.channel->send(jpeg_payload, WS_OPCODE_BINARY);
+      }
     }
   }
 }
@@ -1108,17 +1302,48 @@ void ServerApp::HandleWebRtcWsMessage(std::uintptr_t channel_key, const std::str
   }
 
   if (action == "native_subscribe") {
+    const std::string requested_codec = JsonString(payload, "codec");
+    const bool wants_h264 = requested_codec == "h264";
+    const std::string negotiated_codec =
+        (wants_h264 && screen_service_.SupportsH264()) ? "h264" : "jpeg";
+    const int requested_fps =
+        std::clamp(JsonInt(payload, "fps", kNativeCaptureFps), kNativeCaptureMinFps, kNativeCaptureMaxFps);
+    const int requested_scale_percent = ParseNativeScalePercent(
+        JsonString(payload, "resolution_tier"),
+        std::clamp(JsonInt(payload, "scale_percent", kNativeScaleDefaultPercent),
+                   kNativeScaleMinPercent, kNativeScaleMaxPercent));
+    const int requested_h264_bitrate_bps = ParseNativeBitrateBps(
+        JsonString(payload, "bitrate_tier"),
+        std::clamp(JsonInt(payload, "bitrate_bps", kNativeBitrateDefaultBps),
+                   kNativeBitrateMinBps, kNativeBitrateMaxBps));
+
     {
       std::lock_guard<std::mutex> lock(ws_mu_);
       auto it = ws_clients_.find(channel_key);
       if (it != ws_clients_.end()) {
         it->second.native_stream_subscribed = true;
+        it->second.native_stream_codec = negotiated_codec;
+        it->second.native_stream_fps = requested_fps;
+        it->second.native_stream_scale_percent = requested_scale_percent;
+        it->second.native_stream_h264_bitrate_bps = requested_h264_bitrate_bps;
       }
     }
+
+    RefreshNativeCaptureState();
+    const int effective_fps = active_capture_fps_.load();
+    const int effective_scale_percent = active_capture_scale_percent_.load();
+    const int effective_h264_bitrate_bps = active_capture_h264_bitrate_bps_.load();
 
     SendToWs(channel_key, api::Success({
         {"event", "native_subscribed", false},
         {"capture_running", screen_service_.IsCapturing() ? "true" : "false", true},
+        {"codec", negotiated_codec, false},
+        {"fps", std::to_string(effective_fps > 0 ? effective_fps : requested_fps), true},
+        {"resolution_tier", NativeResolutionTierFromScale(effective_scale_percent), false},
+        {"scale_percent", std::to_string(effective_scale_percent), true},
+        {"bitrate_tier", NativeBitrateTierFromBps(effective_h264_bitrate_bps), false},
+        {"bitrate_bps", std::to_string(effective_h264_bitrate_bps), true},
+        {"transport", "ws-binary", false},
     }));
     return;
   }
@@ -1131,6 +1356,8 @@ void ServerApp::HandleWebRtcWsMessage(std::uintptr_t channel_key, const std::str
         it->second.native_stream_subscribed = false;
       }
     }
+
+    RefreshNativeCaptureState();
 
     SendToWs(channel_key, api::Success({
         {"event", "native_unsubscribed", false},

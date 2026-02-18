@@ -2,16 +2,15 @@
 
 #if defined(__APPLE__)
 
-#import <CoreImage/CoreImage.h>
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
 #import <Foundation/Foundation.h>
-#import <ImageIO/ImageIO.h>
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
 #include <mutex>
 #include <string>
 
@@ -51,7 +50,6 @@ namespace {
 
 constexpr int kStartTimeoutMs = 8000;
 constexpr int kStopTimeoutMs = 3000;
-constexpr double kJpegQuality = 0.68;
 
 std::string NsStringToStdString(NSString* value) {
   if (value == nil) {
@@ -69,75 +67,6 @@ std::string NSErrorToString(NSError* error) {
     return "unknown error";
   }
   return NsStringToStdString(error.localizedDescription);
-}
-
-bool EncodePixelBufferToJpeg(CVPixelBufferRef pixel_buffer, CIContext* ci_context,
-                             std::string* jpeg_bytes, int* out_width, int* out_height) {
-  if (pixel_buffer == nullptr || ci_context == nil || jpeg_bytes == nullptr) {
-    return false;
-  }
-
-  const size_t width = CVPixelBufferGetWidth(pixel_buffer);
-  const size_t height = CVPixelBufferGetHeight(pixel_buffer);
-  if (width == 0 || height == 0) {
-    return false;
-  }
-
-  CIImage* ci_image = [CIImage imageWithCVPixelBuffer:pixel_buffer];
-  if (ci_image == nil) {
-    return false;
-  }
-
-  CGImageRef cg_image = [ci_context createCGImage:ci_image fromRect:CGRectMake(0, 0, width, height)];
-  if (cg_image == nullptr) {
-    return false;
-  }
-
-  CFMutableDataRef data = CFDataCreateMutable(kCFAllocatorDefault, 0);
-  if (data == nullptr) {
-    CGImageRelease(cg_image);
-    return false;
-  }
-
-  CGImageDestinationRef destination =
-      CGImageDestinationCreateWithData(data, CFSTR("public.jpeg"), 1, nullptr);
-  if (destination == nullptr) {
-    CFRelease(data);
-    CGImageRelease(cg_image);
-    return false;
-  }
-
-  NSDictionary* options = @{
-    (__bridge NSString*)kCGImageDestinationLossyCompressionQuality : @(kJpegQuality),
-  };
-  CGImageDestinationAddImage(destination, cg_image, (__bridge CFDictionaryRef)options);
-  const bool finalized = CGImageDestinationFinalize(destination);
-
-  CGImageRelease(cg_image);
-  CFRelease(destination);
-
-  if (!finalized) {
-    CFRelease(data);
-    return false;
-  }
-
-  const CFIndex length = CFDataGetLength(data);
-  const UInt8* bytes = CFDataGetBytePtr(data);
-  if (length <= 0 || bytes == nullptr) {
-    CFRelease(data);
-    return false;
-  }
-
-  jpeg_bytes->assign(reinterpret_cast<const char*>(bytes), static_cast<size_t>(length));
-  CFRelease(data);
-
-  if (out_width != nullptr) {
-    *out_width = static_cast<int>(width);
-  }
-  if (out_height != nullptr) {
-    *out_height = static_cast<int>(height);
-  }
-  return true;
 }
 
 }  // namespace
@@ -159,12 +88,12 @@ class ScreenCaptureKitBridgeImpl {
 
   int width_ = 0;
   int height_ = 0;
-  std::string latest_jpeg_;
+  int stride_bytes_ = 0;
+  std::string latest_bgra_;
 
   SCStream* __strong stream_ = nil;
   SCContentFilter* __strong content_filter_ = nil;
   SCStreamConfiguration* __strong stream_config_ = nil;
-  CIContext* __strong ci_context_ = nil;
   FerrymanStreamOutput* __strong stream_output_ = nil;
   dispatch_queue_t sample_queue_ = nullptr;
 };
@@ -281,14 +210,14 @@ bool ScreenCaptureKitBridgeImpl::Start(int fps, std::string* error) {
       stream_config_ = config;
       stream_output_ = output;
       sample_queue_ = sample_queue;
-      ci_context_ = [CIContext contextWithOptions:nil];
 
       started_ = true;
       frame_sequence_ = 0;
       consumed_sequence_ = 0;
       width_ = 0;
       height_ = 0;
-      latest_jpeg_.clear();
+      stride_bytes_ = 0;
+      latest_bgra_.clear();
     }
     return true;
   }
@@ -342,11 +271,11 @@ void ScreenCaptureKitBridgeImpl::Stop() {
     stream_config_ = nil;
     stream_output_ = nil;
     sample_queue_ = nullptr;
-    ci_context_ = nil;
 
-    latest_jpeg_.clear();
+    latest_bgra_.clear();
     width_ = 0;
     height_ = 0;
+    stride_bytes_ = 0;
     frame_sequence_ = 0;
     consumed_sequence_ = 0;
   }
@@ -384,11 +313,13 @@ bool ScreenCaptureKitBridgeImpl::WaitForFrame(int timeout_ms, ScreenCaptureKitBr
   consumed_sequence_ = frame_sequence_;
   frame->width = width_;
   frame->height = height_;
-  frame->jpeg_bytes = latest_jpeg_;
+  frame->stride_bytes = stride_bytes_;
+  frame->bgra_bytes = latest_bgra_;
+  frame->jpeg_bytes.clear();
 
-  if (frame->jpeg_bytes.empty()) {
+  if (frame->bgra_bytes.empty() || frame->stride_bytes <= 0) {
     if (error != nullptr) {
-      *error = "received empty ScreenCaptureKit frame";
+      *error = "received empty ScreenCaptureKit BGRA frame";
     }
     return false;
   }
@@ -407,30 +338,33 @@ void ScreenCaptureKitBridgeImpl::OnSampleBuffer(CMSampleBufferRef sample_buffer,
       return;
     }
 
-    CIContext* ci_context = nil;
-    {
-      std::lock_guard<std::mutex> lock(mu_);
-      if (!started_) {
-        return;
-      }
-      ci_context = ci_context_;
-    }
-
-    std::string jpeg;
-    int frame_width = 0;
-    int frame_height = 0;
-    if (!EncodePixelBufferToJpeg(pixel_buffer, ci_context, &jpeg, &frame_width, &frame_height)) {
+    CVPixelBufferLockBaseAddress(pixel_buffer, kCVPixelBufferLock_ReadOnly);
+    const size_t width = CVPixelBufferGetWidth(pixel_buffer);
+    const size_t height = CVPixelBufferGetHeight(pixel_buffer);
+    const size_t stride = CVPixelBufferGetBytesPerRow(pixel_buffer);
+    void* base_address = CVPixelBufferGetBaseAddress(pixel_buffer);
+    if (base_address == nullptr || width == 0 || height == 0 || stride < width * 4) {
+      CVPixelBufferUnlockBaseAddress(pixel_buffer, kCVPixelBufferLock_ReadOnly);
       return;
     }
 
+    std::string bgra(stride * height, '\0');
+    for (size_t row = 0; row < height; ++row) {
+      const auto* src = static_cast<const uint8_t*>(base_address) + row * stride;
+      auto* dst = reinterpret_cast<uint8_t*>(bgra.data()) + row * stride;
+      std::memcpy(dst, src, stride);
+    }
+    CVPixelBufferUnlockBaseAddress(pixel_buffer, kCVPixelBufferLock_ReadOnly);
+
     {
       std::lock_guard<std::mutex> lock(mu_);
       if (!started_) {
         return;
       }
-      width_ = frame_width;
-      height_ = frame_height;
-      latest_jpeg_ = std::move(jpeg);
+      width_ = static_cast<int>(width);
+      height_ = static_cast<int>(height);
+      stride_bytes_ = static_cast<int>(stride);
+      latest_bgra_ = std::move(bgra);
       ++frame_sequence_;
     }
     cv_.notify_one();

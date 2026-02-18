@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cctype>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -42,11 +43,12 @@
 #define FERRYMAN_WITH_FFMPEG 0
 #endif
 
-#if (defined(__linux__) || defined(_WIN32)) && FERRYMAN_WITH_FFMPEG
+#if FERRYMAN_WITH_FFMPEG
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/error.h>
-#include <libavutil/imgutils.h>
+#include <libavutil/opt.h>
 #include <libswscale/swscale.h>
 }
 #endif
@@ -72,6 +74,35 @@ std::string JsonCapabilities(bool native_stream, bool input_injection, const std
       {"transport", native_stream ? "webrtc-signaling+native-ws" : "p2p-signaling"},
       {"screen_backend", backend},
       {"video_encoding", encoding},
+      {"native_stream_transport", native_stream ? "ws-binary" : "unsupported"},
+      {"native_resolution_tiers", json::array({
+                                    json{
+                                        {"id", "full"},
+                                        {"scale_percent", 100},
+                                    },
+                                    json{
+                                        {"id", "balanced"},
+                                        {"scale_percent", 75},
+                                    },
+                                    json{
+                                        {"id", "performance"},
+                                        {"scale_percent", 50},
+                                    },
+                                })},
+      {"native_bitrate_tiers", json::array({
+                                  json{
+                                      {"id", "sd"},
+                                      {"bitrate_bps", 1'500'000},
+                                  },
+                                  json{
+                                      {"id", "hd"},
+                                      {"bitrate_bps", 3'000'000},
+                                  },
+                                  json{
+                                      {"id", "uhd"},
+                                      {"bitrate_bps", 6'000'000},
+                                  },
+                              })},
   };
   return payload.dump();
 }
@@ -120,18 +151,67 @@ std::string PayloadKey(const json& payload) {
   return "";
 }
 
-#if (defined(__linux__) || defined(_WIN32)) && FERRYMAN_WITH_FFMPEG
+#if FERRYMAN_WITH_FFMPEG
 std::string AvErrorToString(int code) {
   char error[AV_ERROR_MAX_STRING_SIZE] = {0};
   av_strerror(code, error, sizeof(error));
   return std::string(error);
 }
 
-bool EncodeBgrToJpegFfmpeg(const uint8_t* bgr, int width, int height, int stride,
-                           std::string* jpeg_bytes, std::string* error) {
-  if (bgr == nullptr || jpeg_bytes == nullptr || width <= 0 || height <= 0 || stride <= 0) {
+bool CodecSupportsPixelFormat(const AVCodec* codec, AVPixelFormat pix_fmt) {
+  if (codec == nullptr || codec->pix_fmts == nullptr) {
+    return false;
+  }
+  for (const AVPixelFormat* current = codec->pix_fmts; *current != AV_PIX_FMT_NONE; ++current) {
+    if (*current == pix_fmt) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool IsVideoToolboxCodec(const AVCodec* codec) {
+  return codec != nullptr && codec->name != nullptr &&
+         std::string(codec->name).find("videotoolbox") != std::string::npos;
+}
+
+const AVCodec* FindH264Encoder(bool allow_videotoolbox) {
+#if defined(__APPLE__)
+  if (allow_videotoolbox) {
+    const AVCodec* hardware = avcodec_find_encoder_by_name("h264_videotoolbox");
+    if (hardware != nullptr) {
+      return hardware;
+    }
+  }
+#endif
+  return avcodec_find_encoder(AV_CODEC_ID_H264);
+}
+
+AVPixelFormat PreferredH264PixelFormat(const AVCodec* codec) {
+  if (codec == nullptr) {
+    return AV_PIX_FMT_YUV420P;
+  }
+#if defined(__APPLE__)
+  if (IsVideoToolboxCodec(codec) && CodecSupportsPixelFormat(codec, AV_PIX_FMT_NV12)) {
+    return AV_PIX_FMT_NV12;
+  }
+#endif
+  if (CodecSupportsPixelFormat(codec, AV_PIX_FMT_YUV420P)) {
+    return AV_PIX_FMT_YUV420P;
+  }
+  if (codec->pix_fmts != nullptr && codec->pix_fmts[0] != AV_PIX_FMT_NONE) {
+    return codec->pix_fmts[0];
+  }
+  return AV_PIX_FMT_YUV420P;
+}
+
+bool EncodeFrameToJpegFfmpeg(const uint8_t* source, int width, int height, int stride,
+                             AVPixelFormat source_pix_fmt, std::string* jpeg_bytes,
+                             std::string* error) {
+  if (source == nullptr || width <= 0 || height <= 0 || stride <= 0 ||
+      source_pix_fmt == AV_PIX_FMT_NONE || jpeg_bytes == nullptr) {
     if (error != nullptr) {
-      *error = "invalid frame buffer for ffmpeg encoding";
+      *error = "invalid frame buffer for ffmpeg jpeg encoding";
     }
     return false;
   }
@@ -147,14 +227,15 @@ bool EncodeBgrToJpegFfmpeg(const uint8_t* bgr, int width, int height, int stride
   AVCodecContext* codec_ctx = avcodec_alloc_context3(codec);
   if (codec_ctx == nullptr) {
     if (error != nullptr) {
-      *error = "failed to allocate ffmpeg codec context";
+      *error = "failed to allocate ffmpeg mjpeg codec context";
     }
     return false;
   }
 
   codec_ctx->width = width;
   codec_ctx->height = height;
-  codec_ctx->pix_fmt = AV_PIX_FMT_YUVJ420P;
+  codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
+  codec_ctx->color_range = AVCOL_RANGE_JPEG;
   codec_ctx->time_base = AVRational{1, 25};
   codec_ctx->framerate = AVRational{25, 1};
 
@@ -170,7 +251,7 @@ bool EncodeBgrToJpegFfmpeg(const uint8_t* bgr, int width, int height, int stride
   AVFrame* frame = av_frame_alloc();
   if (frame == nullptr) {
     if (error != nullptr) {
-      *error = "failed to allocate ffmpeg frame";
+      *error = "failed to allocate ffmpeg mjpeg frame";
     }
     avcodec_free_context(&codec_ctx);
     return false;
@@ -179,37 +260,38 @@ bool EncodeBgrToJpegFfmpeg(const uint8_t* bgr, int width, int height, int stride
   frame->format = codec_ctx->pix_fmt;
   frame->width = width;
   frame->height = height;
+  frame->color_range = codec_ctx->color_range;
 
   ret = av_frame_get_buffer(frame, 32);
   if (ret < 0) {
     if (error != nullptr) {
-      *error = "failed to allocate ffmpeg frame buffer: " + AvErrorToString(ret);
+      *error = "failed to allocate ffmpeg mjpeg frame buffer: " + AvErrorToString(ret);
     }
     av_frame_free(&frame);
     avcodec_free_context(&codec_ctx);
     return false;
   }
 
-  SwsContext* sws_ctx = sws_getContext(width, height, AV_PIX_FMT_BGR24,
-                                       width, height, codec_ctx->pix_fmt,
+  SwsContext* sws_ctx = sws_getContext(width, height, source_pix_fmt, width, height, codec_ctx->pix_fmt,
                                        SWS_BILINEAR, nullptr, nullptr, nullptr);
   if (sws_ctx == nullptr) {
     if (error != nullptr) {
-      *error = "failed to create ffmpeg sws context";
+      *error = "failed to create ffmpeg sws context for jpeg encoding";
     }
     av_frame_free(&frame);
     avcodec_free_context(&codec_ctx);
     return false;
   }
 
-  const uint8_t* src_data[1] = {bgr};
+  const uint8_t* src_data[1] = {source};
   int src_linesize[1] = {stride};
   sws_scale(sws_ctx, src_data, src_linesize, 0, height, frame->data, frame->linesize);
+  frame->pts = 0;
 
   AVPacket* packet = av_packet_alloc();
   if (packet == nullptr) {
     if (error != nullptr) {
-      *error = "failed to allocate ffmpeg packet";
+      *error = "failed to allocate ffmpeg mjpeg packet";
     }
     sws_freeContext(sws_ctx);
     av_frame_free(&frame);
@@ -220,7 +302,7 @@ bool EncodeBgrToJpegFfmpeg(const uint8_t* bgr, int width, int height, int stride
   ret = avcodec_send_frame(codec_ctx, frame);
   if (ret < 0) {
     if (error != nullptr) {
-      *error = "failed to send frame to ffmpeg encoder: " + AvErrorToString(ret);
+      *error = "failed to send frame to ffmpeg mjpeg encoder: " + AvErrorToString(ret);
     }
     av_packet_free(&packet);
     sws_freeContext(sws_ctx);
@@ -229,19 +311,28 @@ bool EncodeBgrToJpegFfmpeg(const uint8_t* bgr, int width, int height, int stride
     return false;
   }
 
-  ret = avcodec_receive_packet(codec_ctx, packet);
-  if (ret < 0) {
-    if (error != nullptr) {
-      *error = "failed to receive encoded packet from ffmpeg: " + AvErrorToString(ret);
+  jpeg_bytes->clear();
+  while (true) {
+    ret = avcodec_receive_packet(codec_ctx, packet);
+    if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+      break;
     }
-    av_packet_free(&packet);
-    sws_freeContext(sws_ctx);
-    av_frame_free(&frame);
-    avcodec_free_context(&codec_ctx);
-    return false;
+    if (ret < 0) {
+      if (error != nullptr) {
+        *error = "failed to receive ffmpeg mjpeg packet: " + AvErrorToString(ret);
+      }
+      av_packet_free(&packet);
+      sws_freeContext(sws_ctx);
+      av_frame_free(&frame);
+      avcodec_free_context(&codec_ctx);
+      return false;
+    }
+    if (packet->size > 0 && packet->data != nullptr) {
+      jpeg_bytes->append(reinterpret_cast<const char*>(packet->data),
+                         static_cast<size_t>(packet->size));
+    }
+    av_packet_unref(packet);
   }
-
-  jpeg_bytes->assign(reinterpret_cast<const char*>(packet->data), static_cast<size_t>(packet->size));
 
   av_packet_free(&packet);
   sws_freeContext(sws_ctx);
@@ -250,10 +341,61 @@ bool EncodeBgrToJpegFfmpeg(const uint8_t* bgr, int width, int height, int stride
 
   if (jpeg_bytes->empty()) {
     if (error != nullptr) {
-      *error = "ffmpeg produced empty jpeg packet";
+      *error = "ffmpeg mjpeg encoder produced empty packet";
     }
     return false;
   }
+  return true;
+}
+
+int BytesPerPixelForPackedFormat(AVPixelFormat format) {
+  switch (format) {
+    case AV_PIX_FMT_BGRA:
+      return 4;
+    case AV_PIX_FMT_BGR24:
+      return 3;
+    default:
+      return 0;
+  }
+}
+
+bool ScaleFrameWithFfmpeg(const uint8_t* source, int width, int height, int stride,
+                          AVPixelFormat pix_fmt, int target_width, int target_height,
+                          std::string* scaled_bytes, int* scaled_stride, std::string* error) {
+  if (source == nullptr || width <= 0 || height <= 0 || stride <= 0 || target_width <= 0 ||
+      target_height <= 0 || scaled_bytes == nullptr || scaled_stride == nullptr) {
+    if (error != nullptr) {
+      *error = "invalid frame buffer for ffmpeg scaling";
+    }
+    return false;
+  }
+
+  const int bytes_per_pixel = BytesPerPixelForPackedFormat(pix_fmt);
+  if (bytes_per_pixel <= 0) {
+    if (error != nullptr) {
+      *error = "unsupported pixel format for scaling";
+    }
+    return false;
+  }
+
+  *scaled_stride = target_width * bytes_per_pixel;
+  scaled_bytes->assign(static_cast<size_t>(*scaled_stride) * static_cast<size_t>(target_height), '\0');
+
+  SwsContext* sws_ctx = sws_getContext(width, height, pix_fmt, target_width, target_height, pix_fmt,
+                                       SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
+  if (sws_ctx == nullptr) {
+    if (error != nullptr) {
+      *error = "failed to create ffmpeg sws context for scaling";
+    }
+    return false;
+  }
+
+  const uint8_t* src_data[4] = {source, nullptr, nullptr, nullptr};
+  int src_linesize[4] = {stride, 0, 0, 0};
+  uint8_t* dst_data[4] = {reinterpret_cast<uint8_t*>(scaled_bytes->data()), nullptr, nullptr, nullptr};
+  int dst_linesize[4] = {*scaled_stride, 0, 0, 0};
+  sws_scale(sws_ctx, src_data, src_linesize, 0, height, dst_data, dst_linesize);
+  sws_freeContext(sws_ctx);
   return true;
 }
 #endif
@@ -754,6 +896,280 @@ void EmitWindowsModifiers(const json& payload, bool down) {
 
 }  // namespace
 
+struct ScreenService::H264EncoderContext {
+#if FERRYMAN_WITH_FFMPEG
+  const AVCodec* codec = nullptr;
+  AVCodecContext* codec_ctx = nullptr;
+  AVFrame* frame = nullptr;
+  SwsContext* sws_ctx = nullptr;
+  int width = 0;
+  int height = 0;
+  int fps = 25;
+  int bitrate_bps = 3'000'000;
+  AVPixelFormat src_pix_fmt = AV_PIX_FMT_NONE;
+  AVPixelFormat enc_pix_fmt = AV_PIX_FMT_NONE;
+  bool allow_videotoolbox = true;
+  int64_t next_pts = 0;
+
+  ~H264EncoderContext() { Reset(); }
+
+  void Reset() {
+    if (sws_ctx != nullptr) {
+      sws_freeContext(sws_ctx);
+      sws_ctx = nullptr;
+    }
+    if (frame != nullptr) {
+      av_frame_free(&frame);
+      frame = nullptr;
+    }
+    if (codec_ctx != nullptr) {
+      avcodec_free_context(&codec_ctx);
+      codec_ctx = nullptr;
+    }
+    codec = nullptr;
+    width = 0;
+    height = 0;
+    fps = 25;
+    bitrate_bps = 3'000'000;
+    src_pix_fmt = AV_PIX_FMT_NONE;
+    enc_pix_fmt = AV_PIX_FMT_NONE;
+    next_pts = 0;
+  }
+
+  bool EnsureConfigured(int target_width, int target_height, int target_fps, int target_bitrate_bps,
+                        AVPixelFormat source_pix_fmt, std::string* error) {
+    if (target_width <= 0 || target_height <= 0 || target_fps <= 0 ||
+        target_bitrate_bps <= 0 || source_pix_fmt == AV_PIX_FMT_NONE) {
+      if (error != nullptr) {
+        *error = "invalid h264 encoder dimensions, fps, bitrate, or source format";
+      }
+      return false;
+    }
+
+    if (codec_ctx != nullptr &&
+        width == target_width &&
+        height == target_height &&
+        fps == target_fps &&
+        bitrate_bps == target_bitrate_bps &&
+        src_pix_fmt == source_pix_fmt &&
+        enc_pix_fmt != AV_PIX_FMT_NONE) {
+      return true;
+    }
+
+    Reset();
+
+    codec = FindH264Encoder(allow_videotoolbox);
+    if (codec == nullptr) {
+      if (error != nullptr) {
+        *error = "ffmpeg encoder AV_CODEC_ID_H264 is unavailable";
+      }
+      return false;
+    }
+
+    codec_ctx = avcodec_alloc_context3(codec);
+    if (codec_ctx == nullptr) {
+      if (error != nullptr) {
+        *error = "failed to allocate ffmpeg h264 codec context";
+      }
+      return false;
+    }
+
+    codec_ctx->width = target_width;
+    codec_ctx->height = target_height;
+    codec_ctx->pix_fmt = PreferredH264PixelFormat(codec);
+    codec_ctx->time_base = AVRational{1, target_fps};
+    codec_ctx->framerate = AVRational{target_fps, 1};
+    codec_ctx->gop_size = std::max(target_fps, 10);
+    codec_ctx->max_b_frames = 0;
+    codec_ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
+    codec_ctx->color_range = AVCOL_RANGE_MPEG;
+    codec_ctx->colorspace = AVCOL_SPC_BT709;
+    codec_ctx->color_primaries = AVCOL_PRI_BT709;
+    codec_ctx->color_trc = AVCOL_TRC_BT709;
+    codec_ctx->bit_rate = static_cast<int64_t>(std::max(target_bitrate_bps, 500'000));
+    enc_pix_fmt = codec_ctx->pix_fmt;
+
+    if (codec_ctx->priv_data != nullptr) {
+      (void)av_opt_set(codec_ctx->priv_data, "profile", "baseline", 0);
+      if (IsVideoToolboxCodec(codec)) {
+        (void)av_opt_set(codec_ctx->priv_data, "realtime", "1", 0);
+        (void)av_opt_set(codec_ctx->priv_data, "allow_sw", "1", 0);
+        (void)av_opt_set(codec_ctx->priv_data, "prio_speed", "1", 0);
+      } else {
+        (void)av_opt_set(codec_ctx->priv_data, "preset", "veryfast", 0);
+        (void)av_opt_set(codec_ctx->priv_data, "tune", "zerolatency", 0);
+        (void)av_opt_set(codec_ctx->priv_data, "x264-params",
+                         "repeat-headers=1:keyint=30:min-keyint=30:scenecut=0", 0);
+      }
+    }
+
+    int ret = avcodec_open2(codec_ctx, codec, nullptr);
+    if (ret < 0) {
+      if (error != nullptr) {
+        *error = "failed to open ffmpeg h264 encoder: " + AvErrorToString(ret);
+      }
+      Reset();
+      return false;
+    }
+
+    frame = av_frame_alloc();
+    if (frame == nullptr) {
+      if (error != nullptr) {
+        *error = "failed to allocate ffmpeg h264 frame";
+      }
+      Reset();
+      return false;
+    }
+    frame->format = codec_ctx->pix_fmt;
+    frame->width = target_width;
+    frame->height = target_height;
+    frame->color_range = codec_ctx->color_range;
+    frame->colorspace = codec_ctx->colorspace;
+    frame->color_primaries = codec_ctx->color_primaries;
+    frame->color_trc = codec_ctx->color_trc;
+
+    ret = av_frame_get_buffer(frame, 32);
+    if (ret < 0) {
+      if (error != nullptr) {
+        *error = "failed to allocate ffmpeg h264 frame buffer: " + AvErrorToString(ret);
+      }
+      Reset();
+      return false;
+    }
+
+    sws_ctx = sws_getContext(target_width, target_height, source_pix_fmt,
+                             target_width, target_height, codec_ctx->pix_fmt,
+                             SWS_BILINEAR, nullptr, nullptr, nullptr);
+    if (sws_ctx == nullptr) {
+      if (error != nullptr) {
+        *error = "failed to create ffmpeg h264 sws context";
+      }
+      Reset();
+      return false;
+    }
+
+    width = target_width;
+    height = target_height;
+    fps = target_fps;
+    bitrate_bps = target_bitrate_bps;
+    src_pix_fmt = source_pix_fmt;
+    next_pts = 0;
+    return true;
+  }
+
+  bool EncodeFrame(const uint8_t* source, int stride, std::string* h264_bytes, bool* keyframe,
+                   std::string* error) {
+    if (source == nullptr || stride <= 0 || h264_bytes == nullptr || keyframe == nullptr ||
+        codec_ctx == nullptr || frame == nullptr || sws_ctx == nullptr) {
+      if (error != nullptr) {
+        *error = "h264 encoder is not initialized";
+      }
+      return false;
+    }
+
+    int ret = av_frame_make_writable(frame);
+    if (ret < 0) {
+      if (error != nullptr) {
+        *error = "failed to make ffmpeg h264 frame writable: " + AvErrorToString(ret);
+      }
+      return false;
+    }
+
+    const uint8_t* src_data[1] = {source};
+    int src_linesize[1] = {stride};
+    sws_scale(sws_ctx, src_data, src_linesize, 0, height, frame->data, frame->linesize);
+    frame->color_range = codec_ctx->color_range;
+    frame->colorspace = codec_ctx->colorspace;
+    frame->color_primaries = codec_ctx->color_primaries;
+    frame->color_trc = codec_ctx->color_trc;
+
+    frame->pts = next_pts++;
+    ret = avcodec_send_frame(codec_ctx, frame);
+    if (ret < 0) {
+      if (IsVideoToolboxCodec(codec) && allow_videotoolbox) {
+        const int fallback_width = width;
+        const int fallback_height = height;
+        const int fallback_fps = fps;
+        const int fallback_bitrate_bps = bitrate_bps;
+        const AVPixelFormat fallback_src_pix_fmt = src_pix_fmt;
+        allow_videotoolbox = false;
+        Reset();
+        if (EnsureConfigured(fallback_width, fallback_height, fallback_fps, fallback_bitrate_bps,
+                             fallback_src_pix_fmt, error)) {
+          return EncodeFrame(source, stride, h264_bytes, keyframe, error);
+        }
+      }
+      if (error != nullptr) {
+        *error = "failed to send frame to ffmpeg h264 encoder: " + AvErrorToString(ret);
+      }
+      return false;
+    }
+
+    AVPacket* packet = av_packet_alloc();
+    if (packet == nullptr) {
+      if (error != nullptr) {
+        *error = "failed to allocate ffmpeg h264 packet";
+      }
+      return false;
+    }
+
+    h264_bytes->clear();
+    *keyframe = false;
+    bool got_packet = false;
+
+    while (true) {
+      ret = avcodec_receive_packet(codec_ctx, packet);
+      if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+        break;
+      }
+      if (ret < 0) {
+        if (IsVideoToolboxCodec(codec) && allow_videotoolbox) {
+          const int fallback_width = width;
+          const int fallback_height = height;
+          const int fallback_fps = fps;
+          const int fallback_bitrate_bps = bitrate_bps;
+          const AVPixelFormat fallback_src_pix_fmt = src_pix_fmt;
+          allow_videotoolbox = false;
+          Reset();
+          if (EnsureConfigured(fallback_width, fallback_height, fallback_fps, fallback_bitrate_bps,
+                               fallback_src_pix_fmt, error)) {
+            return EncodeFrame(source, stride, h264_bytes, keyframe, error);
+          }
+        }
+        if (error != nullptr) {
+          *error = "failed to receive ffmpeg h264 packet: " + AvErrorToString(ret);
+        }
+        av_packet_free(&packet);
+        return false;
+      }
+
+      got_packet = true;
+      if ((packet->flags & AV_PKT_FLAG_KEY) != 0) {
+        *keyframe = true;
+      }
+      if (packet->size > 0 && packet->data != nullptr) {
+        h264_bytes->append(reinterpret_cast<const char*>(packet->data),
+                           static_cast<size_t>(packet->size));
+      }
+      av_packet_unref(packet);
+    }
+
+    av_packet_free(&packet);
+
+    if (!got_packet || h264_bytes->empty()) {
+      if (error != nullptr) {
+        *error = "ffmpeg h264 encoder produced empty packet";
+      }
+      return false;
+    }
+    return true;
+  }
+#else
+  ~H264EncoderContext() = default;
+  void Reset() {}
+#endif
+};
+
 ScreenService::ScreenService() = default;
 
 ScreenService::~ScreenService() {
@@ -762,14 +1178,35 @@ ScreenService::~ScreenService() {
 
 std::string ScreenService::CapabilitiesJson() const {
 #if defined(__APPLE__)
-  return JsonCapabilities(true, true, "screencapturekit", "jpeg");
+  return JsonCapabilities(FERRYMAN_WITH_FFMPEG != 0, true, "screencapturekit",
+                          FERRYMAN_WITH_FFMPEG ? "ffmpeg-h264" : "unsupported");
 #elif defined(__linux__)
-  return JsonCapabilities(FERRYMAN_WITH_FFMPEG != 0, true, "x11", FERRYMAN_WITH_FFMPEG ? "ffmpeg-mjpeg" : "unsupported");
+  return JsonCapabilities(FERRYMAN_WITH_FFMPEG != 0, true, "x11",
+                          FERRYMAN_WITH_FFMPEG ? "ffmpeg-h264" : "unsupported");
 #elif defined(_WIN32)
-  return JsonCapabilities(FERRYMAN_WITH_FFMPEG != 0, true, "gdi", FERRYMAN_WITH_FFMPEG ? "ffmpeg-mjpeg" : "unsupported");
+  return JsonCapabilities(FERRYMAN_WITH_FFMPEG != 0, true, "gdi",
+                          FERRYMAN_WITH_FFMPEG ? "ffmpeg-h264" : "unsupported");
 #else
   return JsonCapabilities(false, false, "unsupported", "unsupported");
 #endif
+}
+
+bool ScreenService::SupportsH264() const {
+#if FERRYMAN_WITH_FFMPEG
+  return true;
+#else
+  return false;
+#endif
+}
+
+void ScreenService::SetEncodingTargets(bool enable_jpeg, bool enable_h264) {
+  encode_jpeg_.store(enable_jpeg);
+  encode_h264_.store(enable_h264);
+}
+
+void ScreenService::SetEncodingProfile(int scale_percent, int h264_bitrate_bps) {
+  capture_scale_percent_.store(std::clamp(scale_percent, 40, 100));
+  h264_bitrate_bps_.store(std::clamp(h264_bitrate_bps, 500'000, 12'000'000));
 }
 
 bool ScreenService::SetRemoteControlEnabled(const std::string& session_token, bool enabled) {
@@ -807,11 +1244,30 @@ bool ScreenService::StartCapture(int fps, std::string* error) {
   }
   return false;
 #else
+  if (!encode_jpeg_.load() && !encode_h264_.load()) {
+    if (error != nullptr) {
+      *error = "native capture has no active encoding targets";
+    }
+    return false;
+  }
+
   if (capture_running_.exchange(true)) {
     return true;
   }
 
   const int safe_fps = std::clamp(fps, 1, 30);
+  capture_fps_ = safe_fps;
+  if (!h264_encoder_) {
+    h264_encoder_ = std::make_unique<H264EncoderContext>();
+  }
+
+#if !FERRYMAN_WITH_FFMPEG
+  capture_running_ = false;
+  if (error != nullptr) {
+    *error = "native capture requires ffmpeg (libavcodec/libswscale/libavutil)";
+  }
+  return false;
+#endif
 
 #if defined(__APPLE__)
   if (!CGPreflightScreenCaptureAccess() && !CGRequestScreenCaptureAccess()) {
@@ -832,14 +1288,6 @@ bool ScreenService::StartCapture(int fps, std::string* error) {
   }
 #endif
 
-#if (defined(__linux__) || defined(_WIN32)) && !FERRYMAN_WITH_FFMPEG
-  capture_running_ = false;
-  if (error != nullptr) {
-    *error = "native capture requires ffmpeg (libavcodec/libswscale/libavutil)";
-  }
-  return false;
-#endif
-
   capture_thread_ = std::thread([this, safe_fps]() {
     CaptureLoop(safe_fps);
   });
@@ -856,6 +1304,9 @@ void ScreenService::StopCapture() {
 #endif
   if (capture_thread_.joinable()) {
     capture_thread_.join();
+  }
+  if (h264_encoder_) {
+    h264_encoder_->Reset();
   }
 }
 
@@ -890,6 +1341,17 @@ bool ScreenService::CaptureFrame(EncodedFrame* frame, std::string* error) {
     return false;
   }
 
+  const bool want_jpeg = encode_jpeg_.load();
+  const bool want_h264 = encode_h264_.load();
+  const int scale_percent = std::clamp(capture_scale_percent_.load(), 40, 100);
+  const int target_h264_bitrate_bps = std::clamp(h264_bitrate_bps_.load(), 500'000, 12'000'000);
+  if (!want_jpeg && !want_h264) {
+    if (error != nullptr) {
+      *error = "native capture has no active encoding targets";
+    }
+    return false;
+  }
+
 #if defined(__APPLE__)
   if (!capture_bridge_) {
     if (error != nullptr) {
@@ -903,16 +1365,115 @@ bool ScreenService::CaptureFrame(EncodedFrame* frame, std::string* error) {
     return false;
   }
 
-  if (raw_frame.jpeg_bytes.empty()) {
+  if (raw_frame.width <= 0 || raw_frame.height <= 0 ||
+      raw_frame.stride_bytes <= 0 || raw_frame.bgra_bytes.empty()) {
     if (error != nullptr) {
-      *error = "screen capture produced empty frame";
+      *error = "screen capture produced empty bgra frame";
     }
     return false;
   }
 
-  frame->width = raw_frame.width;
-  frame->height = raw_frame.height;
-  frame->jpeg_base64 = util::Base64Encode(raw_frame.jpeg_bytes);
+#if FERRYMAN_WITH_FFMPEG
+  int encode_width = std::max(2, (raw_frame.width * scale_percent) / 100);
+  int encode_height = std::max(2, (raw_frame.height * scale_percent) / 100);
+  if (want_h264) {
+    if ((encode_width & 1) != 0 && encode_width > 2) {
+      encode_width -= 1;
+    }
+    if ((encode_height & 1) != 0 && encode_height > 2) {
+      encode_height -= 1;
+    }
+  }
+
+  const uint8_t* encode_source = reinterpret_cast<const uint8_t*>(raw_frame.bgra_bytes.data());
+  int encode_stride = raw_frame.stride_bytes;
+  std::string scaled_bgra;
+  if (encode_width != raw_frame.width || encode_height != raw_frame.height) {
+    std::string scale_error;
+    if (!ScaleFrameWithFfmpeg(encode_source, raw_frame.width, raw_frame.height, raw_frame.stride_bytes,
+                              AV_PIX_FMT_BGRA, encode_width, encode_height, &scaled_bgra, &encode_stride,
+                              &scale_error)) {
+      if (error != nullptr) {
+        *error = scale_error.empty() ? "failed to scale bgra frame" : scale_error;
+      }
+      return false;
+    }
+    encode_source = reinterpret_cast<const uint8_t*>(scaled_bgra.data());
+  }
+
+  frame->width = encode_width;
+  frame->height = encode_height;
+  bool produced_any = false;
+  std::string first_error;
+  auto remember_error = [&first_error](const std::string& candidate) {
+    if (first_error.empty() && !candidate.empty()) {
+      first_error = candidate;
+    }
+  };
+
+  if (want_jpeg) {
+    if (!raw_frame.jpeg_bytes.empty() && encode_width == raw_frame.width && encode_height == raw_frame.height) {
+      frame->jpeg_bytes = raw_frame.jpeg_bytes;
+      produced_any = true;
+    } else {
+      std::string jpeg_bytes;
+      std::string jpeg_error;
+      if (EncodeFrameToJpegFfmpeg(
+              encode_source,
+              encode_width,
+              encode_height,
+              encode_stride,
+              AV_PIX_FMT_BGRA,
+              &jpeg_bytes,
+              &jpeg_error)) {
+        frame->jpeg_bytes = std::move(jpeg_bytes);
+        produced_any = true;
+      } else {
+        remember_error(jpeg_error);
+      }
+    }
+  }
+
+  if (want_h264) {
+    if (!h264_encoder_) {
+      h264_encoder_ = std::make_unique<H264EncoderContext>();
+    }
+
+    std::string h264_error;
+    if (h264_encoder_->EnsureConfigured(encode_width, encode_height, capture_fps_, target_h264_bitrate_bps,
+                                        AV_PIX_FMT_BGRA, &h264_error)) {
+      std::string h264;
+      bool keyframe = false;
+      if (h264_encoder_->EncodeFrame(
+              encode_source,
+              encode_stride,
+              &h264,
+              &keyframe,
+              &h264_error)) {
+        frame->h264_bytes = std::move(h264);
+        frame->h264_keyframe = keyframe;
+        produced_any = true;
+      } else {
+        remember_error(h264_error);
+      }
+    } else {
+      remember_error(h264_error);
+    }
+  }
+
+  if (!produced_any) {
+    if (error != nullptr) {
+      *error = first_error.empty() ? "failed to encode frame for requested targets" : first_error;
+    }
+    return false;
+  }
+#else
+  if (error != nullptr) {
+    *error = "macOS native capture requires ffmpeg";
+  }
+  return false;
+#endif
+
   return true;
 #elif defined(__linux__)
 #if !FERRYMAN_WITH_FFMPEG
@@ -972,14 +1533,81 @@ bool ScreenService::CaptureFrame(EncodedFrame* frame, std::string* error) {
   XDestroyImage(image);
   XCloseDisplay(display);
 
-  std::string jpeg;
-  if (!EncodeBgrToJpegFfmpeg(bgr.data(), width, height, width * 3, &jpeg, error)) {
-    return false;
+  int encode_width = std::max(2, (width * scale_percent) / 100);
+  int encode_height = std::max(2, (height * scale_percent) / 100);
+  if (want_h264) {
+    if ((encode_width & 1) != 0 && encode_width > 2) {
+      encode_width -= 1;
+    }
+    if ((encode_height & 1) != 0 && encode_height > 2) {
+      encode_height -= 1;
+    }
   }
 
-  frame->width = width;
-  frame->height = height;
-  frame->jpeg_base64 = util::Base64Encode(jpeg);
+  const uint8_t* encode_source = bgr.data();
+  int encode_stride = width * 3;
+  std::string scaled_bgr;
+  if (encode_width != width || encode_height != height) {
+    std::string scale_error;
+    if (!ScaleFrameWithFfmpeg(encode_source, width, height, width * 3, AV_PIX_FMT_BGR24,
+                              encode_width, encode_height, &scaled_bgr, &encode_stride, &scale_error)) {
+      if (error != nullptr) {
+        *error = scale_error.empty() ? "failed to scale bgr frame" : scale_error;
+      }
+      return false;
+    }
+    encode_source = reinterpret_cast<const uint8_t*>(scaled_bgr.data());
+  }
+
+  frame->width = encode_width;
+  frame->height = encode_height;
+  bool produced_any = false;
+  std::string first_error;
+  auto remember_error = [&first_error](const std::string& candidate) {
+    if (first_error.empty() && !candidate.empty()) {
+      first_error = candidate;
+    }
+  };
+
+  if (want_jpeg) {
+    std::string jpeg;
+    std::string jpeg_error;
+    if (EncodeFrameToJpegFfmpeg(encode_source, encode_width, encode_height, encode_stride, AV_PIX_FMT_BGR24, &jpeg,
+                                &jpeg_error)) {
+      frame->jpeg_bytes = std::move(jpeg);
+      produced_any = true;
+    } else {
+      remember_error(jpeg_error);
+    }
+  }
+
+  if (want_h264) {
+    if (!h264_encoder_) {
+      h264_encoder_ = std::make_unique<H264EncoderContext>();
+    }
+    std::string h264_error;
+    if (h264_encoder_->EnsureConfigured(encode_width, encode_height, capture_fps_, target_h264_bitrate_bps,
+                                        AV_PIX_FMT_BGR24, &h264_error)) {
+      std::string h264;
+      bool keyframe = false;
+      if (h264_encoder_->EncodeFrame(encode_source, encode_stride, &h264, &keyframe, &h264_error)) {
+        frame->h264_bytes = std::move(h264);
+        frame->h264_keyframe = keyframe;
+        produced_any = true;
+      } else {
+        remember_error(h264_error);
+      }
+    } else {
+      remember_error(h264_error);
+    }
+  }
+
+  if (!produced_any) {
+    if (error != nullptr) {
+      *error = first_error.empty() ? "failed to encode frame for requested targets" : first_error;
+    }
+    return false;
+  }
   return true;
 #endif
 #elif defined(_WIN32)
@@ -1064,14 +1692,81 @@ bool ScreenService::CaptureFrame(EncodedFrame* frame, std::string* error) {
   DeleteDC(memory_dc);
   ReleaseDC(nullptr, screen_dc);
 
-  std::string jpeg;
-  if (!EncodeBgrToJpegFfmpeg(bgr.data(), width, height, width * 3, &jpeg, error)) {
-    return false;
+  int encode_width = std::max(2, (width * scale_percent) / 100);
+  int encode_height = std::max(2, (height * scale_percent) / 100);
+  if (want_h264) {
+    if ((encode_width & 1) != 0 && encode_width > 2) {
+      encode_width -= 1;
+    }
+    if ((encode_height & 1) != 0 && encode_height > 2) {
+      encode_height -= 1;
+    }
   }
 
-  frame->width = width;
-  frame->height = height;
-  frame->jpeg_base64 = util::Base64Encode(jpeg);
+  const uint8_t* encode_source = bgr.data();
+  int encode_stride = width * 3;
+  std::string scaled_bgr;
+  if (encode_width != width || encode_height != height) {
+    std::string scale_error;
+    if (!ScaleFrameWithFfmpeg(encode_source, width, height, width * 3, AV_PIX_FMT_BGR24,
+                              encode_width, encode_height, &scaled_bgr, &encode_stride, &scale_error)) {
+      if (error != nullptr) {
+        *error = scale_error.empty() ? "failed to scale bgr frame" : scale_error;
+      }
+      return false;
+    }
+    encode_source = reinterpret_cast<const uint8_t*>(scaled_bgr.data());
+  }
+
+  frame->width = encode_width;
+  frame->height = encode_height;
+  bool produced_any = false;
+  std::string first_error;
+  auto remember_error = [&first_error](const std::string& candidate) {
+    if (first_error.empty() && !candidate.empty()) {
+      first_error = candidate;
+    }
+  };
+
+  if (want_jpeg) {
+    std::string jpeg;
+    std::string jpeg_error;
+    if (EncodeFrameToJpegFfmpeg(encode_source, encode_width, encode_height, encode_stride, AV_PIX_FMT_BGR24, &jpeg,
+                                &jpeg_error)) {
+      frame->jpeg_bytes = std::move(jpeg);
+      produced_any = true;
+    } else {
+      remember_error(jpeg_error);
+    }
+  }
+
+  if (want_h264) {
+    if (!h264_encoder_) {
+      h264_encoder_ = std::make_unique<H264EncoderContext>();
+    }
+    std::string h264_error;
+    if (h264_encoder_->EnsureConfigured(encode_width, encode_height, capture_fps_, target_h264_bitrate_bps,
+                                        AV_PIX_FMT_BGR24, &h264_error)) {
+      std::string h264;
+      bool keyframe = false;
+      if (h264_encoder_->EncodeFrame(encode_source, encode_stride, &h264, &keyframe, &h264_error)) {
+        frame->h264_bytes = std::move(h264);
+        frame->h264_keyframe = keyframe;
+        produced_any = true;
+      } else {
+        remember_error(h264_error);
+      }
+    } else {
+      remember_error(h264_error);
+    }
+  }
+
+  if (!produced_any) {
+    if (error != nullptr) {
+      *error = first_error.empty() ? "failed to encode frame for requested targets" : first_error;
+    }
+    return false;
+  }
   return true;
 #endif
 #else
