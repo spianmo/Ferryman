@@ -5,6 +5,9 @@
   "dependencies": [
     "libhv",
     "nlohmann-json",
-    "ffmpeg"
+    {
+      "name": "ffmpeg",
+      "features": ["x264", "x265", "vpx"]
+    }
   ]
 }
