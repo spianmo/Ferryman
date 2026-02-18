@@ -6,6 +6,7 @@ import type {
   WheelEvent as ReactWheelEvent,
 } from "react";
 import { FiMaximize, FiMinimize, FiMonitor, FiPause, FiPlay } from "react-icons/fi";
+import { createPortal } from "react-dom";
 
 import { emitUnauthorized, getScreenCapabilities, wsUrl } from "../api/client";
 import { useI18n } from "../i18n";
@@ -295,6 +296,15 @@ function getFullscreenElement(): Element | null {
   return document.fullscreenElement ?? doc.webkitFullscreenElement ?? null;
 }
 
+function shouldUsePseudoFullscreen(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  const coarsePointer =
+    typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches;
+  return coarsePointer || navigator.maxTouchPoints > 0;
+}
+
 function waitForFullscreenState(targetIsFullscreen: boolean, timeoutMs = 450): Promise<boolean> {
   if (targetIsFullscreen) {
     if (getFullscreenElement()) {
@@ -355,6 +365,8 @@ export default function ScreenPage({ session }: Props) {
   const supportsVP9DecodeRef = useRef<boolean | null>(null);
   const nativeDecoderWidthRef = useRef(0);
   const nativeDecoderHeightRef = useRef(0);
+  const nativeFrameWidthRef = useRef(0);
+  const nativeFrameHeightRef = useRef(0);
   const nativeDecoderTimestampRef = useRef(0);
   const nativeDecoderSawKeyRef = useRef(false);
   const nativeDropUntilKeyframeRef = useRef(false);
@@ -433,6 +445,7 @@ export default function ScreenPage({ session }: Props) {
   const [nativeLatencyMs, setNativeLatencyMs] = useState<number | null>(null);
   const [nativeInputFocused, setNativeInputFocused] = useState(false);
   const [nativeFullscreen, setNativeFullscreen] = useState(false);
+  const [nativePseudoFullscreen, setNativePseudoFullscreen] = useState(false);
 
   useEffect(() => {
     return () => {
@@ -453,6 +466,20 @@ export default function ScreenPage({ session }: Props) {
       document.removeEventListener("webkitfullscreenchange", onFullscreenChange);
     };
   }, []);
+
+  useEffect(() => {
+    if (!nativePseudoFullscreen) {
+      return;
+    }
+    const prevBodyOverflow = document.body.style.overflow;
+    const prevHtmlOverflow = document.documentElement.style.overflow;
+    document.body.style.overflow = "hidden";
+    document.documentElement.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prevBodyOverflow;
+      document.documentElement.style.overflow = prevHtmlOverflow;
+    };
+  }, [nativePseudoFullscreen]);
 
   const probeDecodeSupport = (
     candidates: readonly string[],
@@ -555,6 +582,8 @@ export default function ScreenPage({ session }: Props) {
 
   const resetNativeFrameState = () => {
     nativeHasFrameRef.current = false;
+    nativeFrameWidthRef.current = 0;
+    nativeFrameHeightRef.current = 0;
     nativeStatsRef.current.fpsWindowStartMs = 0;
     nativeStatsRef.current.fpsFrameCount = 0;
     nativeStatsRef.current.lastFrameAtMs = 0;
@@ -769,6 +798,8 @@ export default function ScreenPage({ session }: Props) {
           canvas.width = frame.displayWidth;
           canvas.height = frame.displayHeight;
         }
+        nativeFrameWidthRef.current = frame.displayWidth;
+        nativeFrameHeightRef.current = frame.displayHeight;
         const ctx = canvas.getContext("2d");
         ctx?.drawImage(frame, 0, 0, canvas.width, canvas.height);
         const frameTimestamp = Number(frame.timestamp ?? 0);
@@ -890,6 +921,8 @@ export default function ScreenPage({ session }: Props) {
   const handleNativeBinaryFrameBuffer = (buffer: ArrayBuffer) => {
     const frame = parseNativeBinaryFrame(buffer);
     if (!frame) return;
+    nativeFrameWidthRef.current = frame.width;
+    nativeFrameHeightRef.current = frame.height;
 
     if (
       frame.codec === "h264" ||
@@ -1186,6 +1219,12 @@ export default function ScreenPage({ session }: Props) {
         const frame = String(payload.jpeg_base64 ?? "");
         if (frame.length > 0) {
           const capturedAtMs = Number(payload.captured_at_ms ?? 0);
+          const width = Number(payload.width ?? 0);
+          const height = Number(payload.height ?? 0);
+          if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+            nativeFrameWidthRef.current = width;
+            nativeFrameHeightRef.current = height;
+          }
           closeNativeDecoder();
           setNativeCodec("jpeg");
           revokeNativeFrameObjectUrl();
@@ -1350,6 +1389,15 @@ export default function ScreenPage({ session }: Props) {
     const surface = nativeSurfaceRef.current as FullscreenSurface | null;
     const doc = document as FullscreenDocument;
     if (!surface) return;
+    if (nativePseudoFullscreen) {
+      setNativePseudoFullscreen(false);
+      return;
+    }
+    if (shouldUsePseudoFullscreen()) {
+      setNativePseudoFullscreen(true);
+      window.setTimeout(() => nativeSurfaceRef.current?.focus(), 0);
+      return;
+    }
     try {
       if (getFullscreenElement()) {
         if (typeof document.exitFullscreen === "function") {
@@ -1398,6 +1446,45 @@ export default function ScreenPage({ session }: Props) {
     send({ action: "input_event", type, payload });
   };
 
+  const pointerPayloadForEvent = (element: HTMLElement, clientX: number, clientY: number) => {
+    const rect = element.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      return null;
+    }
+
+    let sourceWidth = 0;
+    let sourceHeight = 0;
+    if (element instanceof HTMLCanvasElement) {
+      sourceWidth = element.width;
+      sourceHeight = element.height;
+    } else if (element instanceof HTMLImageElement) {
+      sourceWidth = element.naturalWidth;
+      sourceHeight = element.naturalHeight;
+    }
+    if (sourceWidth <= 0 || sourceHeight <= 0) {
+      sourceWidth = nativeFrameWidthRef.current;
+      sourceHeight = nativeFrameHeightRef.current;
+    }
+
+    let viewLeft = rect.left;
+    let viewTop = rect.top;
+    let viewWidth = rect.width;
+    let viewHeight = rect.height;
+    if (sourceWidth > 0 && sourceHeight > 0) {
+      const scale = Math.min(rect.width / sourceWidth, rect.height / sourceHeight);
+      if (Number.isFinite(scale) && scale > 0) {
+        viewWidth = sourceWidth * scale;
+        viewHeight = sourceHeight * scale;
+        viewLeft = rect.left + (rect.width - viewWidth) / 2;
+        viewTop = rect.top + (rect.height - viewHeight) / 2;
+      }
+    }
+
+    const x = Math.min(Math.max(clientX - viewLeft, 0), viewWidth);
+    const y = Math.min(Math.max(clientY - viewTop, 0), viewHeight);
+    return { x, y, width: viewWidth, height: viewHeight };
+  };
+
   const onNativeMouseMove = (event: ReactMouseEvent<HTMLElement>) => {
     if (!nativeStreaming) return;
 
@@ -1407,18 +1494,20 @@ export default function ScreenPage({ session }: Props) {
     }
     lastMouseMoveAtRef.current = now;
 
-    const rect = event.currentTarget.getBoundingClientRect();
-    sendInput("mouse_move", {
-      x: event.clientX - rect.left,
-      y: event.clientY - rect.top,
-      width: rect.width,
-      height: rect.height,
-    });
+    const payload = pointerPayloadForEvent(event.currentTarget, event.clientX, event.clientY);
+    if (!payload) {
+      return;
+    }
+    sendInput("mouse_move", payload);
   };
 
   const onNativeClick = (event: ReactMouseEvent<HTMLElement>) => {
     if (!nativeStreaming) return;
     nativeSurfaceRef.current?.focus();
+    const payload = pointerPayloadForEvent(event.currentTarget, event.clientX, event.clientY);
+    if (payload) {
+      sendInput("mouse_move", payload);
+    }
     sendInput("mouse_click", {
       button: event.button,
     });
@@ -1427,6 +1516,10 @@ export default function ScreenPage({ session }: Props) {
   const onNativeWheel = (event: ReactWheelEvent<HTMLElement>) => {
     if (!nativeStreaming) return;
     event.preventDefault();
+    const payload = pointerPayloadForEvent(event.currentTarget, event.clientX, event.clientY);
+    if (payload) {
+      sendInput("mouse_move", payload);
+    }
     sendInput("mouse_wheel", {
       delta_y: Math.round(event.deltaY),
     });
@@ -1454,6 +1547,94 @@ export default function ScreenPage({ session }: Props) {
   const onNativeKeyUp = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     sendKeyEvent("key_up", event);
   };
+
+  const screenIsFullscreen = nativeFullscreen || nativePseudoFullscreen;
+
+  const renderNativeSurface = () => (
+    <div
+      ref={nativeSurfaceRef}
+      className={cn(
+        nativePseudoFullscreen
+          ? "native-surface h-full w-full bg-black outline-none"
+          : "native-surface min-h-0 flex-1 rounded-2xl bg-neutral-950 shadow-sm ring-1 ring-slate-200/70 outline-none dark:ring-neutral-800/70",
+        nativeInputFocused &&
+          !nativePseudoFullscreen &&
+          "ring-2 ring-slate-900/70 dark:ring-neutral-50/70"
+      )}
+      tabIndex={0}
+      onMouseDown={() => nativeSurfaceRef.current?.focus()}
+      onFocus={() => setNativeInputFocused(true)}
+      onBlur={() => setNativeInputFocused(false)}
+      onKeyDown={onNativeKeyDown}
+      onKeyUp={onNativeKeyUp}
+    >
+      <div className="relative h-full w-full">
+        {nativeStreaming && nativeCodec !== "jpeg" ? (
+          <canvas
+            ref={nativeCanvasRef}
+            className={cn(
+              "block h-full w-full select-none object-contain",
+              nativePseudoFullscreen ? "rounded-none" : "rounded-2xl"
+            )}
+            onMouseMove={onNativeMouseMove}
+            onClick={onNativeClick}
+            onWheel={onNativeWheel}
+            onContextMenu={(event) => event.preventDefault()}
+          />
+        ) : nativeFrameUrl ? (
+          <img
+            src={nativeFrameUrl}
+            className={cn(
+              "block h-full w-full select-none object-contain",
+              nativePseudoFullscreen ? "rounded-none" : "rounded-2xl"
+            )}
+            alt="native screen frame"
+            onMouseMove={onNativeMouseMove}
+            onClick={onNativeClick}
+            onWheel={onNativeWheel}
+            onContextMenu={(event) => event.preventDefault()}
+            draggable={false}
+          />
+        ) : (
+          <div
+            className={cn(
+              "grid h-full w-full place-items-center bg-neutral-950 text-sm text-neutral-300",
+              nativePseudoFullscreen ? "rounded-none" : "rounded-2xl"
+            )}
+          >
+            {nativeStreaming ? t("screen.native_wait") : t("screen.native_start_hint")}
+          </div>
+        )}
+        {nativeStreaming && nativeCodec !== "jpeg" && !nativeHasFrame ? (
+          <div
+            className={cn(
+              "pointer-events-none absolute inset-0 grid place-items-center bg-neutral-950 text-sm text-neutral-300",
+              nativePseudoFullscreen ? "rounded-none" : "rounded-2xl"
+            )}
+          >
+            {t("screen.native_wait")}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+
+  const pseudoFullscreenOverlay =
+    nativePseudoFullscreen && typeof document !== "undefined"
+      ? createPortal(
+          <div className="fixed left-0 top-0 z-[120] h-[100dvh] w-screen bg-black">
+            {renderNativeSurface()}
+            <button
+              className="absolute right-3 top-[calc(env(safe-area-inset-top)+0.5rem)] z-30 inline-flex h-9 items-center justify-center gap-1 rounded-xl bg-black/65 px-2.5 text-[11px] font-semibold text-white ring-1 ring-white/20 backdrop-blur-sm transition-colors hover:bg-black/75"
+              onClick={() => setNativePseudoFullscreen(false)}
+            >
+              <FiMinimize />
+              {t("screen.exit_fullscreen")}
+            </button>
+          </div>,
+          document.body
+        )
+      : null;
 
   return (
     <section className="flex h-full min-h-[460px] flex-col rounded-3xl bg-white/70 p-4 shadow-soft ring-1 ring-slate-200/70 backdrop-blur dark:bg-neutral-900/55 dark:ring-neutral-800/70">
@@ -1568,60 +1749,16 @@ export default function ScreenPage({ session }: Props) {
             className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-2xl bg-slate-100 px-4 text-sm font-semibold text-slate-700 hover:bg-slate-200 sm:w-auto dark:bg-neutral-800 dark:text-neutral-100 dark:hover:bg-neutral-700"
             onClick={() => void toggleNativeFullscreen()}
           >
-            {nativeFullscreen ? <FiMinimize /> : <FiMaximize />}{" "}
-            {nativeFullscreen ? t("screen.exit_fullscreen") : t("screen.fullscreen")}
+            {screenIsFullscreen ? <FiMinimize /> : <FiMaximize />}{" "}
+            {screenIsFullscreen ? t("screen.exit_fullscreen") : t("screen.fullscreen")}
           </button>
         </div>
       </div>
 
       <div className="mt-4 flex min-h-0 flex-1 flex-col">
-        <div
-          ref={nativeSurfaceRef}
-          className={cn(
-            "native-surface min-h-0 flex-1 rounded-2xl bg-neutral-950 shadow-sm ring-1 ring-slate-200/70 outline-none dark:ring-neutral-800/70",
-            nativeInputFocused && "ring-2 ring-slate-900/70 dark:ring-neutral-50/70"
-          )}
-          tabIndex={0}
-          onMouseDown={() => nativeSurfaceRef.current?.focus()}
-          onFocus={() => setNativeInputFocused(true)}
-          onBlur={() => setNativeInputFocused(false)}
-          onKeyDown={onNativeKeyDown}
-          onKeyUp={onNativeKeyUp}
-        >
-          {nativeStreaming && nativeCodec !== "jpeg" ? (
-            <div className="relative h-full w-full">
-              <canvas
-                ref={nativeCanvasRef}
-                className="block h-full w-full select-none rounded-2xl object-contain"
-                onMouseMove={onNativeMouseMove}
-                onClick={onNativeClick}
-                onWheel={onNativeWheel}
-                onContextMenu={(event) => event.preventDefault()}
-              />
-              {!nativeHasFrame ? (
-                <div className="pointer-events-none absolute inset-0 grid place-items-center rounded-2xl bg-neutral-950 text-sm text-neutral-300">
-                  {t("screen.native_wait")}
-                </div>
-              ) : null}
-            </div>
-          ) : nativeFrameUrl ? (
-            <img
-              src={nativeFrameUrl}
-              className="block h-full w-full select-none rounded-2xl object-contain"
-              alt="native screen frame"
-              onMouseMove={onNativeMouseMove}
-              onClick={onNativeClick}
-              onWheel={onNativeWheel}
-              onContextMenu={(event) => event.preventDefault()}
-              draggable={false}
-            />
-          ) : (
-            <div className="grid h-full w-full place-items-center rounded-2xl bg-neutral-950 text-sm text-neutral-300">
-              {nativeStreaming ? t("screen.native_wait") : t("screen.native_start_hint")}
-            </div>
-          )}
-        </div>
+        {nativePseudoFullscreen ? null : renderNativeSurface()}
       </div>
+      {pseudoFullscreenOverlay}
     </section>
   );
 }
