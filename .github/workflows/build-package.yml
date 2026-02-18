@@ -81,6 +81,25 @@ jobs:
           npm ci
           npm run build
 
+      - name: Patch vcpkg manifest for macOS CI (disable x265 only in CI)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          node -e '
+            const fs = require("fs");
+            const file = "vcpkg.json";
+            const json = JSON.parse(fs.readFileSync(file, "utf8"));
+            if (Array.isArray(json.dependencies)) {
+              for (const dep of json.dependencies) {
+                if (dep && typeof dep === "object" && dep.name === "ffmpeg" && Array.isArray(dep.features)) {
+                  dep.features = dep.features.filter((feature) => feature !== "x265");
+                }
+              }
+            }
+            fs.writeFileSync(file, JSON.stringify(json, null, 2) + "\n");
+          '
+          cat vcpkg.json
+
       - name: Restore vcpkg cache
         uses: actions/cache@v4
         with:
@@ -127,6 +146,25 @@ jobs:
         shell: pwsh
         run: |
           & "$env:VCPKG_ROOT\vcpkg.exe" install --triplet "${{ matrix.triplet }}"
+
+      - name: Dump x265 build logs on macOS failure
+        if: ${{ failure() && runner.os == 'macOS' }}
+        shell: bash
+        run: |
+          set +e
+          echo "==== vcpkg x265 logs ===="
+          ls -la "$VCPKG_ROOT/buildtrees/x265" || true
+          for f in \
+            "$VCPKG_ROOT/buildtrees/x265/config-arm64-osx-dbg-CMakeCache.txt.log" \
+            "$VCPKG_ROOT/buildtrees/x265/config-arm64-osx-rel-CMakeCache.txt.log" \
+            "$VCPKG_ROOT/buildtrees/x265/config-arm64-osx-dbg-CMakeConfigureLog.yaml.log" \
+            "$VCPKG_ROOT/buildtrees/x265/config-arm64-osx-rel-CMakeConfigureLog.yaml.log" \
+            "$VCPKG_ROOT/buildtrees/x265/config-arm64-osx-out.log"; do
+            if [[ -f "$f" ]]; then
+              echo "---- $f ----"
+              cat "$f"
+            fi
+          done
 
       - name: Configure (Release)
         if: runner.os != 'Windows'
