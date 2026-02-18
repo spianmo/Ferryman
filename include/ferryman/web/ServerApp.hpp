@@ -20,9 +20,22 @@
 #define FERRYMAN_WITH_LIBHV 0
 #endif
 
+#if defined(_WIN32) && !defined(NOMINMAX)
+#define NOMINMAX
+#endif
+
 #if FERRYMAN_WITH_LIBHV
 #include "hv/HttpServer.h"
 #include "hv/WebSocketServer.h"
+#endif
+
+#if defined(_WIN32)
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
 #endif
 
 namespace ferryman::web {
