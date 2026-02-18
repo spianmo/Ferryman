@@ -85,7 +85,11 @@ export async function getSessionMe(token: string) {
 
 export async function listFiles(token: string, path: string) {
   const encoded = encodeURIComponent(path);
-  return request<{ entries: Array<Record<string, unknown>> }>(
+  return request<{
+    entries: Array<Record<string, unknown>>;
+    current_path?: string;
+    root_path?: string;
+  }>(
     `/api/files/list?path=${encoded}`,
     { method: "GET" },
     token

@@ -17,6 +17,10 @@
     @apply bg-slate-50 text-slate-900 dark:bg-neutral-950 dark:text-neutral-50;
   }
 
+  button {
+    white-space: nowrap;
+  }
+
   .native-surface:fullscreen {
     background: #000;
     padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)

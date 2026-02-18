@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { toast } from "../toast";
-import { FiPlayCircle, FiRefreshCw } from "react-icons/fi";
+import { FiCommand, FiPlayCircle, FiRefreshCw } from "react-icons/fi";
 
 import { getTask, listTasks, startTask } from "../api/client";
 import { useI18n } from "../i18n";
@@ -74,12 +74,10 @@ export default function TasksPage({ token }: Props) {
       <section className="rounded-3xl bg-white/70 p-4 shadow-soft ring-1 ring-slate-200/70 backdrop-blur dark:bg-neutral-900/55 dark:ring-neutral-800/70">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <h2 className="text-base font-semibold tracking-tight text-slate-900 dark:text-neutral-50">
+            <h2 className="inline-flex items-center gap-2 text-base font-semibold tracking-tight text-slate-900 dark:text-neutral-50">
+              <FiCommand className="text-[15px]" />
               {t("tasks.title")}
             </h2>
-            <div className="mt-1 text-xs text-slate-500 dark:text-neutral-400">
-              {tasks.length}
-            </div>
           </div>
           <button
             className="inline-flex h-10 items-center gap-2 rounded-2xl bg-slate-100 px-4 text-sm font-semibold text-slate-700 hover:bg-slate-200 dark:bg-neutral-800 dark:text-neutral-100 dark:hover:bg-neutral-700"

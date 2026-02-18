@@ -8,6 +8,7 @@ import {
   FiList,
   FiRefreshCw,
   FiSave,
+  FiX,
 } from "react-icons/fi";
 
 import { listFiles, readFile, writeFile } from "../api/client";
@@ -24,6 +25,14 @@ type Props = {
 type FilesViewMode = "list" | "grid";
 
 const FILES_VIEW_MODE_KEY = "ferryman.files.view_mode";
+
+function normalizePath(value: string) {
+  if (!value) return "/";
+  if (value.length > 1 && value.endsWith("/")) {
+    return value.slice(0, -1);
+  }
+  return value;
+}
 
 function formatFileSize(bytes: number) {
   if (!Number.isFinite(bytes) || bytes < 0) return "--";
@@ -45,9 +54,11 @@ function formatFileSize(bytes: number) {
 export default function FilesPage({ token, query }: Props) {
   const { t } = useI18n();
   const [path, setPath] = useState("/");
+  const [rootPath, setRootPath] = useState("/");
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [selectedFile, setSelectedFile] = useState<string>("");
   const [fileContent, setFileContent] = useState<string>("");
+  const [editorOpen, setEditorOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [viewMode, setViewMode] = useState<FilesViewMode>(() => {
     if (typeof window === "undefined") return "list";
@@ -61,21 +72,69 @@ export default function FilesPage({ token, query }: Props) {
   }, [viewMode]);
 
   const loadList = async (targetPath = path) => {
+    const normalizedTargetPath = normalizePath(targetPath.trim() || "/");
     setLoading(true);
-    const res = await listFiles(token, targetPath);
+    const res = await listFiles(token, normalizedTargetPath);
     setLoading(false);
     if (!res.ok) {
       toast.error(res.error ?? t("toast.request_failed"));
       return;
     }
     const rows = (res.entries ?? []) as unknown as FileEntry[];
+    const serverCurrentPath = typeof res.current_path === "string" ? res.current_path : normalizedTargetPath;
+    const serverRootPath = typeof res.root_path === "string" ? res.root_path : rootPath;
     setEntries(rows);
-    setPath(targetPath);
+    setPath(normalizePath(serverCurrentPath));
+    setRootPath(normalizePath(serverRootPath));
   };
 
   useEffect(() => {
     void loadList("/");
   }, []);
+
+  useEffect(() => {
+    if (!editorOpen || typeof window === "undefined") return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setEditorOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [editorOpen]);
+
+  const normalizedPath = normalizePath(path);
+  const normalizedRootPath = normalizePath(rootPath);
+  const atRoot = normalizedPath === normalizedRootPath;
+
+  const breadcrumbs = (() => {
+    if (!normalizedRootPath) {
+      return [{ label: "/", path: "/" }];
+    }
+    const items: Array<{ label: string; path: string }> = [
+      { label: normalizedRootPath, path: normalizedRootPath },
+    ];
+    if (normalizedPath === normalizedRootPath) {
+      return items;
+    }
+
+    const rel = normalizedRootPath === "/"
+      ? normalizedPath.slice(1)
+      : normalizedPath.startsWith(`${normalizedRootPath}/`)
+        ? normalizedPath.slice(normalizedRootPath.length + 1)
+        : "";
+    if (!rel) {
+      return items;
+    }
+
+    let current = normalizedRootPath;
+    for (const part of rel.split("/")) {
+      if (!part) continue;
+      current = `${current}/${part}`;
+      items.push({ label: part, path: current });
+    }
+    return items;
+  })();
 
   const openFile = async (filePath: string) => {
     const res = await readFile(token, filePath);
@@ -85,6 +144,7 @@ export default function FilesPage({ token, query }: Props) {
     }
     setSelectedFile(filePath);
     setFileContent(decodeBase64Utf8(res.content_base64));
+    setEditorOpen(true);
   };
 
   const saveFile = async () => {
@@ -102,10 +162,19 @@ export default function FilesPage({ token, query }: Props) {
   };
 
   const parentPath = (() => {
-    if (path === "/") return "/";
-    const trimmed = path.endsWith("/") ? path.slice(0, -1) : path;
+    if (atRoot) return normalizedRootPath;
+    const trimmed = normalizedPath;
     const idx = trimmed.lastIndexOf("/");
-    return idx <= 0 ? "/" : trimmed.slice(0, idx);
+    if (idx <= 0) return normalizedRootPath;
+    const candidate = trimmed.slice(0, idx) || "/";
+    if (
+      normalizedRootPath !== "/" &&
+      candidate !== normalizedRootPath &&
+      !candidate.startsWith(`${normalizedRootPath}/`)
+    ) {
+      return normalizedRootPath;
+    }
+    return candidate;
   })();
 
   const visibleEntries = (() => {
@@ -117,20 +186,35 @@ export default function FilesPage({ token, query }: Props) {
   })();
 
   return (
-    <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+    <>
+      <div className="grid grid-cols-1 gap-4">
       <section className="rounded-3xl bg-white/70 p-4 shadow-soft ring-1 ring-slate-200/70 backdrop-blur dark:bg-neutral-900/55 dark:ring-neutral-800/70">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <h2 className="text-base font-semibold tracking-tight text-slate-900 dark:text-neutral-50">
+            <h2 className="inline-flex items-center gap-2 text-base font-semibold tracking-tight text-slate-900 dark:text-neutral-50">
+              <FiFolder className="text-[15px]" />
               {t("files.title")}
             </h2>
-            <div className="mt-1 font-mono text-xs text-slate-500 dark:text-neutral-400">{path}</div>
+            <div className="mt-1 flex flex-wrap items-center gap-1 font-mono text-xs text-slate-500 dark:text-neutral-400">
+              {breadcrumbs.map((item, idx) => (
+                <div key={item.path} className="flex items-center gap-1">
+                  {idx > 0 ? <span>/</span> : null}
+                  <button
+                    className="rounded px-1 py-0.5 transition-colors hover:bg-slate-200/70 hover:text-slate-700 dark:hover:bg-neutral-800 dark:hover:text-neutral-100"
+                    onClick={() => void loadList(item.path)}
+                    title={item.path}
+                  >
+                    {item.label}
+                  </button>
+                </div>
+              ))}
+            </div>
           </div>
           <div className="flex items-center gap-2">
             <button
               className="grid h-10 w-10 place-items-center rounded-2xl bg-slate-100 text-slate-700 hover:bg-slate-200 disabled:opacity-50 dark:bg-neutral-800 dark:text-neutral-100 dark:hover:bg-neutral-700"
               onClick={() => void loadList(parentPath)}
-              disabled={path === "/"}
+              disabled={atRoot}
               title={t("common.up")}
             >
               <FiChevronLeft />
@@ -183,7 +267,7 @@ export default function FilesPage({ token, query }: Props) {
               if (e.key === "Enter") void loadList(path);
             }}
             className="w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none placeholder:text-slate-400 focus:border-slate-300 dark:border-neutral-800 dark:bg-neutral-950/40 dark:text-neutral-50 dark:placeholder:text-neutral-500 dark:focus:border-neutral-700"
-            placeholder="/"
+            placeholder={normalizedRootPath}
           />
           <button
             className="inline-flex h-10 shrink-0 items-center justify-center rounded-2xl bg-slate-900 px-4 text-sm font-semibold text-white shadow-sm hover:bg-slate-800 dark:bg-neutral-50 dark:text-neutral-900 dark:hover:bg-white"
@@ -257,33 +341,55 @@ export default function FilesPage({ token, query }: Props) {
           ) : null}
         </div>
       </section>
+      </div>
 
-      <section className="rounded-3xl bg-white/70 p-4 shadow-soft ring-1 ring-slate-200/70 backdrop-blur dark:bg-neutral-900/55 dark:ring-neutral-800/70">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <h2 className="text-base font-semibold tracking-tight text-slate-900 dark:text-neutral-50">
-              {t("files.editor")}
-            </h2>
-            <div className="mt-1 font-mono text-xs text-slate-500 dark:text-neutral-400">
-              {selectedFile || t("files.select_file")}
+      {editorOpen ? (
+        <div className="fixed inset-0 z-50 p-4 sm:p-6">
+          <div
+            className="absolute inset-0 bg-slate-900/45 backdrop-blur-sm"
+            onClick={() => setEditorOpen(false)}
+          />
+          <section className="relative mx-auto flex h-full max-h-[900px] w-full max-w-6xl flex-col rounded-3xl bg-white/95 p-4 shadow-soft ring-1 ring-slate-200/80 dark:bg-neutral-900/95 dark:ring-neutral-800/80">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <h2 className="text-base font-semibold tracking-tight text-slate-900 dark:text-neutral-50">
+                  {t("files.editor")}
+                </h2>
+                <div
+                  className="mt-1 truncate font-mono text-xs text-slate-500 dark:text-neutral-400"
+                  title={selectedFile}
+                >
+                  {selectedFile || t("files.select_file")}
+                </div>
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                <button
+                  onClick={() => setEditorOpen(false)}
+                  className="inline-flex h-10 w-10 items-center justify-center rounded-2xl bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-neutral-800 dark:text-neutral-100 dark:hover:bg-neutral-700"
+                  title={t("common.close")}
+                  aria-label={t("common.close")}
+                >
+                  <FiX />
+                </button>
+                <button
+                  onClick={() => void saveFile()}
+                  disabled={!selectedFile}
+                  className="inline-flex h-10 items-center gap-2 rounded-2xl bg-slate-900 px-4 text-sm font-semibold text-white shadow-sm hover:bg-slate-800 disabled:opacity-50 dark:bg-neutral-50 dark:text-neutral-900 dark:hover:bg-white"
+                >
+                  <FiSave /> {t("common.save")}
+                </button>
+              </div>
             </div>
-          </div>
-          <button
-            onClick={() => void saveFile()}
-            disabled={!selectedFile}
-            className="inline-flex h-10 items-center gap-2 rounded-2xl bg-slate-900 px-4 text-sm font-semibold text-white shadow-sm hover:bg-slate-800 disabled:opacity-50 dark:bg-neutral-50 dark:text-neutral-900 dark:hover:bg-white"
-          >
-            <FiSave /> {t("common.save")}
-          </button>
-        </div>
 
-        <textarea
-          className="mt-4 min-h-[560px] w-full rounded-2xl border border-slate-200 bg-white px-3 py-3 font-mono text-[13px] leading-relaxed text-slate-900 shadow-sm outline-none placeholder:text-slate-400 focus:border-slate-300 dark:border-neutral-800 dark:bg-neutral-950/40 dark:text-neutral-50 dark:placeholder:text-neutral-500 dark:focus:border-neutral-700"
-          value={fileContent}
-          onChange={(event) => setFileContent(event.target.value)}
-          placeholder={selectedFile ? "" : t("files.select_file")}
-        />
-      </section>
-    </div>
+            <textarea
+              className="mt-4 h-full min-h-0 w-full flex-1 rounded-2xl border border-slate-200 bg-white px-3 py-3 font-mono text-[13px] leading-relaxed text-slate-900 shadow-sm outline-none placeholder:text-slate-400 focus:border-slate-300 dark:border-neutral-800 dark:bg-neutral-950/50 dark:text-neutral-50 dark:placeholder:text-neutral-500 dark:focus:border-neutral-700"
+              value={fileContent}
+              onChange={(event) => setFileContent(event.target.value)}
+              placeholder={selectedFile ? "" : t("files.select_file")}
+            />
+          </section>
+        </div>
+      ) : null}
+    </>
   );
 }

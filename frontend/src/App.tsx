@@ -303,17 +303,19 @@ export default function App() {
                     </div>
                   </div>
 
-                  <div className="hidden flex-1 md:block">
-                    <div className="relative">
-                      <FiSearch className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                      <input
-                        value={search}
-                        onChange={(e) => setSearch(e.target.value)}
-                        placeholder={t("top.search")}
-                        className="w-full rounded-2xl border border-slate-200 bg-white/80 py-2 pl-10 pr-3 text-sm text-slate-900 shadow-sm outline-none ring-0 placeholder:text-slate-400 focus:border-slate-300 dark:border-neutral-800 dark:bg-neutral-950/40 dark:text-neutral-50 dark:placeholder:text-neutral-500 dark:focus:border-neutral-700"
-                      />
+                  {activeTab === "files" ? (
+                    <div className="hidden flex-1 md:block">
+                      <div className="relative">
+                        <FiSearch className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                        <input
+                          value={search}
+                          onChange={(e) => setSearch(e.target.value)}
+                          placeholder={t("top.search")}
+                          className="w-full rounded-2xl border border-slate-200 bg-white/80 py-2 pl-10 pr-3 text-sm text-slate-900 shadow-sm outline-none ring-0 placeholder:text-slate-400 focus:border-slate-300 dark:border-neutral-800 dark:bg-neutral-950/40 dark:text-neutral-50 dark:placeholder:text-neutral-500 dark:focus:border-neutral-700"
+                        />
+                      </div>
                     </div>
-                  </div>
+                  ) : null}
 
                   <div className="ml-auto flex shrink-0 items-center gap-2">
                     <button
@@ -342,17 +344,19 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="mt-3 md:hidden">
-                  <div className="relative">
-                    <FiSearch className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                    <input
-                      value={search}
-                      onChange={(e) => setSearch(e.target.value)}
-                      placeholder={t("top.search")}
-                      className="w-full rounded-2xl border border-slate-200 bg-white/80 py-2 pl-10 pr-3 text-sm text-slate-900 shadow-sm outline-none ring-0 placeholder:text-slate-400 focus:border-slate-300 dark:border-neutral-800 dark:bg-neutral-950/40 dark:text-neutral-50 dark:placeholder:text-neutral-500 dark:focus:border-neutral-700"
-                    />
+                {activeTab === "files" ? (
+                  <div className="mt-3 md:hidden">
+                    <div className="relative">
+                      <FiSearch className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                      <input
+                        value={search}
+                        onChange={(e) => setSearch(e.target.value)}
+                        placeholder={t("top.search")}
+                        className="w-full rounded-2xl border border-slate-200 bg-white/80 py-2 pl-10 pr-3 text-sm text-slate-900 shadow-sm outline-none ring-0 placeholder:text-slate-400 focus:border-slate-300 dark:border-neutral-800 dark:bg-neutral-950/40 dark:text-neutral-50 dark:placeholder:text-neutral-500 dark:focus:border-neutral-700"
+                      />
+                    </div>
                   </div>
-                </div>
+                ) : null}
               </div>
             </header>
 

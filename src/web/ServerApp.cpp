@@ -503,12 +503,21 @@ int ServerApp::HandleFileList(HttpRequest* req, HttpResponse* resp) {
     return resp->status_code;
   }
 
-  const std::string path = QueryOf(req, "path");
+  const std::string request_path = QueryOf(req, "path");
+  const auto resolved_path = file_service_.ResolvePath(request_path);
+  if (!resolved_path.has_value()) {
+    return Json(resp, 400, api::Error("path not allowed"));
+  }
+
   std::string error;
-  const auto entries = file_service_.ListDirectory(path, &error);
+  const auto entries = file_service_.ListDirectory(request_path, &error);
   if (!error.empty()) {
     return Json(resp, 400, api::Error(error));
   }
+
+  const auto root_path = file_service_.ResolvePath("/");
+  const std::string root_path_value =
+      root_path.has_value() ? root_path->string() : config_.workspace_root.string();
 
   std::vector<std::string> serialized;
   serialized.reserve(entries.size());
@@ -524,6 +533,8 @@ int ServerApp::HandleFileList(HttpRequest* req, HttpResponse* resp) {
 
   return Json(resp, 200, api::Success({
                              {"entries", JsonArray(serialized), true},
+                             {"current_path", resolved_path->string(), false},
+                             {"root_path", root_path_value, false},
                          }));
 }
 

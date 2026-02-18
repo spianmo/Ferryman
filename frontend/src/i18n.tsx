@@ -22,6 +22,7 @@ const DICTS: Record<Lang, Dict> = {
     "common.go": "Go",
     "common.refresh": "Refresh",
     "common.up": "Up",
+    "common.close": "Close",
     "common.on": "On",
     "common.off": "Off",
 
@@ -119,6 +120,7 @@ const DICTS: Record<Lang, Dict> = {
     "common.go": "前往",
     "common.refresh": "刷新",
     "common.up": "上级",
+    "common.close": "关闭",
     "common.on": "开启",
     "common.off": "关闭",
 

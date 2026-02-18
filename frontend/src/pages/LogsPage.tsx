@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { FiClipboard } from "react-icons/fi";
 
 import { useI18n } from "../i18n";
 import type { SessionInfo } from "../types";
@@ -192,6 +193,7 @@ export default function LogsPage({ session }: Props) {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="inline-flex items-center gap-2">
           <h2 className="inline-flex items-center gap-2 text-base font-semibold tracking-tight text-slate-900 dark:text-neutral-50">
+            <FiClipboard className="text-[15px]" />
             {t("logs.title")}
           </h2>
           <span className="inline-flex h-2.5 w-2.5 shrink-0 items-center justify-center">
