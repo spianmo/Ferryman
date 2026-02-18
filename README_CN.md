@@ -275,4 +275,4 @@ ws_port=18080
 
 ## License
 
-当前仓库尚未提供顶层 LICENSE 文件。
+本项目使用 [MIT License](LICENSE)。

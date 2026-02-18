@@ -277,4 +277,4 @@ Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a PR.
 
 ## License
 
-A top-level project license file is not included yet.
+This project is licensed under the [MIT License](LICENSE).
