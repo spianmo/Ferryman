@@ -9,6 +9,7 @@ import { FiMaximize, FiMinimize, FiMonitor, FiPause, FiPlay } from "react-icons/
 
 import { emitUnauthorized, getScreenCapabilities, wsUrl } from "../api/client";
 import { useI18n } from "../i18n";
+import { toast } from "../toast";
 import type { SessionInfo } from "../types";
 import { cn } from "../util/cn";
 
@@ -64,6 +65,15 @@ type NativeBinaryFrame = {
   width: number;
   height: number;
   payload: Uint8Array;
+};
+
+type FullscreenDocument = Document & {
+  webkitFullscreenElement?: Element | null;
+  webkitExitFullscreen?: () => Promise<void> | void;
+};
+
+type FullscreenSurface = HTMLDivElement & {
+  webkitRequestFullscreen?: () => Promise<void> | void;
 };
 
 function decodeBase64Bytes(value: string): Uint8Array {
@@ -280,6 +290,54 @@ function isLikelyKeyframe(frame: NativeBinaryFrame): boolean {
   return false;
 }
 
+function getFullscreenElement(): Element | null {
+  const doc = document as FullscreenDocument;
+  return document.fullscreenElement ?? doc.webkitFullscreenElement ?? null;
+}
+
+function waitForFullscreenState(targetIsFullscreen: boolean, timeoutMs = 450): Promise<boolean> {
+  if (targetIsFullscreen) {
+    if (getFullscreenElement()) {
+      return Promise.resolve(true);
+    }
+  } else if (!getFullscreenElement()) {
+    return Promise.resolve(true);
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer = 0;
+
+    const cleanup = () => {
+      if (timer) {
+        window.clearTimeout(timer);
+      }
+      document.removeEventListener("fullscreenchange", onChange);
+      document.removeEventListener("webkitfullscreenchange", onChange);
+    };
+
+    const finish = (ok: boolean) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      resolve(ok);
+    };
+
+    const onChange = () => {
+      const nowFullscreen = Boolean(getFullscreenElement());
+      if (nowFullscreen === targetIsFullscreen) {
+        finish(true);
+      }
+    };
+
+    document.addEventListener("fullscreenchange", onChange);
+    document.addEventListener("webkitfullscreenchange", onChange);
+    timer = window.setTimeout(() => finish(false), timeoutMs);
+  });
+}
+
 export default function ScreenPage({ session }: Props) {
   const { t } = useI18n();
   const wsRef = useRef<WebSocket | null>(null);
@@ -386,10 +444,14 @@ export default function ScreenPage({ session }: Props) {
 
   useEffect(() => {
     const onFullscreenChange = () => {
-      setNativeFullscreen(document.fullscreenElement === nativeSurfaceRef.current);
+      setNativeFullscreen(getFullscreenElement() === nativeSurfaceRef.current);
     };
     document.addEventListener("fullscreenchange", onFullscreenChange);
-    return () => document.removeEventListener("fullscreenchange", onFullscreenChange);
+    document.addEventListener("webkitfullscreenchange", onFullscreenChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", onFullscreenChange);
+      document.removeEventListener("webkitfullscreenchange", onFullscreenChange);
+    };
   }, []);
 
   const probeDecodeSupport = (
@@ -1285,17 +1347,51 @@ export default function ScreenPage({ session }: Props) {
   };
 
   const toggleNativeFullscreen = async () => {
-    const surface = nativeSurfaceRef.current;
+    const surface = nativeSurfaceRef.current as FullscreenSurface | null;
+    const doc = document as FullscreenDocument;
     if (!surface) return;
     try {
-      if (document.fullscreenElement) {
-        await document.exitFullscreen();
-      } else {
+      if (getFullscreenElement()) {
+        if (typeof document.exitFullscreen === "function") {
+          await document.exitFullscreen();
+          const exited = await waitForFullscreenState(false);
+          if (!exited) {
+            toast.error(t("screen.fullscreen_failed"));
+          }
+          return;
+        }
+        if (typeof doc.webkitExitFullscreen === "function") {
+          await doc.webkitExitFullscreen();
+          const exited = await waitForFullscreenState(false);
+          if (!exited) {
+            toast.error(t("screen.fullscreen_failed"));
+          }
+          return;
+        }
+        toast.error(t("screen.fullscreen_unsupported"));
+        return;
+      }
+      if (typeof surface.requestFullscreen === "function") {
         await surface.requestFullscreen();
+        const entered = await waitForFullscreenState(true);
+        if (!entered || getFullscreenElement() !== surface) {
+          toast.error(t("screen.fullscreen_unsupported"));
+        }
+        return;
+      }
+      if (typeof surface.webkitRequestFullscreen === "function") {
+        await surface.webkitRequestFullscreen();
+        const entered = await waitForFullscreenState(true);
+        if (!entered || getFullscreenElement() !== surface) {
+          toast.error(t("screen.fullscreen_unsupported"));
+        }
+        return;
       }
     } catch {
-      // Ignore fullscreen errors (e.g. unsupported platform/browser).
+      toast.error(t("screen.fullscreen_failed"));
+      return;
     }
+    toast.error(t("screen.fullscreen_unsupported"));
   };
 
   const sendInput = (type: string, payload: Record<string, unknown>) => {
