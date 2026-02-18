@@ -1,111 +1,114 @@
+<p align="center">
+    <img src="banner.png" style="border-radius: 12px;" alt="Ferryman banner">
+</p>
+
 # Ferryman
 
-Ferryman is a single-process remote access and execution host for LAN usage.
+![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C)
+![CMake](https://img.shields.io/badge/CMake-3.20%2B-064F8C)
+![React](https://img.shields.io/badge/React-18-61DAFB)
+![Vite](https://img.shields.io/badge/Vite-5-646CFF)
+![Native Stream](https://img.shields.io/badge/Native%20Stream-JPEG%2FH264%2FH265%2FVP8%2FVP9-0EA5E9)
+![Platforms](https://img.shields.io/badge/Platforms-macOS%20%7C%20Linux%20%7C%20Windows-334155)
 
-## Features
+English | [中文](README_CN.md)
 
-- C++20 backend with modular architecture.
-- libhv-based HTTP + WebSocket transport layer (resolved via vcpkg/system/vendor).
-- nlohmann/json-based JSON parsing for HTTP and WebSocket payloads.
-- First-run bootstrap in `~/.ferryman/config.ini`:
-  - `access_key`
-  - listen host/ports
-  - audit log path (`~/.ferryman/logs/audit.log`)
-- Browser control plane:
-  - access-key login + session token
-  - login后即默认可用（不需要额外手动授权）
-  - file browsing/read/write
-  - PTY terminal sessions (`forkpty`) with ANSI stream passthrough
-  - async task execution + status polling + output retrieval
-  - runtime log tail（内存缓存）+ 后端实时 stdout/stderr 输出
-  - WebRTC signaling channel + input event uplink
-  - native screen capture stream (JPEG frame push over WS) + native input injection:
-    - macOS: `ScreenCaptureKit`
-    - Linux: `X11` capture + `XTest` input
-    - Windows: `GDI` capture + `SendInput`
-  - browser keyboard event mapping to native key events (modifiers/function keys included)
-  - Linux/Windows capture encoding uses ffmpeg (`libavcodec`/`libswscale`)
-- Frontend stack: Vite + React + TypeScript + react-icons + xterm.js.
-- Frontend build output can be embedded into backend binary at build time.
+Ferryman is a **single-process, single-binary remote access host** for LAN usage.
+It provides a browser control plane for files, terminal, async tasks, logs, WebRTC signaling, and native screen streaming.
 
-## Repository Layout
+## Highlights
 
-- `include/ferryman/*`: backend headers
-- `src/*`: backend implementation
-- `frontend/*`: Vite React control panel
-- `cmake/EmbedAssets.cmake`: embed `frontend/dist` assets into generated C++ source
-- `Makefile`: one-command workflows
+- C++20 backend with modular services.
+- HTTP + WebSocket server based on `libhv`.
+- Native screen capture + input injection:
+  - macOS: ScreenCaptureKit + ApplicationServices
+  - Linux: X11 capture + XTest input
+  - Windows: GDI capture + SendInput
+- Native screen stream over WebSocket binary frames.
+- Screen codecs: `jpeg`, `h264`, `h265`, `vp8`, `vp9` (if ffmpeg encoders are available).
+- Runtime profiles:
+  - FPS: `1..60`
+  - Resolution tiers: `full(100%)`, `balanced(75%)`, `performance(50%)`
+  - Bitrate tiers: `sd(1.5Mbps)`, `hd(3Mbps)`, `uhd(6Mbps)`
+- Built-in browser app (Vite + React + TypeScript), embedded into backend at build time.
+- First-run bootstrap config at `~/.ferryman/config.ini`.
 
-## Build
+## Architecture
 
-### 0) Install C++ dependencies (vcpkg)
+```text
+Browser (React/Vite)
+  |- /api/*  (HTTP)
+  |- /ws/terminal (WebSocket)
+  |- /ws/webrtc   (WebSocket)
+  `- /ws/logs     (WebSocket)
+
+Ferryman (single process)
+  |- SessionManager / Auth (access key)
+  |- FileService
+  |- PtyManager
+  |- TaskManager
+  |- AuditLogger
+  |- WebRtcSignalingService
+  `- ScreenService + VideoEncoder (ffmpeg)
+```
+
+## Quick Start
+
+### 1) Install dependencies
 
 ```bash
 make deps
 ```
 
-`make deps` now uses:
-- local downloads cache: `.vcpkg-downloads`
-- local binary cache: `.vcpkg-binary-cache`
-- `nlohmann-json` prefetch + SHA-512 verification (with mirror fallback URLs)
-
-Optional proxy mode (uses local `useProxy` command):
+Optional proxy mode:
 
 ```bash
 make deps-proxy
 ```
 
-Optional mirror/proxy envs:
-- `FERRYMAN_USE_PROXY=1` enable `useProxy`
-- `NLOHMANN_JSON_URL=<mirror-url>` override json archive source
-- `MESON_URL=<mirror-url>` override meson archive source
-- `FFMPEG_URL=<mirror-url>` override ffmpeg archive source
-- `GITHUB_MIRROR_PREFIX=<prefix>` prepend a mirror prefix for GitHub URLs
-- `VCPKG_ASSET_SOURCES=<asset-source-config>` pass through to `X_VCPKG_ASSET_SOURCES`
-
-### 1) Frontend
+### 2) Build frontend assets
 
 ```bash
 make frontend
 ```
 
-### 2) Backend
+### 3) Build backend
 
 ```bash
 make build
 ```
 
-### 3) Run
+### 4) Run
 
 ```bash
 make run
 ```
 
-On first run, access key is printed to stdout and written to `~/.ferryman/config.ini`.
+On first run, Ferryman generates and prints an access key, and writes config to:
 
-## Frontend debug (split mode)
+- `~/.ferryman/config.ini`
 
-Run backend and frontend in separate terminals:
+## Split Development Mode
 
-Terminal 1 (backend only):
+Run backend and frontend separately.
+
+Terminal 1:
 
 ```bash
 make dev-backend
 ```
 
-Terminal 2 (Vite dev server on `:5173`):
+Terminal 2:
 
 ```bash
 make dev-frontend
 ```
 
-Then open `http://127.0.0.1:5173`.
+Open:
 
-In dev mode, Vite proxies:
-- `/api/*` -> `http://127.0.0.1:18080`
-- `/ws/*` -> `ws://127.0.0.1:18080`
+- `http://127.0.0.1:5173`
 
-Override proxy targets if needed:
+Optional proxy override:
 
 ```bash
 cd frontend
@@ -114,24 +117,100 @@ VITE_BACKEND_WS_URL=ws://127.0.0.1:28080 \
 npm run dev -- --host
 ```
 
-## One-command release build
+## Runtime Configuration
 
-```bash
-make release
+Default config file: `~/.ferryman/config.ini`
+
+```ini
+access_key=<generated>
+http_host=0.0.0.0
+http_port=18080
+ws_port=18080
 ```
 
-## Notes
+Note:
 
-- The project supports vcpkg manifest mode via `vcpkg.json`.
-- If libhv is unavailable, backend still compiles, but runtime server start will fail and print guidance.
-- On macOS, native input injection requires Accessibility permission for the Ferryman process.
-- On macOS, native capture requires Screen Recording permission for the Ferryman process.
+- HTTP and WebSocket share the same listener port at runtime.
 
-## Security Model
+## HTTP API
 
-- LAN-oriented deployment (default host `0.0.0.0`).
-- Access-key login required.
-- Login grants access (no extra manual "authorize command/screen" gates).
-- Key actions are auditable via:
-  - immediate backend console logs (stdout/stderr)
-  - in-memory log tail (`/api/logs/tail`)
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/auth/login` | Access key login |
+| `GET` | `/api/session/me` | Session info |
+| `GET` | `/api/files/list` | List directory |
+| `GET` | `/api/files/read` | Read file |
+| `POST` | `/api/files/write` | Write file |
+| `POST` | `/api/tasks/start` | Start async task |
+| `GET` | `/api/tasks/list` | List tasks |
+| `GET` | `/api/tasks/get` | Task detail/output |
+| `GET` | `/api/logs/tail` | Tail runtime audit logs |
+| `GET` | `/api/screen/capabilities` | Screen capability negotiation |
+| `POST` | `/api/screen/input` | Native input injection |
+| `GET` | `/api/health` | Health check |
+
+## WebSocket Channels
+
+### `/ws/terminal`
+
+Actions:
+
+- `open`
+- `attach`
+- `input`
+- `resize`
+- `close`
+
+### `/ws/webrtc`
+
+Actions:
+
+- `join` (room signaling)
+- `signal` (SDP/ICE forwarding)
+- `native_subscribe`
+- `native_unsubscribe`
+- `input_event`
+
+### `/ws/logs`
+
+Actions:
+
+- `tail`
+- `snapshot`
+
+## Native Screen Streaming
+
+- Transport: WebSocket binary packet (`FRM1` header)
+- Codec IDs:
+  - `1`: JPEG
+  - `2`: H.264
+  - `3`: H.265
+  - `4`: VP8
+  - `5`: VP9
+- Backend negotiates codec/fps/resolution/bitrate based on active subscribers.
+
+If ffmpeg is unavailable, native video encoding is disabled and capability negotiation falls back accordingly.
+
+## Build Notes
+
+- `vcpkg` manifest mode via `vcpkg.json`
+- Frontend assets are embedded by `cmake/EmbedAssets.cmake`
+- On macOS, native screen and input features require system permissions:
+  - Screen Recording
+  - Accessibility
+
+## Project Layout
+
+- `include/ferryman/*`: headers
+- `src/*`: C++ implementation
+- `frontend/*`: React/Vite control panel
+- `scripts/make_deps.sh`: dependency bootstrap
+- `CONTRIBUTING.md`: contribution workflow
+
+## Contributing
+
+Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a PR.
+
+## License
+
+A top-level project license file is not included yet.
