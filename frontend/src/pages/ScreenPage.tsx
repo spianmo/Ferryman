@@ -1396,8 +1396,8 @@ export default function ScreenPage({ session }: Props) {
           </div>
         </div>
 
-        <div className="flex w-full flex-col gap-2 sm:flex-row sm:items-center lg:w-auto lg:flex-row lg:flex-wrap">
-          <label className="inline-flex h-10 items-center gap-2 rounded-2xl bg-slate-100 px-3 text-xs font-semibold text-slate-600 dark:bg-neutral-800 dark:text-neutral-200">
+        <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:flex-row sm:items-center lg:w-auto lg:flex-wrap">
+          <label className="flex h-10 w-full items-center justify-between gap-2 rounded-2xl bg-slate-100 px-3 text-xs font-semibold text-slate-600 sm:w-auto dark:bg-neutral-800 dark:text-neutral-200">
             <span>{t("screen.codec")}</span>
             <select
               className="h-7 rounded-lg border border-slate-200 bg-white px-2 text-xs font-semibold text-slate-700 outline-none focus:border-slate-400 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100"
@@ -1419,7 +1419,7 @@ export default function ScreenPage({ session }: Props) {
               </option>
             </select>
           </label>
-          <label className="inline-flex h-10 items-center gap-2 rounded-2xl bg-slate-100 px-3 text-xs font-semibold text-slate-600 dark:bg-neutral-800 dark:text-neutral-200">
+          <label className="flex h-10 w-full items-center justify-between gap-2 rounded-2xl bg-slate-100 px-3 text-xs font-semibold text-slate-600 sm:w-auto dark:bg-neutral-800 dark:text-neutral-200">
             <span>{t("screen.fps")}</span>
             <select
               className="h-7 rounded-lg border border-slate-200 bg-white px-2 text-xs font-semibold text-slate-700 outline-none focus:border-slate-400 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100"
@@ -1433,7 +1433,7 @@ export default function ScreenPage({ session }: Props) {
               ))}
             </select>
           </label>
-          <label className="inline-flex h-10 items-center gap-2 rounded-2xl bg-slate-100 px-3 text-xs font-semibold text-slate-600 dark:bg-neutral-800 dark:text-neutral-200">
+          <label className="flex h-10 w-full items-center justify-between gap-2 rounded-2xl bg-slate-100 px-3 text-xs font-semibold text-slate-600 sm:w-auto dark:bg-neutral-800 dark:text-neutral-200">
             <span>{t("screen.resolution")}</span>
             <select
               className="h-7 rounded-lg border border-slate-200 bg-white px-2 text-xs font-semibold text-slate-700 outline-none focus:border-slate-400 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100"
@@ -1447,7 +1447,7 @@ export default function ScreenPage({ session }: Props) {
               ))}
             </select>
           </label>
-          <label className="inline-flex h-10 items-center gap-2 rounded-2xl bg-slate-100 px-3 text-xs font-semibold text-slate-600 dark:bg-neutral-800 dark:text-neutral-200">
+          <label className="flex h-10 w-full items-center justify-between gap-2 rounded-2xl bg-slate-100 px-3 text-xs font-semibold text-slate-600 sm:w-auto dark:bg-neutral-800 dark:text-neutral-200">
             <span>{t("screen.bitrate")}</span>
             <select
               className="h-7 rounded-lg border border-slate-200 bg-white px-2 text-xs font-semibold text-slate-700 outline-none focus:border-slate-400 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100"
@@ -1462,14 +1462,14 @@ export default function ScreenPage({ session }: Props) {
             </select>
           </label>
           <button
-            className="inline-flex h-10 items-center justify-center gap-2 rounded-2xl bg-slate-900 px-4 text-sm font-semibold text-white shadow-sm hover:bg-slate-800 dark:bg-neutral-50 dark:text-neutral-900 dark:hover:bg-white"
+            className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-2xl bg-slate-900 px-4 text-sm font-semibold text-white shadow-sm hover:bg-slate-800 sm:w-auto dark:bg-neutral-50 dark:text-neutral-900 dark:hover:bg-white"
             onClick={toggleNativeStreaming}
           >
             {nativeStreaming ? <FiPause /> : <FiPlay />}{" "}
             {nativeStreaming ? t("screen.native_stop") : t("screen.native_start")}
           </button>
           <button
-            className="inline-flex h-10 items-center justify-center gap-2 rounded-2xl bg-slate-100 px-4 text-sm font-semibold text-slate-700 hover:bg-slate-200 dark:bg-neutral-800 dark:text-neutral-100 dark:hover:bg-neutral-700"
+            className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-2xl bg-slate-100 px-4 text-sm font-semibold text-slate-700 hover:bg-slate-200 sm:w-auto dark:bg-neutral-800 dark:text-neutral-100 dark:hover:bg-neutral-700"
             onClick={() => void toggleNativeFullscreen()}
           >
             {nativeFullscreen ? <FiMinimize /> : <FiMaximize />}{" "}

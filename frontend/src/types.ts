@@ -11,6 +11,7 @@ export type FileEntry = {
   is_directory: boolean;
   size: number;
   modified_at: number;
+  permissions: string;
 };
 
 export type TaskInfo = {

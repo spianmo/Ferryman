@@ -28,6 +28,7 @@ const DICTS: Record<Lang, Dict> = {
 
     "login.title": "Ferryman",
     "login.subtitle": "Enter the Access Key to start a session.",
+    "login.slogan": "Operate your LAN devices in one workspace: files, terminal, tasks, and screen control.",
     "login.access_key": "Access Key",
     "login.placeholder": "e.g. f41f…",
     "login.submit": "Sign in",
@@ -48,6 +49,13 @@ const DICTS: Record<Lang, Dict> = {
     "files.no_match": "No matches.",
     "files.select_file": "Select a file to view/edit.",
     "files.saved_path": "Saved: {path}",
+    "files.preview": "Preview",
+    "files.preview_loading": "Loading preview…",
+    "files.preview_unsupported": "Preview/edit is not supported for this file type.",
+    "files.preview_parse_failed": "Unable to parse this file for preview.",
+    "files.preview_empty": "No previewable content.",
+    "files.preview_sheet": "Sheet",
+    "files.preview_slide": "Slide {index}",
 
     "tasks.title": "Tasks",
     "tasks.output": "Output",
@@ -126,6 +134,7 @@ const DICTS: Record<Lang, Dict> = {
 
     "login.title": "Ferryman",
     "login.subtitle": "输入 Access Key 以建立会话凭证。",
+    "login.slogan": "一个工作台管理局域网设备：文件、终端、任务与屏幕远控，开箱即用。",
     "login.access_key": "Access Key",
     "login.placeholder": "例如：f41f…",
     "login.submit": "登录",
@@ -146,6 +155,13 @@ const DICTS: Record<Lang, Dict> = {
     "files.no_match": "未匹配到文件。",
     "files.select_file": "选择一个文件进行查看与编辑。",
     "files.saved_path": "已保存：{path}",
+    "files.preview": "预览",
+    "files.preview_loading": "预览加载中…",
+    "files.preview_unsupported": "该文件类型暂不支持预览或编辑。",
+    "files.preview_parse_failed": "无法解析该文件进行预览。",
+    "files.preview_empty": "没有可预览的内容。",
+    "files.preview_sheet": "工作表",
+    "files.preview_slide": "第 {index} 页",
 
     "tasks.title": "任务",
     "tasks.output": "输出",

@@ -14,6 +14,27 @@ int64_t FileTimeToEpoch(std::filesystem::file_time_type time) {
   return duration_cast<seconds>(system_now.time_since_epoch()).count();
 }
 
+bool HasPerm(std::filesystem::perms value, std::filesystem::perms flag) {
+  return (value & flag) != std::filesystem::perms::none;
+}
+
+std::string PermsToString(std::filesystem::perms perms) {
+  if (perms == std::filesystem::perms::unknown) {
+    return "---------";
+  }
+  std::string out = "---------";
+  out[0] = HasPerm(perms, std::filesystem::perms::owner_read) ? 'r' : '-';
+  out[1] = HasPerm(perms, std::filesystem::perms::owner_write) ? 'w' : '-';
+  out[2] = HasPerm(perms, std::filesystem::perms::owner_exec) ? 'x' : '-';
+  out[3] = HasPerm(perms, std::filesystem::perms::group_read) ? 'r' : '-';
+  out[4] = HasPerm(perms, std::filesystem::perms::group_write) ? 'w' : '-';
+  out[5] = HasPerm(perms, std::filesystem::perms::group_exec) ? 'x' : '-';
+  out[6] = HasPerm(perms, std::filesystem::perms::others_read) ? 'r' : '-';
+  out[7] = HasPerm(perms, std::filesystem::perms::others_write) ? 'w' : '-';
+  out[8] = HasPerm(perms, std::filesystem::perms::others_exec) ? 'x' : '-';
+  return out;
+}
+
 bool IsSubPath(const std::filesystem::path& root, const std::filesystem::path& candidate) {
   auto root_it = root.begin();
   auto candidate_it = candidate.begin();
@@ -88,6 +109,7 @@ std::vector<FileEntry> FileService::ListDirectory(const std::string& request_pat
     entry.name = item.path().filename().string();
     entry.path = item.path().string();
     entry.is_directory = item.is_directory(ec);
+    entry.permissions = PermsToString(item.status(ec).permissions());
     if (!entry.is_directory) {
       entry.size = item.file_size(ec);
     }

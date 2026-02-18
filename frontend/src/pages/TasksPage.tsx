@@ -70,8 +70,8 @@ export default function TasksPage({ token }: Props) {
   };
 
   return (
-    <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-      <section className="rounded-3xl bg-white/70 p-4 shadow-soft ring-1 ring-slate-200/70 backdrop-blur dark:bg-neutral-900/55 dark:ring-neutral-800/70">
+    <div className="grid h-full min-h-[460px] grid-cols-1 gap-4 xl:grid-cols-2">
+      <section className="flex h-full min-h-[460px] flex-col rounded-3xl bg-white/70 p-4 shadow-soft ring-1 ring-slate-200/70 backdrop-blur dark:bg-neutral-900/55 dark:ring-neutral-800/70">
         <div className="flex items-start justify-between gap-3">
           <div>
             <h2 className="inline-flex items-center gap-2 text-base font-semibold tracking-tight text-slate-900 dark:text-neutral-50">
@@ -102,7 +102,7 @@ export default function TasksPage({ token }: Props) {
           </button>
         </div>
 
-        <div className="mt-4 max-h-[560px] space-y-2 overflow-auto p-1">
+        <div className="mt-4 min-h-0 flex-1 space-y-2 overflow-auto p-1">
           {tasks.map((task) => (
             <button
               key={task.task_id}
@@ -133,7 +133,7 @@ export default function TasksPage({ token }: Props) {
         </div>
       </section>
 
-      <section className="rounded-3xl bg-white/70 p-4 shadow-soft ring-1 ring-slate-200/70 backdrop-blur dark:bg-neutral-900/55 dark:ring-neutral-800/70">
+      <section className="flex h-full min-h-[460px] flex-col rounded-3xl bg-white/70 p-4 shadow-soft ring-1 ring-slate-200/70 backdrop-blur dark:bg-neutral-900/55 dark:ring-neutral-800/70">
         <div className="flex items-start justify-between gap-3">
           <div>
             <h2 className="text-base font-semibold tracking-tight text-slate-900 dark:text-neutral-50">
@@ -145,7 +145,7 @@ export default function TasksPage({ token }: Props) {
           </div>
         </div>
 
-        <pre className="mt-4 max-h-[620px] min-h-[560px] overflow-auto rounded-2xl bg-neutral-950 p-4 font-mono text-[12px] leading-relaxed text-neutral-50 shadow-sm ring-1 ring-neutral-900/10">
+        <pre className="mt-4 min-h-0 flex-1 overflow-auto rounded-2xl bg-neutral-950 p-4 font-mono text-[12px] leading-relaxed text-neutral-50 shadow-sm ring-1 ring-neutral-900/10">
           {taskOutput || " "}
         </pre>
       </section>

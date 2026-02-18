@@ -528,6 +528,7 @@ int ServerApp::HandleFileList(HttpRequest* req, HttpResponse* resp) {
         {"is_directory", entry.is_directory ? "true" : "false", true},
         {"size", std::to_string(entry.size), true},
         {"modified_at", std::to_string(entry.modified_at), true},
+        {"permissions", entry.permissions, false},
     }));
   }
 

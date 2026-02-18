@@ -14,6 +14,7 @@ struct FileEntry {
   bool is_directory = false;
   uintmax_t size = 0;
   int64_t modified_at = 0;
+  std::string permissions = "---------";
 };
 
 class FileService {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "./toast";
 import {
   FiClipboard,
@@ -92,12 +92,21 @@ export default function App() {
   });
   const [loadingLogin, setLoadingLogin] = useState(false);
   const [navOpen, setNavOpen] = useState(false);
+  const sessionRef = useRef<SessionInfo | null>(session);
+  const unauthorizedNotifiedRef = useRef(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     if (typeof window === "undefined") return false;
     const raw = window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY);
     return raw === "1" || raw === "true";
   });
   const [search, setSearch] = useState("");
+
+  useEffect(() => {
+    sessionRef.current = session;
+    if (session) {
+      unauthorizedNotifiedRef.current = false;
+    }
+  }, [session]);
 
   useEffect(() => {
     if (!session) return;
@@ -107,6 +116,11 @@ export default function App() {
   useEffect(() => {
     const onUnauthorized = (event: Event) => {
       const detail = (event as CustomEvent<{ reason?: string }>).detail;
+      if (!sessionRef.current || unauthorizedNotifiedRef.current) {
+        return;
+      }
+      unauthorizedNotifiedRef.current = true;
+      sessionRef.current = null;
       setSession(null);
       saveSession(null);
       toast.error(detail?.reason ?? t("toast.session_expired"));
@@ -361,7 +375,7 @@ export default function App() {
             </header>
 
             <div className="mt-4 min-h-0 flex-1">
-              <div className="h-[calc(100%+1.5rem)] -mx-3 -my-3 overflow-y-auto px-3 py-3">
+              <div className="h-[calc(100%+1.5rem)] -mx-3 -my-3 px-3 py-3">
                 {page}
               </div>
             </div>
