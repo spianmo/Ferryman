@@ -13,25 +13,56 @@
 
 English | [中文](README_CN.md)
 
-Ferryman is a **single-process, single-binary remote access host** for LAN usage.
-It provides a browser control plane for files, terminal, async tasks, logs, WebRTC signaling, and native screen streaming.
+Ferryman is a **single-process, single-binary remote access and execution host** for LAN scenarios.
+After startup it runs a lightweight local HTTP/WebSocket server and serves an embedded browser control plane for:
 
-## Highlights
+- file browsing and read/write
+- PTY terminal sessions
+- async task execution
+- runtime logs/audit stream
+- WebRTC signaling + native screen streaming and remote input injection
 
-- C++20 backend with modular services.
-- HTTP + WebSocket server based on `libhv`.
-- Native screen capture + input injection:
-  - macOS: ScreenCaptureKit + ApplicationServices
-  - Linux: X11 capture + XTest input
-  - Windows: GDI capture + SendInput
-- Native screen stream over WebSocket binary frames.
-- Screen codecs: `jpeg`, `h264`, `h265`, `vp8`, `vp9` (if ffmpeg encoders are available).
+The project keeps frontend and backend in one repository, uses explicit HTTP/WebSocket contracts, and focuses on minimal runtime dependencies, auditability, and extensibility.
+
+## Core Capabilities
+
+### Access and Session Model
+
+- First run bootstraps `~/.ferryman/config.ini` with a generated `access_key`.
+- Login uses access key + session token (`X-Session-Token`) for all protected HTTP/WS channels.
+- Multiple users can log in at the same time.
+- Terminal/task contexts are scoped by session token (`owner_token`) for isolation and traceability.
+- Login currently grants command/screen authorization by default (no extra manual approval step).
+
+### Runtime Features
+
+- **Transport layer**: `libhv` HTTP + WebSocket server (single listener; WS and HTTP share one port at runtime).
+- **JSON payloads**: parsed/serialized with `nlohmann/json`.
+- **File operations**: list/read/write under workspace root (`$HOME` by default), with path boundary checks.
+- **Terminal**: child process + PTY (`forkpty`), ANSI passthrough, browser rendering via `xterm.js` (including 256-color support).
+- **Tasks**: async command execution with status lifecycle (`queued/running/succeeded/failed`), polling and output retrieval.
+- **Logs**:
+  - immediate backend output (`stdout/stderr`)
+  - in-memory tail buffer via `/api/logs/tail`
+  - realtime WS push via `/ws/logs`
+- **Screen + remote control**:
+  - WebRTC room signaling (`join` / `signal`) channel
+  - native screen stream over WS binary frames (`FRM1`)
+  - keyboard/mouse event uplink and native input injection
+  - codec/fps/resolution/bitrate negotiation for native stream subscribers
+
+### Screen Backends
+
+- macOS: ScreenCaptureKit + ApplicationServices
+- Linux: X11 capture + XTest input
+- Windows: GDI capture + SendInput
+- Encoders:
+  - always available: `jpeg`
+  - when ffmpeg is available: `h264`, `h265`, `vp8`, `vp9`
 - Runtime profiles:
   - FPS: `1..60`
   - Resolution tiers: `full(100%)`, `balanced(75%)`, `performance(50%)`
   - Bitrate tiers: `sd(1.5Mbps)`, `hd(3Mbps)`, `uhd(6Mbps)`
-- Built-in browser app (Vite + React + TypeScript), embedded into backend at build time.
-- First-run bootstrap config at `~/.ferryman/config.ini`.
 
 ## Architecture
 
@@ -52,41 +83,69 @@ Ferryman (single process)
   `- ScreenService + VideoEncoder (ffmpeg)
 ```
 
-## Quick Start
+## Repository Layout
 
-### 1) Install dependencies
+- `include/ferryman/*`: backend headers
+- `src/*`: backend implementation
+- `frontend/*`: Vite + React + TypeScript control panel
+- `cmake/EmbedAssets.cmake`: embed `frontend/dist` into generated C++ source
+- `scripts/make_deps.sh`: dependency bootstrap
+- `Makefile`: one-command workflows
+
+## Build and Run
+
+### 0) Install C++ dependencies (vcpkg)
 
 ```bash
 make deps
 ```
 
-Optional proxy mode:
+`make deps` includes:
+
+- local downloads cache: `.vcpkg-downloads`
+- local binary cache: `.vcpkg-binary-cache`
+- archive prefetch + SHA-512 verification (nlohmann-json / meson / ffmpeg), with mirror fallback URLs
+
+Optional proxy mode (if local `useProxy` command exists):
 
 ```bash
 make deps-proxy
 ```
 
-### 2) Build frontend assets
+Optional mirror/proxy envs:
+
+- `FERRYMAN_USE_PROXY=1`
+- `NLOHMANN_JSON_URL=<mirror-url>`
+- `MESON_URL=<mirror-url>`
+- `FFMPEG_URL=<mirror-url>`
+- `GITHUB_MIRROR_PREFIX=<prefix>`
+- `VCPKG_ASSET_SOURCES=<asset-source-config>` (passed through to `X_VCPKG_ASSET_SOURCES`)
+
+### 1) Build frontend assets
 
 ```bash
 make frontend
 ```
 
-### 3) Build backend
+### 2) Build backend
 
 ```bash
 make build
 ```
 
-### 4) Run
+### 3) Run
 
 ```bash
 make run
 ```
 
-On first run, Ferryman generates and prints an access key, and writes config to:
+On first run, Ferryman generates and prints an access key, and writes config to `~/.ferryman/config.ini`.
 
-- `~/.ferryman/config.ini`
+### One-command release build
+
+```bash
+make release
+```
 
 ## Split Development Mode
 
@@ -131,6 +190,7 @@ ws_port=18080
 Note:
 
 - HTTP and WebSocket share the same listener port at runtime.
+- Ferryman also initializes `~/.ferryman/logs/` and reserves `audit.log` path for audit output.
 
 ## HTTP API
 
@@ -165,8 +225,8 @@ Actions:
 
 Actions:
 
-- `join` (room signaling)
-- `signal` (SDP/ICE forwarding)
+- `join` (room signaling peer join)
+- `signal` (SDP/ICE payload forwarding)
 - `native_subscribe`
 - `native_unsubscribe`
 - `input_event`
@@ -191,21 +251,25 @@ Actions:
 
 If ffmpeg is unavailable, native video encoding is disabled and capability negotiation falls back accordingly.
 
+## Security Model
+
+- LAN-oriented deployment (default host: `0.0.0.0`).
+- Access-key login required.
+- Session token required for protected HTTP/WS endpoints.
+- Login grants command/screen access by default (current behavior).
+- Key actions are auditable through:
+  - immediate backend console logs
+  - in-memory log tail (`/api/logs/tail`, `/ws/logs`)
+- Session-scoped ownership is applied to terminal/task operations.
+
 ## Build Notes
 
 - `vcpkg` manifest mode via `vcpkg.json`
 - Frontend assets are embedded by `cmake/EmbedAssets.cmake`
+- If `libhv` is missing, backend still compiles but server startup fails with guidance.
 - On macOS, native screen and input features require system permissions:
   - Screen Recording
   - Accessibility
-
-## Project Layout
-
-- `include/ferryman/*`: headers
-- `src/*`: C++ implementation
-- `frontend/*`: React/Vite control panel
-- `scripts/make_deps.sh`: dependency bootstrap
-- `CONTRIBUTING.md`: contribution workflow
 
 ## Contributing
 
