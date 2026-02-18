@@ -13,6 +13,26 @@
 
 namespace ferryman::task {
 
+namespace {
+
+FILE* OpenPipe(const std::string& command) {
+#if defined(_WIN32)
+  return ::_popen(command.c_str(), "r");
+#else
+  return ::popen(command.c_str(), "r");
+#endif
+}
+
+int ClosePipe(FILE* pipe) {
+#if defined(_WIN32)
+  return ::_pclose(pipe);
+#else
+  return ::pclose(pipe);
+#endif
+}
+
+}  // namespace
+
 std::string TaskManager::StatusToString(TaskStatus status) {
   switch (status) {
     case TaskStatus::kQueued:
@@ -60,7 +80,7 @@ void TaskManager::RunTask(const std::string& task_id, const std::string& command
   }
 
   const std::string wrapped = command + " 2>&1";
-  FILE* pipe = ::popen(wrapped.c_str(), "r");
+  FILE* pipe = OpenPipe(wrapped);
   if (pipe == nullptr) {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = tasks_.find(task_id);
@@ -85,7 +105,7 @@ void TaskManager::RunTask(const std::string& task_id, const std::string& command
     }
   }
 
-  int status_code = ::pclose(pipe);
+  int status_code = ClosePipe(pipe);
   int exit_code = status_code;
 #if defined(__unix__) || defined(__APPLE__)
   if (WIFEXITED(status_code)) {

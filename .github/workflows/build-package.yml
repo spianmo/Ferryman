@@ -1,0 +1,198 @@
+name: build-package
+
+on:
+  push:
+    branches:
+      - master
+      - main
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.os }} / ${{ matrix.triplet }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            triplet: x64-linux
+            package_suffix: linux-x64
+            package_ext: tar.gz
+          - os: macos-14
+            triplet: arm64-osx
+            package_suffix: macos-arm64
+            package_ext: tar.gz
+          - os: windows-2022
+            triplet: x64-windows
+            package_suffix: windows-x64
+            package_ext: zip
+
+    env:
+      BUILD_DIR: build
+      VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+      VCPKG_FEATURE_FLAGS: manifests,binarycaching
+      VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/.vcpkg-binary-cache,readwrite
+      VCPKG_DOWNLOADS: ${{ github.workspace }}/.vcpkg-downloads
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            nasm \
+            yasm \
+            libx11-dev \
+            libxext-dev \
+            libxtst-dev \
+            libxi-dev
+
+      - name: Install Windows system dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install nasm -y
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend assets
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Restore vcpkg cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .vcpkg-binary-cache
+            .vcpkg-downloads
+          key: vcpkg-${{ runner.os }}-${{ matrix.triplet }}-${{ hashFiles('vcpkg.json', 'scripts/make_deps.sh') }}
+
+      - name: Setup vcpkg
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT"
+          "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
+
+      - name: Setup vcpkg (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git "$env:VCPKG_ROOT"
+          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+
+      - name: Install C++ dependencies (vcpkg manifest)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p "$VCPKG_DOWNLOADS" .vcpkg-binary-cache
+          "$VCPKG_ROOT/vcpkg" install --triplet "${{ matrix.triplet }}"
+
+      - name: Install C++ dependencies (vcpkg manifest, Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path "$env:VCPKG_DOWNLOADS" -Force | Out-Null
+          New-Item -ItemType Directory -Path ".vcpkg-binary-cache" -Force | Out-Null
+          & "$env:VCPKG_ROOT\vcpkg.exe" install --triplet "${{ matrix.triplet }}"
+
+      - name: Configure (Release)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          cmake -S . -B "$BUILD_DIR" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DFERRYMAN_BUILD_FRONTEND=OFF \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET="${{ matrix.triplet }}"
+
+      - name: Configure (Release, Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cmake -S . -B "$env:BUILD_DIR" `
+            -A x64 `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DFERRYMAN_BUILD_FRONTEND=OFF `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET="${{ matrix.triplet }}"
+
+      - name: Build
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          cmake --build "$BUILD_DIR" --parallel
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cmake --build "$env:BUILD_DIR" --config Release --parallel
+
+      - name: Package
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN_PATH="$BUILD_DIR/Ferryman"
+          if [[ ! -f "$BIN_PATH" ]]; then
+            BIN_PATH="$BUILD_DIR/Release/Ferryman"
+          fi
+          if [[ ! -f "$BIN_PATH" ]]; then
+            echo "Ferryman binary not found."
+            exit 1
+          fi
+
+          PKG_ROOT="package/ferryman-${{ matrix.package_suffix }}"
+          mkdir -p "$PKG_ROOT"
+          cp "$BIN_PATH" "$PKG_ROOT/"
+          cp README.md README_CN.md LICENSE "$PKG_ROOT/"
+
+          tar -czf "ferryman-${{ matrix.package_suffix }}.tar.gz" -C package "ferryman-${{ matrix.package_suffix }}"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $binCandidates = @(
+            "$env:BUILD_DIR/Ferryman.exe",
+            "$env:BUILD_DIR/Release/Ferryman.exe"
+          )
+          $binPath = $binCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $binPath) {
+            throw "Ferryman.exe not found."
+          }
+
+          $pkgRoot = "package/ferryman-${{ matrix.package_suffix }}"
+          New-Item -ItemType Directory -Path $pkgRoot -Force | Out-Null
+          Copy-Item $binPath "$pkgRoot/Ferryman.exe" -Force
+          Copy-Item README.md, README_CN.md, LICENSE $pkgRoot -Force
+
+          $zipPath = "ferryman-${{ matrix.package_suffix }}.zip"
+          if (Test-Path $zipPath) {
+            Remove-Item $zipPath -Force
+          }
+          Compress-Archive -Path "$pkgRoot/*" -DestinationPath $zipPath
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ferryman-${{ matrix.package_suffix }}
+          path: ferryman-${{ matrix.package_suffix }}.${{ matrix.package_ext }}
+          if-no-files-found: error
