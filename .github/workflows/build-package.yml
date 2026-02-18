@@ -83,33 +83,43 @@ jobs:
             .vcpkg-downloads
           key: vcpkg-${{ runner.os }}-${{ matrix.triplet }}-${{ hashFiles('vcpkg.json', 'scripts/make_deps.sh') }}
 
+      - name: Prepare vcpkg cache directories
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p "$VCPKG_DOWNLOADS" .vcpkg-binary-cache
+
+      - name: Prepare vcpkg cache directories (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path "$env:VCPKG_DOWNLOADS" -Force | Out-Null
+          New-Item -ItemType Directory -Path ".vcpkg-binary-cache" -Force | Out-Null
+
       - name: Setup vcpkg
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          git clone --depth 1 https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT"
+          git clone https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT"
           "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
 
       - name: Setup vcpkg (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          git clone --depth 1 https://github.com/microsoft/vcpkg.git "$env:VCPKG_ROOT"
+          git clone https://github.com/microsoft/vcpkg.git "$env:VCPKG_ROOT"
           & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
 
       - name: Install C++ dependencies (vcpkg manifest)
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          mkdir -p "$VCPKG_DOWNLOADS" .vcpkg-binary-cache
           "$VCPKG_ROOT/vcpkg" install --triplet "${{ matrix.triplet }}"
 
       - name: Install C++ dependencies (vcpkg manifest, Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Path "$env:VCPKG_DOWNLOADS" -Force | Out-Null
-          New-Item -ItemType Directory -Path ".vcpkg-binary-cache" -Force | Out-Null
           & "$env:VCPKG_ROOT\vcpkg.exe" install --triplet "${{ matrix.triplet }}"
 
       - name: Configure (Release)
