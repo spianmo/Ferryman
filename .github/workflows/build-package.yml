@@ -56,6 +56,12 @@ jobs:
             libxtst-dev \
             libxi-dev
 
+      - name: Install macOS system dependencies
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew install nasm yasm
+
       - name: Install Windows system dependencies
         if: runner.os == 'Windows'
         shell: pwsh
