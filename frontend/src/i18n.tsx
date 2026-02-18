@@ -92,6 +92,9 @@ const DICTS: Record<Lang, Dict> = {
     "screen.latency": "Latency",
     "screen.codec_jpeg": "JPEG",
     "screen.codec_h264": "H.264",
+    "screen.codec_h265": "H.265",
+    "screen.codec_vp8": "VP8",
+    "screen.codec_vp9": "VP9",
     "screen.native_wait": "Waiting for frames…",
     "screen.native_start_hint": "Start native stream",
 
@@ -186,6 +189,9 @@ const DICTS: Record<Lang, Dict> = {
     "screen.latency": "延迟",
     "screen.codec_jpeg": "JPEG",
     "screen.codec_h264": "H.264",
+    "screen.codec_h265": "H.265",
+    "screen.codec_vp8": "VP8",
+    "screen.codec_vp9": "VP9",
     "screen.native_wait": "等待屏幕帧…",
     "screen.native_start_hint": "暂无原生屏幕帧，点击“启动原生监控”。",
 

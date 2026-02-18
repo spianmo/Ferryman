@@ -16,7 +16,7 @@ type Props = {
   session: SessionInfo;
 };
 
-type NativeCodec = "jpeg" | "h264";
+type NativeCodec = "jpeg" | "h264" | "h265" | "vp8" | "vp9";
 type ResolutionTier = "full" | "balanced" | "performance";
 type BitrateTier = "sd" | "hd" | "uhd";
 
@@ -24,10 +24,26 @@ const NATIVE_CODEC_STORAGE_KEY = "ferryman.screen.native_codec";
 const NATIVE_FPS_STORAGE_KEY = "ferryman.screen.native_fps";
 const NATIVE_RESOLUTION_STORAGE_KEY = "ferryman.screen.native_resolution_tier";
 const NATIVE_BITRATE_STORAGE_KEY = "ferryman.screen.native_bitrate_tier";
-const NATIVE_FPS_OPTIONS = [5, 8, 10, 12, 15, 24, 30] as const;
+const NATIVE_FPS_OPTIONS = [5, 8, 10, 12, 15, 24, 30, 60] as const;
 const EPOCH_MS_MIN = 1_000_000_000_000;
 const NATIVE_BINARY_MAGIC = 0x314d5246;
 const NATIVE_BINARY_HEADER_BYTES = 36;
+const H264_WEBCODECS_CODEC = "avc1.42E01E";
+const H265_WEBCODECS_CODEC = "hvc1.1.6.L93.B0";
+const VP8_WEBCODECS_CODEC = "vp8";
+const VP9_WEBCODECS_CODEC = "vp09.00.10.08";
+const H265_WEBCODECS_CODEC_CANDIDATES = [
+  "hvc1.1.6.L123.B0",
+  "hev1.1.6.L123.B0",
+  H265_WEBCODECS_CODEC,
+  "hev1.1.6.L93.B0",
+] as const;
+const VP9_WEBCODECS_CODEC_CANDIDATES = [
+  VP9_WEBCODECS_CODEC,
+  "vp09.00.10.10",
+  "vp09.00.10.08.01.01.01.01.00",
+] as const;
+const MAX_DECODE_QUEUE_SIZE = 3;
 
 const DEFAULT_RESOLUTION_OPTIONS: Array<{ id: ResolutionTier; scalePercent: number }> = [
   { id: "full", scalePercent: 100 },
@@ -85,7 +101,13 @@ function parseNativeBinaryFrame(buffer: ArrayBuffer): NativeBinaryFrame | null {
 
   const codecByte = view.getUint8(4);
   let codec: NativeCodec | null = null;
-  if (codecByte === 2) {
+  if (codecByte === 5) {
+    codec = "vp9";
+  } else if (codecByte === 4) {
+    codec = "vp8";
+  } else if (codecByte === 3) {
+    codec = "h265";
+  } else if (codecByte === 2) {
     codec = "h264";
   } else if (codecByte === 1) {
     codec = "jpeg";
@@ -114,17 +136,170 @@ function parseNativeBinaryFrame(buffer: ArrayBuffer): NativeBinaryFrame | null {
   };
 }
 
+function findAnnexBStartCode(bytes: Uint8Array, from: number): number {
+  for (let idx = Math.max(0, from); idx + 3 < bytes.length; idx += 1) {
+    if (bytes[idx] !== 0 || bytes[idx + 1] !== 0) {
+      continue;
+    }
+    if (bytes[idx + 2] === 1) {
+      return idx;
+    }
+    if (idx + 4 < bytes.length && bytes[idx + 2] === 0 && bytes[idx + 3] === 1) {
+      return idx;
+    }
+  }
+  return -1;
+}
+
+function hasH264Idr(bytes: Uint8Array): boolean {
+  const firstStart = findAnnexBStartCode(bytes, 0);
+  if (firstStart >= 0) {
+    let cursor = 0;
+    while (true) {
+      const start = findAnnexBStartCode(bytes, cursor);
+      if (start < 0) {
+        return false;
+      }
+      const nalStart = start + (bytes[start + 2] === 1 ? 3 : 4);
+      if (nalStart >= bytes.length) {
+        return false;
+      }
+      const nalType = bytes[nalStart] & 0x1f;
+      if (nalType === 5) {
+        return true;
+      }
+      cursor = nalStart + 1;
+    }
+  }
+
+  // Fallback for AVCC/length-prefixed payloads.
+  let offset = 0;
+  while (offset + 4 <= bytes.length) {
+    const nalSize = (
+      (bytes[offset] << 24) |
+      (bytes[offset + 1] << 16) |
+      (bytes[offset + 2] << 8) |
+      bytes[offset + 3]
+    ) >>> 0;
+    offset += 4;
+    if (nalSize === 0 || offset + nalSize > bytes.length) {
+      return false;
+    }
+    const nalType = bytes[offset] & 0x1f;
+    if (nalType === 5) {
+      return true;
+    }
+    offset += nalSize;
+  }
+  return false;
+}
+
+function hasH265Idr(bytes: Uint8Array): boolean {
+  const firstStart = findAnnexBStartCode(bytes, 0);
+  if (firstStart >= 0) {
+    let cursor = 0;
+    while (true) {
+      const start = findAnnexBStartCode(bytes, cursor);
+      if (start < 0) {
+        return false;
+      }
+      const nalStart = start + (bytes[start + 2] === 1 ? 3 : 4);
+      if (nalStart >= bytes.length) {
+        return false;
+      }
+      const nalType = (bytes[nalStart] >> 1) & 0x3f;
+      if (nalType >= 16 && nalType <= 21) {
+        return true;
+      }
+      cursor = nalStart + 1;
+    }
+  }
+
+  // Fallback for AVCC/length-prefixed payloads.
+  let offset = 0;
+  while (offset + 4 <= bytes.length) {
+    const nalSize = (
+      (bytes[offset] << 24) |
+      (bytes[offset + 1] << 16) |
+      (bytes[offset + 2] << 8) |
+      bytes[offset + 3]
+    ) >>> 0;
+    offset += 4;
+    if (nalSize === 0 || offset + nalSize > bytes.length) {
+      return false;
+    }
+    const nalType = (bytes[offset] >> 1) & 0x3f;
+    if (nalType >= 16 && nalType <= 21) {
+      return true;
+    }
+    offset += nalSize;
+  }
+  return false;
+}
+
+function hasVp8Keyframe(bytes: Uint8Array): boolean {
+  if (bytes.length === 0) {
+    return false;
+  }
+  return (bytes[0] & 0x01) === 0;
+}
+
+function hasVp9Keyframe(bytes: Uint8Array): boolean {
+  if (bytes.length === 0) {
+    return false;
+  }
+  const first = bytes[0];
+  const frameMarker = (first >> 6) & 0x03;
+  if (frameMarker !== 0x02) {
+    return false;
+  }
+  const showExistingFrame = ((first >> 3) & 0x01) === 1;
+  if (showExistingFrame) {
+    return false;
+  }
+  const frameType = (first >> 2) & 0x01;
+  return frameType === 0;
+}
+
+function isLikelyKeyframe(frame: NativeBinaryFrame): boolean {
+  if (frame.keyframe) {
+    return true;
+  }
+  if (frame.codec === "h264") {
+    return hasH264Idr(frame.payload);
+  }
+  if (frame.codec === "h265") {
+    return hasH265Idr(frame.payload);
+  }
+  if (frame.codec === "vp8") {
+    return hasVp8Keyframe(frame.payload);
+  }
+  if (frame.codec === "vp9") {
+    return hasVp9Keyframe(frame.payload);
+  }
+  return false;
+}
+
 export default function ScreenPage({ session }: Props) {
   const { t } = useI18n();
   const wsRef = useRef<WebSocket | null>(null);
   const nativeSurfaceRef = useRef<HTMLDivElement | null>(null);
   const nativeCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const nativeDecoderRef = useRef<VideoDecoder | null>(null);
-  const nativeDecoderCodecRef = useRef("avc1.42E01E");
+  const nativeDecoderCodecRef = useRef(H264_WEBCODECS_CODEC);
+  const supportedH264CodecRef = useRef<string | null>(H264_WEBCODECS_CODEC);
+  const supportedH265CodecRef = useRef<string | null>(null);
+  const supportedVP8CodecRef = useRef<string | null>(VP8_WEBCODECS_CODEC);
+  const supportedVP9CodecRef = useRef<string | null>(null);
+  const supportsH264DecodeRef = useRef<boolean | null>(null);
+  const supportsH265DecodeRef = useRef<boolean | null>(null);
+  const supportsVP8DecodeRef = useRef<boolean | null>(null);
+  const supportsVP9DecodeRef = useRef<boolean | null>(null);
   const nativeDecoderWidthRef = useRef(0);
   const nativeDecoderHeightRef = useRef(0);
   const nativeDecoderTimestampRef = useRef(0);
   const nativeDecoderSawKeyRef = useRef(false);
+  const nativeDropUntilKeyframeRef = useRef(false);
   const nativeHasFrameRef = useRef(false);
   const nativeFrameObjectUrlRef = useRef<string | null>(null);
   const nativeStatsRef = useRef({
@@ -143,17 +318,29 @@ export default function ScreenPage({ session }: Props) {
   const [nativeStreaming, setNativeStreaming] = useState(false);
   const [nativeCodec, setNativeCodec] = useState<NativeCodec>("jpeg");
   const [preferredNativeCodec, setPreferredNativeCodec] = useState<NativeCodec>(() => {
-    const h264Supported = typeof window !== "undefined" && typeof VideoDecoder !== "undefined";
+    const hasWebCodecs = typeof window !== "undefined" && typeof VideoDecoder !== "undefined";
     if (typeof window !== "undefined") {
       const stored = window.localStorage.getItem(NATIVE_CODEC_STORAGE_KEY);
       if (stored === "jpeg") {
         return "jpeg";
       }
-      if (stored === "h264" && h264Supported) {
+      if (stored === "vp9" && hasWebCodecs) {
+        return "vp9";
+      }
+      if (stored === "vp8" && hasWebCodecs) {
+        return "vp8";
+      }
+      if (stored === "h265" && hasWebCodecs) {
+        return "h265";
+      }
+      if (stored === "h264" && hasWebCodecs) {
         return "h264";
       }
     }
-    return h264Supported ? "h264" : "jpeg";
+    if (hasWebCodecs) {
+      return "h264";
+    }
+    return "jpeg";
   });
   const [preferredNativeFps, setPreferredNativeFps] = useState<number>(() => {
     if (typeof window === "undefined") {
@@ -205,8 +392,97 @@ export default function ScreenPage({ session }: Props) {
     return () => document.removeEventListener("fullscreenchange", onFullscreenChange);
   }, []);
 
+  const probeDecodeSupport = (
+    candidates: readonly string[],
+    supportedRef: { current: boolean | null },
+    codecRef: { current: string | null }
+  ) => {
+    if (supportedRef.current !== null) {
+      return supportedRef.current;
+    }
+    if (typeof window === "undefined" || typeof VideoDecoder === "undefined") {
+      supportedRef.current = false;
+      codecRef.current = null;
+      return false;
+    }
+
+    for (const candidate of candidates) {
+      try {
+        const decoder = new VideoDecoder({
+          output: (frame) => frame.close(),
+          error: () => {
+            // Probe only.
+          },
+        });
+        decoder.configure({
+          codec: candidate,
+          codedWidth: 1280,
+          codedHeight: 720,
+          optimizeForLatency: true,
+        });
+        decoder.close();
+        supportedRef.current = true;
+        codecRef.current = candidate;
+        return true;
+      } catch {
+        // Keep trying alternative codec strings.
+      }
+    }
+
+    supportedRef.current = false;
+    codecRef.current = null;
+    return false;
+  };
+
   const supportsH264Decode = () => {
-    return typeof window !== "undefined" && typeof VideoDecoder !== "undefined";
+    return probeDecodeSupport([H264_WEBCODECS_CODEC], supportsH264DecodeRef, supportedH264CodecRef);
+  };
+
+  const supportsH265Decode = () => {
+    return probeDecodeSupport(H265_WEBCODECS_CODEC_CANDIDATES, supportsH265DecodeRef, supportedH265CodecRef);
+  };
+
+  const supportsVP8Decode = () => {
+    return probeDecodeSupport([VP8_WEBCODECS_CODEC], supportsVP8DecodeRef, supportedVP8CodecRef);
+  };
+
+  const supportsVP9Decode = () => {
+    return probeDecodeSupport(VP9_WEBCODECS_CODEC_CANDIDATES, supportsVP9DecodeRef, supportedVP9CodecRef);
+  };
+
+  const supportsNativeVideoCodec = (codec: NativeCodec): boolean => {
+    if (codec === "h264") {
+      return supportsH264Decode();
+    }
+    if (codec === "h265") {
+      return supportsH265Decode();
+    }
+    if (codec === "vp8") {
+      return supportsVP8Decode();
+    }
+    if (codec === "vp9") {
+      return supportsVP9Decode();
+    }
+    return true;
+  };
+
+  const requestedNativeCodecFor = (preferredCodec: NativeCodec): NativeCodec => {
+    if (preferredCodec !== "jpeg" && supportsNativeVideoCodec(preferredCodec)) {
+      return preferredCodec;
+    }
+    if (supportsH264Decode()) {
+      return "h264";
+    }
+    if (supportsH265Decode()) {
+      return "h265";
+    }
+    if (supportsVP8Decode()) {
+      return "vp8";
+    }
+    if (supportsVP9Decode()) {
+      return "vp9";
+    }
+    return "jpeg";
   };
 
   const revokeNativeFrameObjectUrl = () => {
@@ -271,9 +547,10 @@ export default function ScreenPage({ session }: Props) {
     nativeDecoderRef.current = null;
     nativeDecoderWidthRef.current = 0;
     nativeDecoderHeightRef.current = 0;
-    nativeDecoderCodecRef.current = "avc1.42E01E";
+    nativeDecoderCodecRef.current = H264_WEBCODECS_CODEC;
     nativeDecoderTimestampRef.current = 0;
     nativeDecoderSawKeyRef.current = false;
+    nativeDropUntilKeyframeRef.current = false;
     if (!decoder) return;
     try {
       decoder.close();
@@ -291,6 +568,12 @@ export default function ScreenPage({ session }: Props) {
   useEffect(() => {
     if (typeof window !== "undefined") {
       window.localStorage.setItem(NATIVE_CODEC_STORAGE_KEY, preferredNativeCodec);
+    }
+  }, [preferredNativeCodec]);
+
+  useEffect(() => {
+    if (preferredNativeCodec !== "jpeg" && !supportsNativeVideoCodec(preferredNativeCodec)) {
+      setPreferredNativeCodec(requestedNativeCodecFor("jpeg"));
     }
   }, [preferredNativeCodec]);
 
@@ -398,8 +681,8 @@ export default function ScreenPage({ session }: Props) {
     }
   }, [preferredBitrateTier, bitrateOptions]);
 
-  const ensureH264Decoder = (codedWidth: number, codedHeight: number, codec: string) => {
-    if (!supportsH264Decode()) {
+  const ensureVideoDecoder = (codedWidth: number, codedHeight: number, codec: string) => {
+    if (typeof window === "undefined" || typeof VideoDecoder === "undefined") {
       return false;
     }
     if (
@@ -441,8 +724,10 @@ export default function ScreenPage({ session }: Props) {
         }
       },
       error: () => {
-        setStatus(t("terminal.failed"));
-        setDotState("error");
+        closeNativeDecoder();
+        if (nativeWantedRef.current) {
+          setDotState("connecting");
+        }
       },
     });
 
@@ -474,10 +759,7 @@ export default function ScreenPage({ session }: Props) {
   };
 
   const requestedNativeCodec = (): NativeCodec => {
-    if (preferredNativeCodec === "h264" && supportsH264Decode()) {
-      return "h264";
-    }
-    return "jpeg";
+    return requestedNativeCodecFor(preferredNativeCodec);
   };
 
   const requestedNativeFps = (): number => {
@@ -498,21 +780,78 @@ export default function ScreenPage({ session }: Props) {
       : (bitrateOptions[0]?.id ?? "hd");
   };
 
+  const decoderCodecFor = (codec: NativeCodec): string | null => {
+    if (codec === "h264") {
+      if (!supportsH264Decode()) {
+        return null;
+      }
+      return supportedH264CodecRef.current ?? H264_WEBCODECS_CODEC;
+    }
+    if (codec === "h265") {
+      if (!supportsH265Decode()) {
+        return null;
+      }
+      return supportedH265CodecRef.current ?? H265_WEBCODECS_CODEC;
+    }
+    if (codec === "vp8") {
+      if (!supportsVP8Decode()) {
+        return null;
+      }
+      return supportedVP8CodecRef.current ?? VP8_WEBCODECS_CODEC;
+    }
+    if (codec === "vp9") {
+      if (!supportsVP9Decode()) {
+        return null;
+      }
+      return supportedVP9CodecRef.current ?? VP9_WEBCODECS_CODEC;
+    }
+    return null;
+  };
+
+  const shouldDropForBackpressure = (decoder: VideoDecoder, isKeyframe: boolean): boolean => {
+    if (isKeyframe) {
+      nativeDropUntilKeyframeRef.current = false;
+      return false;
+    }
+    if (nativeDropUntilKeyframeRef.current) {
+      return true;
+    }
+
+    const decodeQueueSize = (decoder as { decodeQueueSize?: number }).decodeQueueSize ?? 0;
+    if (decodeQueueSize > MAX_DECODE_QUEUE_SIZE) {
+      nativeDropUntilKeyframeRef.current = true;
+      return true;
+    }
+    return false;
+  };
+
   const handleNativeBinaryFrameBuffer = (buffer: ArrayBuffer) => {
     const frame = parseNativeBinaryFrame(buffer);
     if (!frame) return;
 
-    if (frame.codec === "h264") {
-      if (!ensureH264Decoder(frame.width, frame.height, "avc1.42E01E")) {
+    if (
+      frame.codec === "h264" ||
+      frame.codec === "h265" ||
+      frame.codec === "vp8" ||
+      frame.codec === "vp9"
+    ) {
+      const decoderCodec = decoderCodecFor(frame.codec);
+      if (!decoderCodec) {
+        setStatus(t("terminal.failed"));
+        setDotState("error");
+        return;
+      }
+      if (!ensureVideoDecoder(frame.width, frame.height, decoderCodec)) {
         setStatus(t("terminal.failed"));
         setDotState("error");
         return;
       }
 
-      if (!frame.keyframe && !nativeDecoderSawKeyRef.current) {
+      const isKeyframe = isLikelyKeyframe(frame);
+      if (!isKeyframe && !nativeDecoderSawKeyRef.current) {
         return;
       }
-      if (frame.keyframe) {
+      if (isKeyframe) {
         nativeDecoderSawKeyRef.current = true;
       }
 
@@ -526,19 +865,24 @@ export default function ScreenPage({ session }: Props) {
 
       const decoder = nativeDecoderRef.current;
       if (!decoder) return;
+      if (shouldDropForBackpressure(decoder, isKeyframe)) {
+        return;
+      }
 
       try {
         decoder.decode(
           new EncodedVideoChunk({
-            type: frame.keyframe ? "key" : "delta",
+            type: isKeyframe ? "key" : "delta",
             timestamp,
             data: frame.payload,
           })
         );
-        setNativeCodec("h264");
+        setNativeCodec(frame.codec);
       } catch {
-        setStatus(t("terminal.failed"));
-        setDotState("error");
+        closeNativeDecoder();
+        if (nativeWantedRef.current) {
+          setDotState("connecting");
+        }
       }
       return;
     }
@@ -644,7 +988,15 @@ export default function ScreenPage({ session }: Props) {
       if (eventType === "native_subscribed") {
         const negotiatedCodec = String(payload.codec ?? "");
         const nextCodec: NativeCodec =
-          negotiatedCodec === "h264" && supportsH264Decode() ? "h264" : "jpeg";
+          negotiatedCodec === "vp9" && supportsVP9Decode()
+            ? "vp9"
+            : negotiatedCodec === "vp8" && supportsVP8Decode()
+              ? "vp8"
+              : negotiatedCodec === "h265" && supportsH265Decode()
+            ? "h265"
+            : negotiatedCodec === "h264" && supportsH264Decode()
+              ? "h264"
+              : "jpeg";
         const negotiatedResolutionTier = String(payload.resolution_tier ?? "");
         const negotiatedBitrateTier = String(payload.bitrate_tier ?? "");
         if (isResolutionTier(negotiatedResolutionTier)) {
@@ -657,7 +1009,7 @@ export default function ScreenPage({ session }: Props) {
         setNativeStreaming(true);
         setNativeCodec(nextCodec);
         resetNativeFrameState();
-        if (nextCodec !== "h264") {
+        if (nextCodec === "jpeg") {
           closeNativeDecoder();
         }
         setStatus(t("screen.native_start"));
@@ -674,24 +1026,61 @@ export default function ScreenPage({ session }: Props) {
         setDotState("idle");
         return;
       }
-      if (eventType === "native_h264") {
-        const frame = String(payload.h264_base64 ?? "");
+      if (
+        eventType === "native_h264" ||
+        eventType === "native_h265" ||
+        eventType === "native_vp8" ||
+        eventType === "native_vp9"
+      ) {
+        const streamCodec: NativeCodec =
+          eventType === "native_h265"
+            ? "h265"
+            : eventType === "native_vp8"
+              ? "vp8"
+              : eventType === "native_vp9"
+                ? "vp9"
+                : "h264";
+        const frame = String(
+          streamCodec === "h265"
+            ? payload.h265_base64 ?? ""
+            : streamCodec === "vp8"
+              ? payload.vp8_base64 ?? ""
+              : streamCodec === "vp9"
+                ? payload.vp9_base64 ?? ""
+                : payload.h264_base64 ?? ""
+        );
         if (!frame) return;
         const width = Number(payload.width ?? 0);
         const height = Number(payload.height ?? 0);
-        const codec = String(payload.codec ?? "avc1.42E01E") || "avc1.42E01E";
+        const fallbackDecoderCodec = decoderCodecFor(streamCodec);
+        const codec = String(payload.codec ?? fallbackDecoderCodec ?? "") || fallbackDecoderCodec;
         if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
           return;
         }
-        if (!ensureH264Decoder(width, height, codec)) {
+        if (!codec) {
+          setStatus(t("terminal.failed"));
+          setDotState("error");
+          return;
+        }
+        if (!ensureVideoDecoder(width, height, codec)) {
           setStatus(t("terminal.failed"));
           setDotState("error");
           return;
         }
 
         const rawKeyframe = payload.keyframe;
-        const isKeyframe =
+        const hintedKeyframe =
           rawKeyframe === true || rawKeyframe === "true" || rawKeyframe === 1 || rawKeyframe === "1";
+        const bytes = decodeBase64Bytes(frame);
+        const isKeyframe = hintedKeyframe || (
+          streamCodec === "h265"
+            ? hasH265Idr(bytes)
+            : streamCodec === "h264"
+              ? hasH264Idr(bytes)
+              : streamCodec === "vp8"
+                ? hasVp8Keyframe(bytes)
+                : hasVp9Keyframe(bytes)
+        );
         if (!isKeyframe && !nativeDecoderSawKeyRef.current) {
           return;
         }
@@ -699,7 +1088,6 @@ export default function ScreenPage({ session }: Props) {
           nativeDecoderSawKeyRef.current = true;
         }
 
-        const bytes = decodeBase64Bytes(frame);
         const capturedAtMs = Number(payload.captured_at_ms ?? 0);
         let timestamp = Number.isFinite(capturedAtMs) && capturedAtMs > 0
           ? Math.trunc(capturedAtMs * 1000)
@@ -711,6 +1099,9 @@ export default function ScreenPage({ session }: Props) {
 
         const decoder = nativeDecoderRef.current;
         if (!decoder) return;
+        if (shouldDropForBackpressure(decoder, isKeyframe)) {
+          return;
+        }
 
         try {
           decoder.decode(
@@ -720,10 +1111,12 @@ export default function ScreenPage({ session }: Props) {
               data: bytes,
             })
           );
-          setNativeCodec("h264");
+          setNativeCodec(streamCodec);
         } catch {
-          setStatus(t("terminal.failed"));
-          setDotState("error");
+          closeNativeDecoder();
+          if (nativeWantedRef.current) {
+            setDotState("connecting");
+          }
         }
         return;
       }
@@ -798,7 +1191,17 @@ export default function ScreenPage({ session }: Props) {
   };
 
   const onNativeCodecChange = (event: ReactChangeEvent<HTMLSelectElement>) => {
-    const nextCodec: NativeCodec = event.target.value === "h264" ? "h264" : "jpeg";
+    const rawValue = event.target.value;
+    const nextCodec: NativeCodec =
+      rawValue === "vp9"
+        ? "vp9"
+        : rawValue === "vp8"
+          ? "vp8"
+          : rawValue === "h265"
+            ? "h265"
+            : rawValue === "h264"
+              ? "h264"
+              : "jpeg";
     setPreferredNativeCodec(nextCodec);
     const ws = wsRef.current;
     if (!nativeWantedRef.current || !ws || ws.readyState !== WebSocket.OPEN) {
@@ -806,12 +1209,13 @@ export default function ScreenPage({ session }: Props) {
     }
     setDotState("connecting");
     resetNativeFrameState();
-    if (nextCodec !== "h264") {
+    if (nextCodec === "jpeg") {
       closeNativeDecoder();
     }
+    const requestedCodec = requestedNativeCodecFor(nextCodec);
     send({
       action: "native_subscribe",
-      codec: nextCodec === "h264" && supportsH264Decode() ? "h264" : "jpeg",
+      codec: requestedCodec,
       fps: requestedNativeFps(),
       resolution_tier: requestedResolutionTier(),
       bitrate_tier: requestedBitrateTier(),
@@ -1004,6 +1408,15 @@ export default function ScreenPage({ session }: Props) {
               <option value="h264" disabled={!supportsH264Decode()}>
                 {t("screen.codec_h264")}
               </option>
+              <option value="h265" disabled={!supportsH265Decode()}>
+                {t("screen.codec_h265")}
+              </option>
+              <option value="vp8" disabled={!supportsVP8Decode()}>
+                {t("screen.codec_vp8")}
+              </option>
+              <option value="vp9" disabled={!supportsVP9Decode()}>
+                {t("screen.codec_vp9")}
+              </option>
             </select>
           </label>
           <label className="inline-flex h-10 items-center gap-2 rounded-2xl bg-slate-100 px-3 text-xs font-semibold text-slate-600 dark:bg-neutral-800 dark:text-neutral-200">
@@ -1079,7 +1492,7 @@ export default function ScreenPage({ session }: Props) {
           onKeyDown={onNativeKeyDown}
           onKeyUp={onNativeKeyUp}
         >
-          {nativeStreaming && nativeCodec === "h264" ? (
+          {nativeStreaming && nativeCodec !== "jpeg" ? (
             <div className="relative h-full w-full">
               <canvas
                 ref={nativeCanvasRef}

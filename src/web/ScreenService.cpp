@@ -48,7 +48,6 @@
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/error.h>
-#include <libavutil/opt.h>
 #include <libswscale/swscale.h>
 }
 #endif
@@ -66,7 +65,48 @@ int64_t EpochMillisNow() {
 }
 
 std::string JsonCapabilities(bool native_stream, bool input_injection, const std::string& backend,
-                             const std::string& encoding) {
+                             bool supports_h264, bool supports_h265, bool supports_vp8,
+                             bool supports_vp9) {
+  json native_codecs = json::array();
+  if (native_stream) {
+    native_codecs.push_back("jpeg");
+    if (supports_h264) {
+      native_codecs.push_back("h264");
+    }
+    if (supports_h265) {
+      native_codecs.push_back("h265");
+    }
+    if (supports_vp8) {
+      native_codecs.push_back("vp8");
+    }
+    if (supports_vp9) {
+      native_codecs.push_back("vp9");
+    }
+  }
+  std::vector<std::string> video_codecs;
+  if (supports_h264) {
+    video_codecs.emplace_back("h264");
+  }
+  if (supports_h265) {
+    video_codecs.emplace_back("h265");
+  }
+  if (supports_vp8) {
+    video_codecs.emplace_back("vp8");
+  }
+  if (supports_vp9) {
+    video_codecs.emplace_back("vp9");
+  }
+
+  std::string encoding = "unsupported";
+  if (!video_codecs.empty()) {
+    encoding = "ffmpeg-";
+    for (size_t idx = 0; idx < video_codecs.size(); ++idx) {
+      if (idx > 0) {
+        encoding.push_back('+');
+      }
+      encoding += video_codecs[idx];
+    }
+  }
   json payload = {
       {"webrtc_signaling", true},
       {"native_screen_stream", native_stream},
@@ -74,6 +114,7 @@ std::string JsonCapabilities(bool native_stream, bool input_injection, const std
       {"transport", native_stream ? "webrtc-signaling+native-ws" : "p2p-signaling"},
       {"screen_backend", backend},
       {"video_encoding", encoding},
+      {"native_stream_codecs", native_codecs},
       {"native_stream_transport", native_stream ? "ws-binary" : "unsupported"},
       {"native_resolution_tiers", json::array({
                                     json{
@@ -156,53 +197,6 @@ std::string AvErrorToString(int code) {
   char error[AV_ERROR_MAX_STRING_SIZE] = {0};
   av_strerror(code, error, sizeof(error));
   return std::string(error);
-}
-
-bool CodecSupportsPixelFormat(const AVCodec* codec, AVPixelFormat pix_fmt) {
-  if (codec == nullptr || codec->pix_fmts == nullptr) {
-    return false;
-  }
-  for (const AVPixelFormat* current = codec->pix_fmts; *current != AV_PIX_FMT_NONE; ++current) {
-    if (*current == pix_fmt) {
-      return true;
-    }
-  }
-  return false;
-}
-
-bool IsVideoToolboxCodec(const AVCodec* codec) {
-  return codec != nullptr && codec->name != nullptr &&
-         std::string(codec->name).find("videotoolbox") != std::string::npos;
-}
-
-const AVCodec* FindH264Encoder(bool allow_videotoolbox) {
-#if defined(__APPLE__)
-  if (allow_videotoolbox) {
-    const AVCodec* hardware = avcodec_find_encoder_by_name("h264_videotoolbox");
-    if (hardware != nullptr) {
-      return hardware;
-    }
-  }
-#endif
-  return avcodec_find_encoder(AV_CODEC_ID_H264);
-}
-
-AVPixelFormat PreferredH264PixelFormat(const AVCodec* codec) {
-  if (codec == nullptr) {
-    return AV_PIX_FMT_YUV420P;
-  }
-#if defined(__APPLE__)
-  if (IsVideoToolboxCodec(codec) && CodecSupportsPixelFormat(codec, AV_PIX_FMT_NV12)) {
-    return AV_PIX_FMT_NV12;
-  }
-#endif
-  if (CodecSupportsPixelFormat(codec, AV_PIX_FMT_YUV420P)) {
-    return AV_PIX_FMT_YUV420P;
-  }
-  if (codec->pix_fmts != nullptr && codec->pix_fmts[0] != AV_PIX_FMT_NONE) {
-    return codec->pix_fmts[0];
-  }
-  return AV_PIX_FMT_YUV420P;
 }
 
 bool EncodeFrameToJpegFfmpeg(const uint8_t* source, int width, int height, int stride,
@@ -896,280 +890,6 @@ void EmitWindowsModifiers(const json& payload, bool down) {
 
 }  // namespace
 
-struct ScreenService::H264EncoderContext {
-#if FERRYMAN_WITH_FFMPEG
-  const AVCodec* codec = nullptr;
-  AVCodecContext* codec_ctx = nullptr;
-  AVFrame* frame = nullptr;
-  SwsContext* sws_ctx = nullptr;
-  int width = 0;
-  int height = 0;
-  int fps = 25;
-  int bitrate_bps = 3'000'000;
-  AVPixelFormat src_pix_fmt = AV_PIX_FMT_NONE;
-  AVPixelFormat enc_pix_fmt = AV_PIX_FMT_NONE;
-  bool allow_videotoolbox = true;
-  int64_t next_pts = 0;
-
-  ~H264EncoderContext() { Reset(); }
-
-  void Reset() {
-    if (sws_ctx != nullptr) {
-      sws_freeContext(sws_ctx);
-      sws_ctx = nullptr;
-    }
-    if (frame != nullptr) {
-      av_frame_free(&frame);
-      frame = nullptr;
-    }
-    if (codec_ctx != nullptr) {
-      avcodec_free_context(&codec_ctx);
-      codec_ctx = nullptr;
-    }
-    codec = nullptr;
-    width = 0;
-    height = 0;
-    fps = 25;
-    bitrate_bps = 3'000'000;
-    src_pix_fmt = AV_PIX_FMT_NONE;
-    enc_pix_fmt = AV_PIX_FMT_NONE;
-    next_pts = 0;
-  }
-
-  bool EnsureConfigured(int target_width, int target_height, int target_fps, int target_bitrate_bps,
-                        AVPixelFormat source_pix_fmt, std::string* error) {
-    if (target_width <= 0 || target_height <= 0 || target_fps <= 0 ||
-        target_bitrate_bps <= 0 || source_pix_fmt == AV_PIX_FMT_NONE) {
-      if (error != nullptr) {
-        *error = "invalid h264 encoder dimensions, fps, bitrate, or source format";
-      }
-      return false;
-    }
-
-    if (codec_ctx != nullptr &&
-        width == target_width &&
-        height == target_height &&
-        fps == target_fps &&
-        bitrate_bps == target_bitrate_bps &&
-        src_pix_fmt == source_pix_fmt &&
-        enc_pix_fmt != AV_PIX_FMT_NONE) {
-      return true;
-    }
-
-    Reset();
-
-    codec = FindH264Encoder(allow_videotoolbox);
-    if (codec == nullptr) {
-      if (error != nullptr) {
-        *error = "ffmpeg encoder AV_CODEC_ID_H264 is unavailable";
-      }
-      return false;
-    }
-
-    codec_ctx = avcodec_alloc_context3(codec);
-    if (codec_ctx == nullptr) {
-      if (error != nullptr) {
-        *error = "failed to allocate ffmpeg h264 codec context";
-      }
-      return false;
-    }
-
-    codec_ctx->width = target_width;
-    codec_ctx->height = target_height;
-    codec_ctx->pix_fmt = PreferredH264PixelFormat(codec);
-    codec_ctx->time_base = AVRational{1, target_fps};
-    codec_ctx->framerate = AVRational{target_fps, 1};
-    codec_ctx->gop_size = std::max(target_fps, 10);
-    codec_ctx->max_b_frames = 0;
-    codec_ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
-    codec_ctx->color_range = AVCOL_RANGE_MPEG;
-    codec_ctx->colorspace = AVCOL_SPC_BT709;
-    codec_ctx->color_primaries = AVCOL_PRI_BT709;
-    codec_ctx->color_trc = AVCOL_TRC_BT709;
-    codec_ctx->bit_rate = static_cast<int64_t>(std::max(target_bitrate_bps, 500'000));
-    enc_pix_fmt = codec_ctx->pix_fmt;
-
-    if (codec_ctx->priv_data != nullptr) {
-      (void)av_opt_set(codec_ctx->priv_data, "profile", "baseline", 0);
-      if (IsVideoToolboxCodec(codec)) {
-        (void)av_opt_set(codec_ctx->priv_data, "realtime", "1", 0);
-        (void)av_opt_set(codec_ctx->priv_data, "allow_sw", "1", 0);
-        (void)av_opt_set(codec_ctx->priv_data, "prio_speed", "1", 0);
-      } else {
-        (void)av_opt_set(codec_ctx->priv_data, "preset", "veryfast", 0);
-        (void)av_opt_set(codec_ctx->priv_data, "tune", "zerolatency", 0);
-        (void)av_opt_set(codec_ctx->priv_data, "x264-params",
-                         "repeat-headers=1:keyint=30:min-keyint=30:scenecut=0", 0);
-      }
-    }
-
-    int ret = avcodec_open2(codec_ctx, codec, nullptr);
-    if (ret < 0) {
-      if (error != nullptr) {
-        *error = "failed to open ffmpeg h264 encoder: " + AvErrorToString(ret);
-      }
-      Reset();
-      return false;
-    }
-
-    frame = av_frame_alloc();
-    if (frame == nullptr) {
-      if (error != nullptr) {
-        *error = "failed to allocate ffmpeg h264 frame";
-      }
-      Reset();
-      return false;
-    }
-    frame->format = codec_ctx->pix_fmt;
-    frame->width = target_width;
-    frame->height = target_height;
-    frame->color_range = codec_ctx->color_range;
-    frame->colorspace = codec_ctx->colorspace;
-    frame->color_primaries = codec_ctx->color_primaries;
-    frame->color_trc = codec_ctx->color_trc;
-
-    ret = av_frame_get_buffer(frame, 32);
-    if (ret < 0) {
-      if (error != nullptr) {
-        *error = "failed to allocate ffmpeg h264 frame buffer: " + AvErrorToString(ret);
-      }
-      Reset();
-      return false;
-    }
-
-    sws_ctx = sws_getContext(target_width, target_height, source_pix_fmt,
-                             target_width, target_height, codec_ctx->pix_fmt,
-                             SWS_BILINEAR, nullptr, nullptr, nullptr);
-    if (sws_ctx == nullptr) {
-      if (error != nullptr) {
-        *error = "failed to create ffmpeg h264 sws context";
-      }
-      Reset();
-      return false;
-    }
-
-    width = target_width;
-    height = target_height;
-    fps = target_fps;
-    bitrate_bps = target_bitrate_bps;
-    src_pix_fmt = source_pix_fmt;
-    next_pts = 0;
-    return true;
-  }
-
-  bool EncodeFrame(const uint8_t* source, int stride, std::string* h264_bytes, bool* keyframe,
-                   std::string* error) {
-    if (source == nullptr || stride <= 0 || h264_bytes == nullptr || keyframe == nullptr ||
-        codec_ctx == nullptr || frame == nullptr || sws_ctx == nullptr) {
-      if (error != nullptr) {
-        *error = "h264 encoder is not initialized";
-      }
-      return false;
-    }
-
-    int ret = av_frame_make_writable(frame);
-    if (ret < 0) {
-      if (error != nullptr) {
-        *error = "failed to make ffmpeg h264 frame writable: " + AvErrorToString(ret);
-      }
-      return false;
-    }
-
-    const uint8_t* src_data[1] = {source};
-    int src_linesize[1] = {stride};
-    sws_scale(sws_ctx, src_data, src_linesize, 0, height, frame->data, frame->linesize);
-    frame->color_range = codec_ctx->color_range;
-    frame->colorspace = codec_ctx->colorspace;
-    frame->color_primaries = codec_ctx->color_primaries;
-    frame->color_trc = codec_ctx->color_trc;
-
-    frame->pts = next_pts++;
-    ret = avcodec_send_frame(codec_ctx, frame);
-    if (ret < 0) {
-      if (IsVideoToolboxCodec(codec) && allow_videotoolbox) {
-        const int fallback_width = width;
-        const int fallback_height = height;
-        const int fallback_fps = fps;
-        const int fallback_bitrate_bps = bitrate_bps;
-        const AVPixelFormat fallback_src_pix_fmt = src_pix_fmt;
-        allow_videotoolbox = false;
-        Reset();
-        if (EnsureConfigured(fallback_width, fallback_height, fallback_fps, fallback_bitrate_bps,
-                             fallback_src_pix_fmt, error)) {
-          return EncodeFrame(source, stride, h264_bytes, keyframe, error);
-        }
-      }
-      if (error != nullptr) {
-        *error = "failed to send frame to ffmpeg h264 encoder: " + AvErrorToString(ret);
-      }
-      return false;
-    }
-
-    AVPacket* packet = av_packet_alloc();
-    if (packet == nullptr) {
-      if (error != nullptr) {
-        *error = "failed to allocate ffmpeg h264 packet";
-      }
-      return false;
-    }
-
-    h264_bytes->clear();
-    *keyframe = false;
-    bool got_packet = false;
-
-    while (true) {
-      ret = avcodec_receive_packet(codec_ctx, packet);
-      if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-        break;
-      }
-      if (ret < 0) {
-        if (IsVideoToolboxCodec(codec) && allow_videotoolbox) {
-          const int fallback_width = width;
-          const int fallback_height = height;
-          const int fallback_fps = fps;
-          const int fallback_bitrate_bps = bitrate_bps;
-          const AVPixelFormat fallback_src_pix_fmt = src_pix_fmt;
-          allow_videotoolbox = false;
-          Reset();
-          if (EnsureConfigured(fallback_width, fallback_height, fallback_fps, fallback_bitrate_bps,
-                               fallback_src_pix_fmt, error)) {
-            return EncodeFrame(source, stride, h264_bytes, keyframe, error);
-          }
-        }
-        if (error != nullptr) {
-          *error = "failed to receive ffmpeg h264 packet: " + AvErrorToString(ret);
-        }
-        av_packet_free(&packet);
-        return false;
-      }
-
-      got_packet = true;
-      if ((packet->flags & AV_PKT_FLAG_KEY) != 0) {
-        *keyframe = true;
-      }
-      if (packet->size > 0 && packet->data != nullptr) {
-        h264_bytes->append(reinterpret_cast<const char*>(packet->data),
-                           static_cast<size_t>(packet->size));
-      }
-      av_packet_unref(packet);
-    }
-
-    av_packet_free(&packet);
-
-    if (!got_packet || h264_bytes->empty()) {
-      if (error != nullptr) {
-        *error = "ffmpeg h264 encoder produced empty packet";
-      }
-      return false;
-    }
-    return true;
-  }
-#else
-  ~H264EncoderContext() = default;
-  void Reset() {}
-#endif
-};
-
 ScreenService::ScreenService() = default;
 
 ScreenService::~ScreenService() {
@@ -1177,36 +897,53 @@ ScreenService::~ScreenService() {
 }
 
 std::string ScreenService::CapabilitiesJson() const {
+  const bool supports_h264 = SupportsH264();
+  const bool supports_h265 = SupportsH265();
+  const bool supports_vp8 = SupportsVP8();
+  const bool supports_vp9 = SupportsVP9();
+  const bool supports_any_video = supports_h264 || supports_h265 || supports_vp8 || supports_vp9;
 #if defined(__APPLE__)
-  return JsonCapabilities(FERRYMAN_WITH_FFMPEG != 0, true, "screencapturekit",
-                          FERRYMAN_WITH_FFMPEG ? "ffmpeg-h264" : "unsupported");
+  return JsonCapabilities(supports_any_video, true, "screencapturekit", supports_h264, supports_h265,
+                          supports_vp8, supports_vp9);
 #elif defined(__linux__)
-  return JsonCapabilities(FERRYMAN_WITH_FFMPEG != 0, true, "x11",
-                          FERRYMAN_WITH_FFMPEG ? "ffmpeg-h264" : "unsupported");
+  return JsonCapabilities(supports_any_video, true, "x11", supports_h264, supports_h265,
+                          supports_vp8, supports_vp9);
 #elif defined(_WIN32)
-  return JsonCapabilities(FERRYMAN_WITH_FFMPEG != 0, true, "gdi",
-                          FERRYMAN_WITH_FFMPEG ? "ffmpeg-h264" : "unsupported");
+  return JsonCapabilities(supports_any_video, true, "gdi", supports_h264, supports_h265,
+                          supports_vp8, supports_vp9);
 #else
-  return JsonCapabilities(false, false, "unsupported", "unsupported");
+  return JsonCapabilities(false, false, "unsupported", false, false, false, false);
 #endif
 }
 
 bool ScreenService::SupportsH264() const {
-#if FERRYMAN_WITH_FFMPEG
-  return true;
-#else
-  return false;
-#endif
+  return SupportsVideoCodec(VideoCodec::kH264);
 }
 
-void ScreenService::SetEncodingTargets(bool enable_jpeg, bool enable_h264) {
+bool ScreenService::SupportsH265() const {
+  return SupportsVideoCodec(VideoCodec::kH265);
+}
+
+bool ScreenService::SupportsVP8() const {
+  return SupportsVideoCodec(VideoCodec::kVP8);
+}
+
+bool ScreenService::SupportsVP9() const {
+  return SupportsVideoCodec(VideoCodec::kVP9);
+}
+
+void ScreenService::SetEncodingTargets(bool enable_jpeg, bool enable_h264, bool enable_h265, bool enable_vp8,
+                                       bool enable_vp9) {
   encode_jpeg_.store(enable_jpeg);
   encode_h264_.store(enable_h264);
+  encode_h265_.store(enable_h265);
+  encode_vp8_.store(enable_vp8);
+  encode_vp9_.store(enable_vp9);
 }
 
-void ScreenService::SetEncodingProfile(int scale_percent, int h264_bitrate_bps) {
+void ScreenService::SetEncodingProfile(int scale_percent, int video_bitrate_bps) {
   capture_scale_percent_.store(std::clamp(scale_percent, 40, 100));
-  h264_bitrate_bps_.store(std::clamp(h264_bitrate_bps, 500'000, 12'000'000));
+  video_bitrate_bps_.store(std::clamp(video_bitrate_bps, 500'000, 12'000'000));
 }
 
 bool ScreenService::SetRemoteControlEnabled(const std::string& session_token, bool enabled) {
@@ -1244,7 +981,8 @@ bool ScreenService::StartCapture(int fps, std::string* error) {
   }
   return false;
 #else
-  if (!encode_jpeg_.load() && !encode_h264_.load()) {
+  if (!encode_jpeg_.load() && !encode_h264_.load() && !encode_h265_.load() && !encode_vp8_.load() &&
+      !encode_vp9_.load()) {
     if (error != nullptr) {
       *error = "native capture has no active encoding targets";
     }
@@ -1255,10 +993,19 @@ bool ScreenService::StartCapture(int fps, std::string* error) {
     return true;
   }
 
-  const int safe_fps = std::clamp(fps, 1, 30);
+  const int safe_fps = std::clamp(fps, 1, 60);
   capture_fps_ = safe_fps;
-  if (!h264_encoder_) {
-    h264_encoder_ = std::make_unique<H264EncoderContext>();
+  if (encode_h264_.load() && !h264_encoder_) {
+    h264_encoder_ = CreateVideoEncoder(VideoCodec::kH264);
+  }
+  if (encode_h265_.load() && !h265_encoder_) {
+    h265_encoder_ = CreateVideoEncoder(VideoCodec::kH265);
+  }
+  if (encode_vp8_.load() && !vp8_encoder_) {
+    vp8_encoder_ = CreateVideoEncoder(VideoCodec::kVP8);
+  }
+  if (encode_vp9_.load() && !vp9_encoder_) {
+    vp9_encoder_ = CreateVideoEncoder(VideoCodec::kVP9);
   }
 
 #if !FERRYMAN_WITH_FFMPEG
@@ -1308,6 +1055,15 @@ void ScreenService::StopCapture() {
   if (h264_encoder_) {
     h264_encoder_->Reset();
   }
+  if (h265_encoder_) {
+    h265_encoder_->Reset();
+  }
+  if (vp8_encoder_) {
+    vp8_encoder_->Reset();
+  }
+  if (vp9_encoder_) {
+    vp9_encoder_->Reset();
+  }
 }
 
 std::optional<ScreenService::EncodedFrame> ScreenService::LatestFrame() const {
@@ -1316,7 +1072,7 @@ std::optional<ScreenService::EncodedFrame> ScreenService::LatestFrame() const {
 }
 
 void ScreenService::CaptureLoop(int fps) {
-  const auto retry_interval = std::chrono::milliseconds(std::max(1000 / std::max(1, fps), 20));
+  const auto retry_interval = std::chrono::milliseconds(std::max(1000 / std::max(1, fps), 8));
   uint64_t seq = 0;
 
   while (capture_running_) {
@@ -1343,9 +1099,13 @@ bool ScreenService::CaptureFrame(EncodedFrame* frame, std::string* error) {
 
   const bool want_jpeg = encode_jpeg_.load();
   const bool want_h264 = encode_h264_.load();
+  const bool want_h265 = encode_h265_.load();
+  const bool want_vp8 = encode_vp8_.load();
+  const bool want_vp9 = encode_vp9_.load();
+  const bool want_video = want_h264 || want_h265 || want_vp8 || want_vp9;
   const int scale_percent = std::clamp(capture_scale_percent_.load(), 40, 100);
-  const int target_h264_bitrate_bps = std::clamp(h264_bitrate_bps_.load(), 500'000, 12'000'000);
-  if (!want_jpeg && !want_h264) {
+  const int target_video_bitrate_bps = std::clamp(video_bitrate_bps_.load(), 500'000, 12'000'000);
+  if (!want_jpeg && !want_video) {
     if (error != nullptr) {
       *error = "native capture has no active encoding targets";
     }
@@ -1376,7 +1136,7 @@ bool ScreenService::CaptureFrame(EncodedFrame* frame, std::string* error) {
 #if FERRYMAN_WITH_FFMPEG
   int encode_width = std::max(2, (raw_frame.width * scale_percent) / 100);
   int encode_height = std::max(2, (raw_frame.height * scale_percent) / 100);
-  if (want_h264) {
+  if (want_video) {
     if ((encode_width & 1) != 0 && encode_width > 2) {
       encode_width -= 1;
     }
@@ -1434,31 +1194,39 @@ bool ScreenService::CaptureFrame(EncodedFrame* frame, std::string* error) {
     }
   }
 
-  if (want_h264) {
-    if (!h264_encoder_) {
-      h264_encoder_ = std::make_unique<H264EncoderContext>();
+  auto encode_video = [&](VideoCodec codec, std::unique_ptr<VideoEncoder>* encoder_slot,
+                          std::string* encoded_bytes, bool* encoded_keyframe) {
+    if (!(*encoder_slot)) {
+      *encoder_slot = CreateVideoEncoder(codec);
     }
-
-    std::string h264_error;
-    if (h264_encoder_->EnsureConfigured(encode_width, encode_height, capture_fps_, target_h264_bitrate_bps,
-                                        AV_PIX_FMT_BGRA, &h264_error)) {
-      std::string h264;
+    std::string encode_error;
+    if ((*encoder_slot)->EnsureConfigured(encode_width, encode_height, capture_fps_, target_video_bitrate_bps,
+                                          static_cast<int>(AV_PIX_FMT_BGRA), &encode_error)) {
+      std::string encoded;
       bool keyframe = false;
-      if (h264_encoder_->EncodeFrame(
-              encode_source,
-              encode_stride,
-              &h264,
-              &keyframe,
-              &h264_error)) {
-        frame->h264_bytes = std::move(h264);
-        frame->h264_keyframe = keyframe;
+      if ((*encoder_slot)->EncodeFrame(encode_source, encode_stride, &encoded, &keyframe, &encode_error)) {
+        *encoded_bytes = std::move(encoded);
+        *encoded_keyframe = keyframe;
         produced_any = true;
       } else {
-        remember_error(h264_error);
+        remember_error(encode_error);
       }
     } else {
-      remember_error(h264_error);
+      remember_error(encode_error);
     }
+  };
+
+  if (want_h264) {
+    encode_video(VideoCodec::kH264, &h264_encoder_, &frame->h264_bytes, &frame->h264_keyframe);
+  }
+  if (want_h265) {
+    encode_video(VideoCodec::kH265, &h265_encoder_, &frame->h265_bytes, &frame->h265_keyframe);
+  }
+  if (want_vp8) {
+    encode_video(VideoCodec::kVP8, &vp8_encoder_, &frame->vp8_bytes, &frame->vp8_keyframe);
+  }
+  if (want_vp9) {
+    encode_video(VideoCodec::kVP9, &vp9_encoder_, &frame->vp9_bytes, &frame->vp9_keyframe);
   }
 
   if (!produced_any) {
@@ -1535,7 +1303,7 @@ bool ScreenService::CaptureFrame(EncodedFrame* frame, std::string* error) {
 
   int encode_width = std::max(2, (width * scale_percent) / 100);
   int encode_height = std::max(2, (height * scale_percent) / 100);
-  if (want_h264) {
+  if (want_video) {
     if ((encode_width & 1) != 0 && encode_width > 2) {
       encode_width -= 1;
     }
@@ -1581,25 +1349,39 @@ bool ScreenService::CaptureFrame(EncodedFrame* frame, std::string* error) {
     }
   }
 
-  if (want_h264) {
-    if (!h264_encoder_) {
-      h264_encoder_ = std::make_unique<H264EncoderContext>();
+  auto encode_video = [&](VideoCodec codec, std::unique_ptr<VideoEncoder>* encoder_slot,
+                          std::string* encoded_bytes, bool* encoded_keyframe) {
+    if (!(*encoder_slot)) {
+      *encoder_slot = CreateVideoEncoder(codec);
     }
-    std::string h264_error;
-    if (h264_encoder_->EnsureConfigured(encode_width, encode_height, capture_fps_, target_h264_bitrate_bps,
-                                        AV_PIX_FMT_BGR24, &h264_error)) {
-      std::string h264;
+    std::string encode_error;
+    if ((*encoder_slot)->EnsureConfigured(encode_width, encode_height, capture_fps_, target_video_bitrate_bps,
+                                          static_cast<int>(AV_PIX_FMT_BGR24), &encode_error)) {
+      std::string encoded;
       bool keyframe = false;
-      if (h264_encoder_->EncodeFrame(encode_source, encode_stride, &h264, &keyframe, &h264_error)) {
-        frame->h264_bytes = std::move(h264);
-        frame->h264_keyframe = keyframe;
+      if ((*encoder_slot)->EncodeFrame(encode_source, encode_stride, &encoded, &keyframe, &encode_error)) {
+        *encoded_bytes = std::move(encoded);
+        *encoded_keyframe = keyframe;
         produced_any = true;
       } else {
-        remember_error(h264_error);
+        remember_error(encode_error);
       }
     } else {
-      remember_error(h264_error);
+      remember_error(encode_error);
     }
+  };
+
+  if (want_h264) {
+    encode_video(VideoCodec::kH264, &h264_encoder_, &frame->h264_bytes, &frame->h264_keyframe);
+  }
+  if (want_h265) {
+    encode_video(VideoCodec::kH265, &h265_encoder_, &frame->h265_bytes, &frame->h265_keyframe);
+  }
+  if (want_vp8) {
+    encode_video(VideoCodec::kVP8, &vp8_encoder_, &frame->vp8_bytes, &frame->vp8_keyframe);
+  }
+  if (want_vp9) {
+    encode_video(VideoCodec::kVP9, &vp9_encoder_, &frame->vp9_bytes, &frame->vp9_keyframe);
   }
 
   if (!produced_any) {
@@ -1694,7 +1476,7 @@ bool ScreenService::CaptureFrame(EncodedFrame* frame, std::string* error) {
 
   int encode_width = std::max(2, (width * scale_percent) / 100);
   int encode_height = std::max(2, (height * scale_percent) / 100);
-  if (want_h264) {
+  if (want_video) {
     if ((encode_width & 1) != 0 && encode_width > 2) {
       encode_width -= 1;
     }
@@ -1740,25 +1522,39 @@ bool ScreenService::CaptureFrame(EncodedFrame* frame, std::string* error) {
     }
   }
 
-  if (want_h264) {
-    if (!h264_encoder_) {
-      h264_encoder_ = std::make_unique<H264EncoderContext>();
+  auto encode_video = [&](VideoCodec codec, std::unique_ptr<VideoEncoder>* encoder_slot,
+                          std::string* encoded_bytes, bool* encoded_keyframe) {
+    if (!(*encoder_slot)) {
+      *encoder_slot = CreateVideoEncoder(codec);
     }
-    std::string h264_error;
-    if (h264_encoder_->EnsureConfigured(encode_width, encode_height, capture_fps_, target_h264_bitrate_bps,
-                                        AV_PIX_FMT_BGR24, &h264_error)) {
-      std::string h264;
+    std::string encode_error;
+    if ((*encoder_slot)->EnsureConfigured(encode_width, encode_height, capture_fps_, target_video_bitrate_bps,
+                                          static_cast<int>(AV_PIX_FMT_BGR24), &encode_error)) {
+      std::string encoded;
       bool keyframe = false;
-      if (h264_encoder_->EncodeFrame(encode_source, encode_stride, &h264, &keyframe, &h264_error)) {
-        frame->h264_bytes = std::move(h264);
-        frame->h264_keyframe = keyframe;
+      if ((*encoder_slot)->EncodeFrame(encode_source, encode_stride, &encoded, &keyframe, &encode_error)) {
+        *encoded_bytes = std::move(encoded);
+        *encoded_keyframe = keyframe;
         produced_any = true;
       } else {
-        remember_error(h264_error);
+        remember_error(encode_error);
       }
     } else {
-      remember_error(h264_error);
+      remember_error(encode_error);
     }
+  };
+
+  if (want_h264) {
+    encode_video(VideoCodec::kH264, &h264_encoder_, &frame->h264_bytes, &frame->h264_keyframe);
+  }
+  if (want_h265) {
+    encode_video(VideoCodec::kH265, &h265_encoder_, &frame->h265_bytes, &frame->h265_keyframe);
+  }
+  if (want_vp8) {
+    encode_video(VideoCodec::kVP8, &vp8_encoder_, &frame->vp8_bytes, &frame->vp8_keyframe);
+  }
+  if (want_vp9) {
+    encode_video(VideoCodec::kVP9, &vp9_encoder_, &frame->vp9_bytes, &frame->vp9_keyframe);
   }
 
   if (!produced_any) {

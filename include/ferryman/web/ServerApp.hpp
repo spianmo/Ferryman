@@ -47,7 +47,7 @@ class ServerApp {
     std::string native_stream_codec = "jpeg";
     int native_stream_fps = 8;
     int native_stream_scale_percent = 100;
-    int native_stream_h264_bitrate_bps = 3'000'000;
+    int native_stream_video_bitrate_bps = 3'000'000;
     WebSocketChannelPtr channel;
   };
 
@@ -55,9 +55,12 @@ class ServerApp {
     size_t subscriber_count = 0;
     bool want_jpeg = false;
     bool want_h264 = false;
+    bool want_h265 = false;
+    bool want_vp8 = false;
+    bool want_vp9 = false;
     int fps = 0;
     int scale_percent = 0;
-    int h264_bitrate_bps = 0;
+    int video_bitrate_bps = 0;
   };
 #endif
 
@@ -125,7 +128,7 @@ class ServerApp {
   std::unordered_map<std::uintptr_t, WsClient> ws_clients_;
   std::atomic<int> active_capture_fps_{0};
   std::atomic<int> active_capture_scale_percent_{75};
-  std::atomic<int> active_capture_h264_bitrate_bps_{3'000'000};
+  std::atomic<int> active_capture_video_bitrate_bps_{3'000'000};
 #endif
 };
 

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ferryman/web/VideoEncoder.hpp"
+
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -28,6 +30,12 @@ class ScreenService {
     std::string jpeg_bytes;
     std::string h264_bytes;
     bool h264_keyframe = false;
+    std::string h265_bytes;
+    bool h265_keyframe = false;
+    std::string vp8_bytes;
+    bool vp8_keyframe = false;
+    std::string vp9_bytes;
+    bool vp9_keyframe = false;
   };
 
   ScreenService();
@@ -42,9 +50,13 @@ class ScreenService {
   void StopCapture();
   std::optional<EncodedFrame> LatestFrame() const;
   bool IsCapturing() const { return capture_running_.load(); }
-  void SetEncodingTargets(bool enable_jpeg, bool enable_h264);
-  void SetEncodingProfile(int scale_percent, int h264_bitrate_bps);
+  void SetEncodingTargets(bool enable_jpeg, bool enable_h264, bool enable_h265, bool enable_vp8,
+                          bool enable_vp9);
+  void SetEncodingProfile(int scale_percent, int video_bitrate_bps);
   bool SupportsH264() const;
+  bool SupportsH265() const;
+  bool SupportsVP8() const;
+  bool SupportsVP9() const;
 
  private:
   void CaptureLoop(int fps);
@@ -62,15 +74,20 @@ class ScreenService {
   int capture_fps_ = 10;
   std::atomic<bool> encode_jpeg_{false};
   std::atomic<bool> encode_h264_{false};
+  std::atomic<bool> encode_h265_{false};
+  std::atomic<bool> encode_vp8_{false};
+  std::atomic<bool> encode_vp9_{false};
   std::atomic<int> capture_scale_percent_{75};
-  std::atomic<int> h264_bitrate_bps_{3'000'000};
+  std::atomic<int> video_bitrate_bps_{3'000'000};
 
 #if defined(__APPLE__)
   std::unique_ptr<ScreenCaptureKitBridge> capture_bridge_;
 #endif
 
-  struct H264EncoderContext;
-  std::unique_ptr<H264EncoderContext> h264_encoder_;
+  std::unique_ptr<VideoEncoder> h264_encoder_;
+  std::unique_ptr<VideoEncoder> h265_encoder_;
+  std::unique_ptr<VideoEncoder> vp8_encoder_;
+  std::unique_ptr<VideoEncoder> vp9_encoder_;
 
   std::mutex pointer_mu_;
   double last_pointer_x_ = 0.0;
