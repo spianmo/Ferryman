@@ -245,7 +245,7 @@ export async function getScreenSources(token: string) {
 
 export function wsUrl(
   session: SessionInfo,
-  path: "/ws/terminal" | "/ws/webrtc" | "/ws/logs" | "/ws/dockurr"
+  path: "/ws/terminal" | "/ws/webrtc" | "/ws/logs" | "/ws/dockurr" | "/ws/monitor"
 ): string {
   const url = new URL(path, window.location.origin);
   url.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";

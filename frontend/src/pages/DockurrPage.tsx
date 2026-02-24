@@ -180,9 +180,12 @@ export default function DockurrPage({ session }: Props) {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailMode, setDetailMode] = useState<DetailMode | null>(null);
   const [detailText, setDetailText] = useState("");
+  const [runtimeAutoScroll, setRuntimeAutoScroll] = useState(true);
+  const [vmLogsAutoScroll, setVmLogsAutoScroll] = useState(true);
 
   const [runtimeLogs, setRuntimeLogs] = useState<RuntimeLogEntry[]>([]);
   const startupViewportRef = useRef<HTMLDivElement | null>(null);
+  const detailViewportRef = useRef<HTMLPreElement | null>(null);
   const currentCreateRequestIdRef = useRef("");
   const pendingCreateNameRef = useRef("");
 
@@ -197,10 +200,20 @@ export default function DockurrPage({ session }: Props) {
   }, [version, versionOptions]);
 
   useEffect(() => {
+    if (!runtimeAutoScroll) return;
     const viewport = startupViewportRef.current;
     if (!viewport) return;
     viewport.scrollTop = viewport.scrollHeight;
-  }, [runtimeLogs]);
+  }, [runtimeAutoScroll, runtimeLogs]);
+
+  useEffect(() => {
+    if (!vmLogsAutoScroll || detailMode !== "logs") {
+      return;
+    }
+    const viewport = detailViewportRef.current;
+    if (!viewport) return;
+    viewport.scrollTop = viewport.scrollHeight;
+  }, [detailLoading, detailMode, detailText, vmLogsAutoScroll]);
 
   const appendRuntimeLog = (levelRaw: string, action: string, message: string, ts = "") => {
     setRuntimeLogs((prev) => {
@@ -591,10 +604,35 @@ export default function DockurrPage({ session }: Props) {
         </section>
 
         <section className="flex h-[240px] flex-col rounded-3xl bg-white/70 p-4 shadow-soft ring-1 ring-slate-200/70 backdrop-blur dark:bg-neutral-900/55 dark:ring-neutral-800/70 xl:min-h-[210px] xl:max-h-[290px]">
-          <h3 className="inline-flex items-center gap-2 text-sm font-semibold tracking-tight text-slate-900 dark:text-neutral-50">
-            <FiActivity className="text-[14px]" />
-            {t("dockurr.startup_logs")}
-          </h3>
+          <div className="flex items-center justify-between gap-3">
+            <h3 className="inline-flex items-center gap-2 text-sm font-semibold tracking-tight text-slate-900 dark:text-neutral-50">
+              <FiActivity className="text-[14px]" />
+              {t("dockurr.startup_logs")}
+            </h3>
+            <label className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white/80 px-2.5 py-1 text-[11px] font-semibold text-slate-600 shadow-sm dark:border-neutral-800 dark:bg-neutral-950/35 dark:text-neutral-300">
+              <span>{t("dockurr.auto_scroll")}</span>
+              <span
+                className={cn(
+                  "rounded-full px-1.5 py-0.5 text-[10px]",
+                  runtimeAutoScroll
+                    ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/35 dark:text-emerald-300"
+                    : "bg-slate-200 text-slate-600 dark:bg-neutral-800 dark:text-neutral-300"
+                )}
+              >
+                {runtimeAutoScroll ? t("common.on") : t("common.off")}
+              </span>
+              <span className="relative inline-flex h-5 w-9 shrink-0">
+                <input
+                  type="checkbox"
+                  checked={runtimeAutoScroll}
+                  onChange={(event) => setRuntimeAutoScroll(event.target.checked)}
+                  className="peer sr-only"
+                />
+                <span className="absolute inset-0 rounded-full bg-slate-300 transition-colors peer-checked:bg-slate-900 dark:bg-neutral-700 dark:peer-checked:bg-neutral-100" />
+                <span className="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-4 dark:bg-neutral-900 dark:peer-checked:bg-neutral-900" />
+              </span>
+            </label>
+          </div>
           <div
             ref={startupViewportRef}
             className="mt-3 min-h-0 flex-1 overflow-auto rounded-2xl bg-neutral-950 p-3 font-mono text-[12px] leading-relaxed text-neutral-50 shadow-sm ring-1 ring-neutral-900/10"
@@ -732,7 +770,7 @@ export default function DockurrPage({ session }: Props) {
               </div>
             </div>
             {selectedVm ? (
-              <div className="flex flex-wrap gap-1.5">
+              <div className="flex flex-wrap items-center gap-1.5">
                 <button
                   className={cn(
                     actionButtonClass,
@@ -755,11 +793,37 @@ export default function DockurrPage({ session }: Props) {
                 >
                   {t("dockurr.inspect")}
                 </button>
+                <label className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white/80 px-2.5 py-1 text-[11px] font-semibold text-slate-600 shadow-sm dark:border-neutral-800 dark:bg-neutral-950/35 dark:text-neutral-300">
+                  <span>{t("dockurr.auto_scroll")}</span>
+                  <span
+                    className={cn(
+                      "rounded-full px-1.5 py-0.5 text-[10px]",
+                      vmLogsAutoScroll
+                        ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/35 dark:text-emerald-300"
+                        : "bg-slate-200 text-slate-600 dark:bg-neutral-800 dark:text-neutral-300"
+                    )}
+                  >
+                    {vmLogsAutoScroll ? t("common.on") : t("common.off")}
+                  </span>
+                  <span className="relative inline-flex h-5 w-9 shrink-0">
+                    <input
+                      type="checkbox"
+                      checked={vmLogsAutoScroll}
+                      onChange={(event) => setVmLogsAutoScroll(event.target.checked)}
+                      className="peer sr-only"
+                    />
+                    <span className="absolute inset-0 rounded-full bg-slate-300 transition-colors peer-checked:bg-slate-900 dark:bg-neutral-700 dark:peer-checked:bg-neutral-100" />
+                    <span className="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-4 dark:bg-neutral-900 dark:peer-checked:bg-neutral-900" />
+                  </span>
+                </label>
               </div>
             ) : null}
           </div>
 
-          <pre className="mt-4 min-h-0 flex-1 overflow-auto rounded-2xl bg-neutral-950 p-3 font-mono text-[12px] leading-relaxed text-neutral-50 shadow-sm ring-1 ring-neutral-900/10">
+          <pre
+            ref={detailViewportRef}
+            className="mt-4 min-h-0 flex-1 overflow-auto rounded-2xl bg-neutral-950 p-3 font-mono text-[12px] leading-relaxed text-neutral-50 shadow-sm ring-1 ring-neutral-900/10"
+          >
             {selectedVm == null
               ? t("dockurr.select_hint")
               : detailLoading

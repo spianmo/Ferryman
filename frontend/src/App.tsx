@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "./toast";
 import {
+  FiActivity,
   FiClipboard,
   FiCommand,
   FiFolder,
@@ -22,6 +23,7 @@ import FilesPage from "./pages/FilesPage";
 import LoginPage from "./pages/LoginPage";
 import LogsPage from "./pages/LogsPage";
 import DockurrPage from "./pages/DockurrPage";
+import MonitorPage from "./pages/MonitorPage";
 import ScreenPage from "./pages/ScreenPage";
 import TasksPage from "./pages/TasksPage";
 import TerminalPage from "./pages/TerminalPage";
@@ -29,7 +31,7 @@ import { useTheme } from "./theme";
 import type { SessionInfo } from "./types";
 import { cn } from "./util/cn";
 
-type TabKey = "files" | "terminal" | "tasks" | "dockurr" | "screen" | "logs";
+type TabKey = "files" | "terminal" | "tasks" | "dockurr" | "screen" | "monitor" | "logs";
 
 type NavItem = {
   key: TabKey;
@@ -38,6 +40,7 @@ type NavItem = {
 };
 
 const navItems: NavItem[] = [
+  { key: "monitor", labelKey: "nav.monitor", icon: <FiActivity /> },
   { key: "files", labelKey: "nav.files", icon: <FiFolder /> },
   { key: "terminal", labelKey: "nav.terminal", icon: <FiTerminal /> },
   { key: "tasks", labelKey: "nav.tasks", icon: <FiCommand /> },
@@ -48,9 +51,9 @@ const navItems: NavItem[] = [
 
 const SESSION_KEY = "ferryman.session";
 const SIDEBAR_COLLAPSED_KEY = "ferryman.sidebar.collapsed";
-const DEFAULT_TAB: TabKey = "files";
+const DEFAULT_TAB: TabKey = "monitor";
 
-const VALID_TABS: TabKey[] = ["files", "terminal", "tasks", "dockurr", "screen", "logs"];
+const VALID_TABS: TabKey[] = ["files", "terminal", "tasks", "dockurr", "screen", "monitor", "logs"];
 
 function isTabKey(value: string): value is TabKey {
   return VALID_TABS.includes(value as TabKey);
@@ -201,6 +204,8 @@ export default function App() {
         return <DockurrPage session={session} />;
       case "screen":
         return <ScreenPage session={session} />;
+      case "monitor":
+        return <MonitorPage session={session} />;
       case "logs":
         return <LogsPage session={session} />;
       default:

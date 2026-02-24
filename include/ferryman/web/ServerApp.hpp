@@ -8,6 +8,7 @@
 #include "ferryman/pty/PtyManager.hpp"
 #include "ferryman/task/TaskManager.hpp"
 #include "ferryman/web/ScreenService.hpp"
+#include "ferryman/web/SystemMonitor.hpp"
 #include "ferryman/web/WebRtcSignalingService.hpp"
 
 #include <atomic>
@@ -122,10 +123,12 @@ class ServerApp {
   void HandleWebRtcWsMessage(std::uintptr_t channel_key, const std::string& message);
   void HandleLogsWsMessage(std::uintptr_t channel_key, const std::string& message);
   void HandleDockurrWsMessage(std::uintptr_t channel_key, const std::string& message);
+  void HandleMonitorWsMessage(std::uintptr_t channel_key, const std::string& message);
   void BroadcastTerminalOutput(const std::string& terminal_id, const std::string& chunk);
   void BroadcastLogEntry(const std::string& serialized_entry);
   void BroadcastNativeFrames();
   void BroadcastDockurrSnapshots();
+  void BroadcastMonitorSnapshots();
   void SyncNativeSubscribersToActiveSource();
   void SendToWs(std::uintptr_t channel_key, const std::string& payload);
   NativeCaptureDemand CollectNativeCaptureDemandLocked() const;
@@ -140,6 +143,7 @@ class ServerApp {
   task::TaskManager task_manager_;
   pty::PtyManager pty_manager_;
   ScreenService screen_service_;
+  SystemMonitor system_monitor_;
   WebRtcSignalingService signaling_service_;
 
   std::atomic<bool> running_{false};
@@ -152,6 +156,7 @@ class ServerApp {
   std::thread http_thread_;
   std::thread native_screen_thread_;
   std::thread dockurr_thread_;
+  std::thread monitor_thread_;
 
   std::mutex ws_mu_;
   std::unordered_map<std::uintptr_t, WsClient> ws_clients_;

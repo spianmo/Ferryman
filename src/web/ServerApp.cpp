@@ -38,6 +38,7 @@ constexpr uint8_t kNativeBinaryCodecVP8 = 4;
 constexpr uint8_t kNativeBinaryCodecVP9 = 5;
 constexpr uint8_t kNativeBinaryCodecAV1 = 6;
 constexpr int kDockurrSnapshotIntervalMs = 1000;
+constexpr int kMonitorSnapshotIntervalMs = 1000;
 constexpr int kDockurrCreateLogWaitSeconds = 90;
 
 std::string ToLower(std::string value) {
@@ -337,6 +338,9 @@ bool ServerApp::Start() {
   dockurr_thread_ = std::thread([this]() {
     BroadcastDockurrSnapshots();
   });
+  monitor_thread_ = std::thread([this]() {
+    BroadcastMonitorSnapshots();
+  });
 
   std::cout << "[ferryman] http: http://" << config_.http_host << ':' << config_.http_port << '\n';
   std::cout << "[ferryman] ws:   ws://" << config_.http_host << ':' << config_.ws_port << '\n';
@@ -364,6 +368,9 @@ void ServerApp::Stop() {
   }
   if (dockurr_thread_.joinable()) {
     dockurr_thread_.join();
+  }
+  if (monitor_thread_.joinable()) {
+    monitor_thread_.join();
   }
 #endif
   screen_service_.StopCapture();
@@ -1246,6 +1253,8 @@ void ServerApp::HandleWsOpen(const WebSocketChannelPtr& channel, const HttpReque
     channel_type = "logs";
   } else if (ws_path == "/ws/dockurr") {
     channel_type = "dockurr";
+  } else if (ws_path == "/ws/monitor") {
+    channel_type = "monitor";
   } else {
     audit_logger_.Append(session->token, "ws.open.reject", "unknown path: " + req->path);
     channel->send(api::Error("unknown websocket path"));
@@ -1286,6 +1295,11 @@ void ServerApp::HandleWsOpen(const WebSocketChannelPtr& channel, const HttpReque
     } else {
       channel->send(BuildDockurrSnapshotPayload(vms));
     }
+  } else if (channel_type == "monitor") {
+    channel->send(api::Success({
+        {"event", "monitor_snapshot", false},
+        {"snapshot", system_monitor_.SnapshotJson(), true},
+    }));
   }
 }
 
@@ -1309,6 +1323,8 @@ void ServerApp::HandleWsMessage(const WebSocketChannelPtr& channel, const std::s
     HandleLogsWsMessage(key, message);
   } else if (channel_type == "dockurr") {
     HandleDockurrWsMessage(key, message);
+  } else if (channel_type == "monitor") {
+    HandleMonitorWsMessage(key, message);
   } else {
     audit_logger_.AppendSystem("warn", "ws.message.reject", "unknown channel type");
   }
@@ -1697,6 +1713,36 @@ void ServerApp::BroadcastDockurrSnapshots() {
     last_error.clear();
 
     std::this_thread::sleep_for(std::chrono::milliseconds(kDockurrSnapshotIntervalMs));
+  }
+}
+
+void ServerApp::BroadcastMonitorSnapshots() {
+  while (running_) {
+    std::vector<std::uintptr_t> channels;
+    {
+      std::lock_guard<std::mutex> lock(ws_mu_);
+      channels.reserve(ws_clients_.size());
+      for (const auto& [channel_key, client] : ws_clients_) {
+        if (client.channel_type == "monitor" && client.channel) {
+          channels.push_back(channel_key);
+        }
+      }
+    }
+
+    if (channels.empty()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(kMonitorSnapshotIntervalMs));
+      continue;
+    }
+
+    const std::string payload = api::Success({
+        {"event", "monitor_snapshot", false},
+        {"snapshot", system_monitor_.SnapshotJson(), true},
+    });
+    for (const auto& channel_key : channels) {
+      SendToWs(channel_key, payload);
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(kMonitorSnapshotIntervalMs));
   }
 }
 
@@ -2193,6 +2239,49 @@ void ServerApp::HandleDockurrWsMessage(std::uintptr_t channel_key, const std::st
 
   send_runtime_log("error", action, "unknown dockurr action");
   send_action_result(false, "unknown dockurr action");
+}
+
+void ServerApp::HandleMonitorWsMessage(std::uintptr_t channel_key, const std::string& message) {
+  const auto payload = ParseJsonOrNull(message);
+  if (!payload.has_value() || !payload->is_object()) {
+    SendToWs(channel_key, api::Error("invalid json payload"));
+    return;
+  }
+
+  WsClient client;
+  {
+    std::lock_guard<std::mutex> lock(ws_mu_);
+    auto it = ws_clients_.find(channel_key);
+    if (it == ws_clients_.end()) {
+      return;
+    }
+    client = it->second;
+  }
+
+  auto session = session_manager_.GetSession(client.session_token);
+  if (!session.has_value()) {
+    SendToWs(channel_key, api::Error("session expired", "unauthorized"));
+    return;
+  }
+  (void)session;
+
+  const std::string action = JsonString(payload, "action", "snapshot");
+  if (action == "snapshot" || action == "refresh") {
+    SendToWs(channel_key, api::Success({
+        {"event", "monitor_snapshot", false},
+        {"snapshot", system_monitor_.SnapshotJson(), true},
+    }));
+    return;
+  }
+
+  if (action == "ping") {
+    SendToWs(channel_key, api::Success({
+        {"event", "monitor_pong", false},
+    }));
+    return;
+  }
+
+  SendToWs(channel_key, api::Error("unknown monitor action"));
 }
 
 #endif
