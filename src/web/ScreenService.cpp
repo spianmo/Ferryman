@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cctype>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -401,9 +402,36 @@ bool ScaleFrameWithFfmpeg(const uint8_t* source, int width, int height, int stri
 #endif
 
 #if defined(__APPLE__)
-CGPoint NormalizePointToMainDisplay(const json& payload, double fallback_x, double fallback_y,
-                                    double* out_x, double* out_y) {
-  const CGRect bounds = CGDisplayBounds(CGMainDisplayID());
+bool ParseDisplayId(const std::string& raw_display_id, CGDirectDisplayID* out_display_id) {
+  if (out_display_id == nullptr || raw_display_id.empty()) {
+    return false;
+  }
+  try {
+    const unsigned long long parsed = std::stoull(raw_display_id);
+    if (parsed > static_cast<unsigned long long>(std::numeric_limits<uint32_t>::max())) {
+      return false;
+    }
+    *out_display_id = static_cast<CGDirectDisplayID>(parsed);
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+CGRect DisplayBoundsForSourceId(const std::string& source_id) {
+  CGDirectDisplayID display_id = CGMainDisplayID();
+  CGDirectDisplayID parsed_display_id = 0;
+  if (ParseDisplayId(source_id, &parsed_display_id)) {
+    const CGRect parsed_bounds = CGDisplayBounds(parsed_display_id);
+    if (parsed_bounds.size.width > 1.0 && parsed_bounds.size.height > 1.0) {
+      display_id = parsed_display_id;
+    }
+  }
+  return CGDisplayBounds(display_id);
+}
+
+CGPoint NormalizePointToDisplay(const json& payload, const CGRect& bounds, double fallback_x, double fallback_y,
+                                double* out_x, double* out_y) {
 
   const double input_x = payload.value("x", fallback_x);
   const double input_y = payload.value("y", fallback_y);
@@ -1765,9 +1793,10 @@ bool ScreenService::InjectInputEventNative(const InputEvent& event, std::string*
     current_x = last_pointer_x_;
     current_y = last_pointer_y_;
   }
+  const CGRect input_bounds = DisplayBoundsForSourceId(ActiveCaptureSourceId());
 
   if (event.type == "mouse_move") {
-    const CGPoint point = NormalizePointToMainDisplay(payload, current_x, current_y, &current_x, &current_y);
+    const CGPoint point = NormalizePointToDisplay(payload, input_bounds, current_x, current_y, &current_x, &current_y);
     CGEventRef move = CGEventCreateMouseEvent(nullptr, kCGEventMouseMoved, point, kCGMouseButtonLeft);
     if (move == nullptr) {
       if (error != nullptr) {

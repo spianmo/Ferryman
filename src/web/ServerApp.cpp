@@ -835,7 +835,16 @@ ServerApp::NativeCaptureDemand ServerApp::CollectNativeCaptureDemandLocked() con
   return demand;
 }
 
-void ServerApp::RefreshNativeCaptureState() {
+void ServerApp::RefreshNativeCaptureState(const std::string& actor_session_token) {
+  const auto append_capture_log = [this, &actor_session_token](const std::string& level,
+                                                                const std::string& detail) {
+    if (actor_session_token.empty()) {
+      audit_logger_.AppendSystem(level, "screen.capture", detail);
+      return;
+    }
+    audit_logger_.AppendWithLevel(level, actor_session_token, "screen.capture", detail);
+  };
+
   NativeCaptureDemand demand;
   {
     std::lock_guard<std::mutex> lock(ws_mu_);
@@ -848,7 +857,7 @@ void ServerApp::RefreshNativeCaptureState() {
   if (demand.subscriber_count == 0) {
     if (screen_service_.IsCapturing()) {
       screen_service_.StopCapture();
-      audit_logger_.AppendSystem("info", "screen.capture", "native capture stopped (no subscribers)");
+      append_capture_log("info", "native capture stopped (no subscribers)");
     }
     active_capture_fps_ = 0;
     active_capture_scale_percent_ = kNativeScaleDefaultPercent;
@@ -871,8 +880,7 @@ void ServerApp::RefreshNativeCaptureState() {
       screen_service_.StopCapture();
     }
     active_capture_fps_ = 0;
-    audit_logger_.AppendSystem("warn", "screen.capture",
-                               source_error.empty() ? "no capture source available" : source_error);
+    append_capture_log("warn", source_error.empty() ? "no capture source available" : source_error);
     return;
   }
 
@@ -893,19 +901,19 @@ void ServerApp::RefreshNativeCaptureState() {
   std::string screen_error;
   if (!screen_service_.StartCapture(target_fps, target_source_id, &screen_error)) {
     std::cerr << "[ferryman] native screen capture unavailable: " << screen_error << '\n';
-    audit_logger_.AppendSystem("warn", "screen.capture", screen_error);
+    append_capture_log("warn", screen_error);
     return;
   }
   active_capture_fps_ = target_fps;
   const std::string running_source_id = screen_service_.ActiveCaptureSourceId();
 
-  audit_logger_.AppendSystem("info", "screen.capture",
-                             "native capture started (subscribers=" +
-                                 std::to_string(demand.subscriber_count) +
-                                 ", fps=" + std::to_string(target_fps) +
-                                 ", scale=" + std::to_string(target_scale_percent) +
-                                 ", bitrate=" + std::to_string(target_video_bitrate_bps) +
-                                 ", source_id=" + (running_source_id.empty() ? target_source_id : running_source_id) + ")");
+  append_capture_log("info",
+                     "native capture started (subscribers=" +
+                         std::to_string(demand.subscriber_count) +
+                         ", fps=" + std::to_string(target_fps) +
+                         ", scale=" + std::to_string(target_scale_percent) +
+                         ", bitrate=" + std::to_string(target_video_bitrate_bps) +
+                         ", source_id=" + (running_source_id.empty() ? target_source_id : running_source_id) + ")");
 }
 
 void ServerApp::SyncNativeSubscribersToActiveSource() {
@@ -1073,7 +1081,7 @@ void ServerApp::HandleWsClose(const WebSocketChannelPtr& channel) {
   }
 
   if (should_refresh_capture) {
-    RefreshNativeCaptureState();
+    RefreshNativeCaptureState(client.session_token);
   }
 
   audit_logger_.Append(client.session_token, "ws.close", client.channel_type);
@@ -1545,7 +1553,7 @@ void ServerApp::HandleWebRtcWsMessage(std::uintptr_t channel_key, const std::str
       }
     }
 
-    RefreshNativeCaptureState();
+    RefreshNativeCaptureState(client.session_token);
     const int effective_fps = active_capture_fps_.load();
     const int effective_scale_percent = active_capture_scale_percent_.load();
     const int effective_video_bitrate_bps = active_capture_video_bitrate_bps_.load();
@@ -1579,7 +1587,7 @@ void ServerApp::HandleWebRtcWsMessage(std::uintptr_t channel_key, const std::str
       }
     }
 
-    RefreshNativeCaptureState();
+    RefreshNativeCaptureState(client.session_token);
 
     SendToWs(channel_key, api::Success({
         {"event", "native_unsubscribed", false},

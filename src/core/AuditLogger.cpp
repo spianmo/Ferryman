@@ -48,8 +48,14 @@ void AuditLogger::PushEntry(const std::string& serialized) {
 
 bool AuditLogger::Append(const std::string& session_token, const std::string& action,
                          const std::string& detail) {
-  const std::string serialized = BuildEntry("info", session_token, action, detail);
-  PrintImmediate("info", session_token, action, detail);
+  return AppendWithLevel("info", session_token, action, detail);
+}
+
+bool AuditLogger::AppendWithLevel(const std::string& level, const std::string& session_token,
+                                  const std::string& action, const std::string& detail) {
+  const std::string normalized_level = level.empty() ? "info" : level;
+  const std::string serialized = BuildEntry(normalized_level, session_token, action, detail);
+  PrintImmediate(normalized_level, session_token, action, detail);
 
   RealtimeCallback callback;
   {
@@ -65,20 +71,7 @@ bool AuditLogger::Append(const std::string& session_token, const std::string& ac
 
 bool AuditLogger::AppendSystem(const std::string& level, const std::string& action,
                                const std::string& detail) {
-  const std::string normalized_level = level.empty() ? "info" : level;
-  const std::string serialized = BuildEntry(normalized_level, "", action, detail);
-  PrintImmediate(normalized_level, "", action, detail);
-
-  RealtimeCallback callback;
-  {
-    std::lock_guard<std::mutex> lock(mu_);
-    PushEntry(serialized);
-    callback = realtime_callback_;
-  }
-  if (callback) {
-    callback(serialized);
-  }
-  return true;
+  return AppendWithLevel(level, "", action, detail);
 }
 
 std::string AuditLogger::Tail(size_t max_lines) const {

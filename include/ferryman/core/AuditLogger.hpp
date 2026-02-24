@@ -14,6 +14,8 @@ class AuditLogger {
 
   explicit AuditLogger(std::filesystem::path log_path);
 
+  bool AppendWithLevel(const std::string& level, const std::string& session_token,
+                       const std::string& action, const std::string& detail);
   bool Append(const std::string& session_token, const std::string& action, const std::string& detail);
   bool AppendSystem(const std::string& level, const std::string& action, const std::string& detail);
   std::string Tail(size_t max_lines) const;

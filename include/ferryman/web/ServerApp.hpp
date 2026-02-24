@@ -120,7 +120,7 @@ class ServerApp {
   void SyncNativeSubscribersToActiveSource();
   void SendToWs(std::uintptr_t channel_key, const std::string& payload);
   NativeCaptureDemand CollectNativeCaptureDemandLocked() const;
-  void RefreshNativeCaptureState();
+  void RefreshNativeCaptureState(const std::string& actor_session_token = "");
 #endif
 
   core::AppConfig config_;
