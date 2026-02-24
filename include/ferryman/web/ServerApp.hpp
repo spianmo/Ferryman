@@ -4,6 +4,7 @@
 #include "ferryman/core/ConfigManager.hpp"
 #include "ferryman/core/FileService.hpp"
 #include "ferryman/core/SessionManager.hpp"
+#include "ferryman/docker/DockerManager.hpp"
 #include "ferryman/dockurr/DockurrManager.hpp"
 #include "ferryman/pty/PtyManager.hpp"
 #include "ferryman/task/TaskManager.hpp"
@@ -101,6 +102,17 @@ class ServerApp {
   int HandleDockurrRestart(HttpRequest* req, HttpResponse* resp);
   int HandleDockurrLogs(HttpRequest* req, HttpResponse* resp);
   int HandleDockurrInspect(HttpRequest* req, HttpResponse* resp);
+  int HandleDockerList(HttpRequest* req, HttpResponse* resp);
+  int HandleDockerStart(HttpRequest* req, HttpResponse* resp);
+  int HandleDockerStop(HttpRequest* req, HttpResponse* resp);
+  int HandleDockerRestart(HttpRequest* req, HttpResponse* resp);
+  int HandleDockerLogs(HttpRequest* req, HttpResponse* resp);
+  int HandleDockerInspect(HttpRequest* req, HttpResponse* resp);
+  int HandleDockerStats(HttpRequest* req, HttpResponse* resp);
+  int HandleDockerProcesses(HttpRequest* req, HttpResponse* resp);
+  int HandleDockerFileList(HttpRequest* req, HttpResponse* resp);
+  int HandleDockerFileRead(HttpRequest* req, HttpResponse* resp);
+  int HandleDockerFileWrite(HttpRequest* req, HttpResponse* resp);
   int HandleScreenCaps(HttpRequest* req, HttpResponse* resp);
   int HandleScreenSources(HttpRequest* req, HttpResponse* resp);
   int HandleScreenInput(HttpRequest* req, HttpResponse* resp);
@@ -139,6 +151,7 @@ class ServerApp {
   core::SessionManager session_manager_;
   core::AuditLogger audit_logger_;
   core::FileService file_service_;
+  docker_runtime::DockerManager docker_manager_;
   dockurr::DockurrManager dockurr_manager_;
   task::TaskManager task_manager_;
   pty::PtyManager pty_manager_;

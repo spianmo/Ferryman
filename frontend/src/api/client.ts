@@ -1,4 +1,12 @@
-import type { DockurrVmInfo, ScreenSource, SessionInfo } from "../types";
+import type {
+  DockerContainerFileEntry,
+  DockerContainerInfo,
+  DockerContainerProcesses,
+  DockerContainerStats,
+  DockurrVmInfo,
+  ScreenSource,
+  SessionInfo,
+} from "../types";
 
 export type ApiResponse<T = unknown> = {
   ok: boolean;
@@ -220,6 +228,124 @@ export async function getDockurrVmInspect(token: string, name: string) {
   return request<{ name: string; inspect: string }>(
     `/api/dockurr/inspect?name=${encoded}`,
     { method: "GET" },
+    token
+  );
+}
+
+export async function listDockerContainers(token: string, all = true) {
+  return request<{ containers: Array<DockerContainerInfo>; all: boolean }>(
+    `/api/docker/list?all=${all ? 1 : 0}`,
+    { method: "GET" },
+    token
+  );
+}
+
+export async function startDockerContainer(token: string, name: string) {
+  return request<{ name: string }>(
+    "/api/docker/start",
+    {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    },
+    token
+  );
+}
+
+export async function stopDockerContainer(token: string, name: string) {
+  return request<{ name: string }>(
+    "/api/docker/stop",
+    {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    },
+    token
+  );
+}
+
+export async function restartDockerContainer(token: string, name: string) {
+  return request<{ name: string }>(
+    "/api/docker/restart",
+    {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    },
+    token
+  );
+}
+
+export async function getDockerContainerLogs(token: string, name: string, tail = 160) {
+  const encoded = encodeURIComponent(name);
+  return request<{ name: string; logs: string }>(
+    `/api/docker/logs?name=${encoded}&tail=${tail}`,
+    { method: "GET" },
+    token
+  );
+}
+
+export async function getDockerContainerInspect(token: string, name: string) {
+  const encoded = encodeURIComponent(name);
+  return request<{ name: string; inspect: string }>(
+    `/api/docker/inspect?name=${encoded}`,
+    { method: "GET" },
+    token
+  );
+}
+
+export async function getDockerContainerStats(token: string, name: string) {
+  const encoded = encodeURIComponent(name);
+  return request<{ name: string; stats: DockerContainerStats }>(
+    `/api/docker/stats?name=${encoded}`,
+    { method: "GET" },
+    token
+  );
+}
+
+export async function getDockerContainerProcesses(token: string, name: string, limit = 120) {
+  const encoded = encodeURIComponent(name);
+  return request<DockerContainerProcesses>(
+    `/api/docker/processes?name=${encoded}&limit=${Math.max(1, limit)}`,
+    { method: "GET" },
+    token
+  );
+}
+
+export async function listDockerContainerFiles(token: string, name: string, path: string) {
+  const encodedName = encodeURIComponent(name);
+  const encodedPath = encodeURIComponent(path);
+  return request<{ name: string; entries: Array<DockerContainerFileEntry>; current_path: string }>(
+    `/api/docker/files/list?name=${encodedName}&path=${encodedPath}`,
+    { method: "GET" },
+    token
+  );
+}
+
+export async function readDockerContainerFile(token: string, name: string, path: string) {
+  const encodedName = encodeURIComponent(name);
+  const encodedPath = encodeURIComponent(path);
+  return request<{ name: string; path: string; content_base64: string }>(
+    `/api/docker/files/read?name=${encodedName}&path=${encodedPath}`,
+    { method: "GET" },
+    token
+  );
+}
+
+export async function writeDockerContainerFile(
+  token: string,
+  name: string,
+  path: string,
+  base64Content: string
+) {
+  const encodedName = encodeURIComponent(name);
+  const encodedPath = encodeURIComponent(path);
+  return request<{ name: string; path: string; bytes: number }>(
+    `/api/docker/files/write?name=${encodedName}&path=${encodedPath}&base64=1`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "text/plain",
+      },
+      body: base64Content,
+    },
     token
   );
 }

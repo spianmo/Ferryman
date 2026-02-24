@@ -43,6 +43,45 @@ export type DockurrVmInfo = {
   desktop_port: string;
 };
 
+export type DockerContainerInfo = {
+  id: string;
+  name: string;
+  image: string;
+  state: string;
+  status: string;
+  running_for: string;
+  ports: string;
+  created_at: string;
+};
+
+export type DockerContainerStats = {
+  name: string;
+  cpu_percent: number;
+  memory_usage_bytes: number;
+  memory_limit_bytes: number;
+  memory_percent: number;
+  net_input_bytes: number;
+  net_output_bytes: number;
+  block_input_bytes: number;
+  block_output_bytes: number;
+  pids: number;
+};
+
+export type DockerContainerProcesses = {
+  name: string;
+  columns: string[];
+  rows: string[][];
+};
+
+export type DockerContainerFileEntry = {
+  name: string;
+  path: string;
+  is_directory: boolean;
+  size: number;
+  modified_at: number;
+  permissions: string;
+};
+
 export type MonitorSnapshot = {
   ts_ms: number;
   device: {

@@ -258,6 +258,62 @@ std::string SerializeDockurrVm(const dockurr::VmInfo& vm) {
   });
 }
 
+std::string FormatDouble(double value) {
+  std::ostringstream out;
+  out.setf(std::ios::fixed);
+  out.precision(3);
+  out << value;
+  return out.str();
+}
+
+std::string SerializeDockerContainer(const docker_runtime::ContainerInfo& container) {
+  return util::BuildJsonObject({
+      {"id", container.id, false},
+      {"name", container.name, false},
+      {"image", container.image, false},
+      {"state", container.state, false},
+      {"status", container.status, false},
+      {"running_for", container.running_for, false},
+      {"ports", container.ports, false},
+      {"created_at", container.created_at, false},
+  });
+}
+
+std::string SerializeDockerStats(const docker_runtime::ContainerStats& stats) {
+  return util::BuildJsonObject({
+      {"name", stats.name, false},
+      {"cpu_percent", FormatDouble(stats.cpu_percent), true},
+      {"memory_usage_bytes", std::to_string(stats.memory_usage_bytes), true},
+      {"memory_limit_bytes", std::to_string(stats.memory_limit_bytes), true},
+      {"memory_percent", FormatDouble(stats.memory_percent), true},
+      {"net_input_bytes", std::to_string(stats.net_input_bytes), true},
+      {"net_output_bytes", std::to_string(stats.net_output_bytes), true},
+      {"block_input_bytes", std::to_string(stats.block_input_bytes), true},
+      {"block_output_bytes", std::to_string(stats.block_output_bytes), true},
+      {"pids", std::to_string(stats.pids), true},
+  });
+}
+
+std::string SerializeDockerFileEntry(const docker_runtime::ContainerFileEntry& entry) {
+  return util::BuildJsonObject({
+      {"name", entry.name, false},
+      {"path", entry.path, false},
+      {"is_directory", entry.is_directory ? "true" : "false", true},
+      {"size", std::to_string(entry.size), true},
+      {"modified_at", std::to_string(entry.modified_at), true},
+      {"permissions", entry.permissions, false},
+  });
+}
+
+std::string SerializeStringArray(const std::vector<std::string>& values) {
+  std::vector<std::string> items;
+  items.reserve(values.size());
+  for (const auto& value : values) {
+    items.push_back("\"" + util::JsonEscape(value) + "\"");
+  }
+  return JsonArray(items);
+}
+
 std::string BuildDockurrSnapshotPayload(const std::vector<dockurr::VmInfo>& vms) {
   std::vector<std::string> serialized;
   serialized.reserve(vms.size());
@@ -288,6 +344,7 @@ ServerApp::ServerApp(core::AppConfig config)
     : config_(std::move(config)),
       audit_logger_(config_.audit_log_path),
       file_service_(config_.workspace_root),
+      docker_manager_(config_.workspace_root),
       dockurr_manager_(config_.workspace_root) {
 #if FERRYMAN_WITH_LIBHV
   audit_logger_.SetRealtimeCallback([this](const std::string& serialized_entry) {
@@ -463,6 +520,50 @@ bool ServerApp::RegisterHttpRoutes() {
 
   http_service_.GET("/api/dockurr/inspect", [this](HttpRequest* req, HttpResponse* resp) {
     return HandleDockurrInspect(req, resp);
+  });
+
+  http_service_.GET("/api/docker/list", [this](HttpRequest* req, HttpResponse* resp) {
+    return HandleDockerList(req, resp);
+  });
+
+  http_service_.POST("/api/docker/start", [this](HttpRequest* req, HttpResponse* resp) {
+    return HandleDockerStart(req, resp);
+  });
+
+  http_service_.POST("/api/docker/stop", [this](HttpRequest* req, HttpResponse* resp) {
+    return HandleDockerStop(req, resp);
+  });
+
+  http_service_.POST("/api/docker/restart", [this](HttpRequest* req, HttpResponse* resp) {
+    return HandleDockerRestart(req, resp);
+  });
+
+  http_service_.GET("/api/docker/logs", [this](HttpRequest* req, HttpResponse* resp) {
+    return HandleDockerLogs(req, resp);
+  });
+
+  http_service_.GET("/api/docker/inspect", [this](HttpRequest* req, HttpResponse* resp) {
+    return HandleDockerInspect(req, resp);
+  });
+
+  http_service_.GET("/api/docker/stats", [this](HttpRequest* req, HttpResponse* resp) {
+    return HandleDockerStats(req, resp);
+  });
+
+  http_service_.GET("/api/docker/processes", [this](HttpRequest* req, HttpResponse* resp) {
+    return HandleDockerProcesses(req, resp);
+  });
+
+  http_service_.GET("/api/docker/files/list", [this](HttpRequest* req, HttpResponse* resp) {
+    return HandleDockerFileList(req, resp);
+  });
+
+  http_service_.GET("/api/docker/files/read", [this](HttpRequest* req, HttpResponse* resp) {
+    return HandleDockerFileRead(req, resp);
+  });
+
+  http_service_.POST("/api/docker/files/write", [this](HttpRequest* req, HttpResponse* resp) {
+    return HandleDockerFileWrite(req, resp);
   });
 
   http_service_.GET("/api/screen/capabilities", [this](HttpRequest* req, HttpResponse* resp) {
@@ -924,6 +1025,326 @@ int ServerApp::HandleDockurrInspect(HttpRequest* req, HttpResponse* resp) {
   return Json(resp, 200, api::Success({
                              {"name", name, false},
                              {"inspect", inspect, false},
+                         }));
+}
+
+int ServerApp::HandleDockerList(HttpRequest* req, HttpResponse* resp) {
+  auto session = RequireSession(req, resp);
+  if (!session.has_value()) {
+    return resp->status_code;
+  }
+
+  const bool include_all = ParseBool(QueryOf(req, "all"), true);
+  std::string error;
+  const auto containers = docker_manager_.ListContainers(include_all, &error);
+  if (!error.empty()) {
+    return Json(resp, 500, api::Error(error, "docker_unavailable"));
+  }
+
+  std::vector<std::string> serialized;
+  serialized.reserve(containers.size());
+  for (const auto& container : containers) {
+    serialized.push_back(SerializeDockerContainer(container));
+  }
+
+  return Json(resp, 200, api::Success({
+                             {"containers", JsonArray(serialized), true},
+                             {"all", include_all ? "true" : "false", true},
+                         }));
+}
+
+int ServerApp::HandleDockerStart(HttpRequest* req, HttpResponse* resp) {
+  auto session = RequireSession(req, resp);
+  if (!session.has_value()) {
+    return resp->status_code;
+  }
+
+  const auto payload = ParseJsonOrNull(req->body);
+  const std::string name = JsonString(payload, "name", QueryOf(req, "name"));
+  if (name.empty()) {
+    return Json(resp, 400, api::Error("name is required"));
+  }
+
+  std::string error;
+  if (!docker_manager_.StartContainer(name, &error)) {
+    const std::string lowered = ToLower(error);
+    const bool bad_request = lowered.find("invalid") != std::string::npos;
+    return Json(resp, bad_request ? 400 : 500, api::Error(error, bad_request ? "bad_request" : "docker_failed"));
+  }
+
+  audit_logger_.Append(session->token, "docker.start", name);
+  return Json(resp, 200, api::Success({
+                             {"name", name, false},
+                         }));
+}
+
+int ServerApp::HandleDockerStop(HttpRequest* req, HttpResponse* resp) {
+  auto session = RequireSession(req, resp);
+  if (!session.has_value()) {
+    return resp->status_code;
+  }
+
+  const auto payload = ParseJsonOrNull(req->body);
+  const std::string name = JsonString(payload, "name", QueryOf(req, "name"));
+  if (name.empty()) {
+    return Json(resp, 400, api::Error("name is required"));
+  }
+
+  std::string error;
+  if (!docker_manager_.StopContainer(name, &error)) {
+    const std::string lowered = ToLower(error);
+    const bool bad_request = lowered.find("invalid") != std::string::npos;
+    return Json(resp, bad_request ? 400 : 500, api::Error(error, bad_request ? "bad_request" : "docker_failed"));
+  }
+
+  audit_logger_.Append(session->token, "docker.stop", name);
+  return Json(resp, 200, api::Success({
+                             {"name", name, false},
+                         }));
+}
+
+int ServerApp::HandleDockerRestart(HttpRequest* req, HttpResponse* resp) {
+  auto session = RequireSession(req, resp);
+  if (!session.has_value()) {
+    return resp->status_code;
+  }
+
+  const auto payload = ParseJsonOrNull(req->body);
+  const std::string name = JsonString(payload, "name", QueryOf(req, "name"));
+  if (name.empty()) {
+    return Json(resp, 400, api::Error("name is required"));
+  }
+
+  std::string error;
+  if (!docker_manager_.RestartContainer(name, &error)) {
+    const std::string lowered = ToLower(error);
+    const bool bad_request = lowered.find("invalid") != std::string::npos;
+    return Json(resp, bad_request ? 400 : 500, api::Error(error, bad_request ? "bad_request" : "docker_failed"));
+  }
+
+  audit_logger_.Append(session->token, "docker.restart", name);
+  return Json(resp, 200, api::Success({
+                             {"name", name, false},
+                         }));
+}
+
+int ServerApp::HandleDockerLogs(HttpRequest* req, HttpResponse* resp) {
+  auto session = RequireSession(req, resp);
+  if (!session.has_value()) {
+    return resp->status_code;
+  }
+
+  const std::string name = QueryOf(req, "name");
+  if (name.empty()) {
+    return Json(resp, 400, api::Error("name is required"));
+  }
+  const int tail = ParseInt(QueryOf(req, "tail"), 160);
+
+  std::string logs;
+  std::string error;
+  if (!docker_manager_.GetLogs(name, tail, &logs, &error)) {
+    const std::string lowered = ToLower(error);
+    const bool bad_request = lowered.find("invalid") != std::string::npos;
+    return Json(resp, bad_request ? 400 : 500, api::Error(error, bad_request ? "bad_request" : "docker_failed"));
+  }
+
+  audit_logger_.Append(session->token, "docker.logs", name + " (tail=" + std::to_string(tail) + ")");
+  return Json(resp, 200, api::Success({
+                             {"name", name, false},
+                             {"logs", logs, false},
+                         }));
+}
+
+int ServerApp::HandleDockerInspect(HttpRequest* req, HttpResponse* resp) {
+  auto session = RequireSession(req, resp);
+  if (!session.has_value()) {
+    return resp->status_code;
+  }
+
+  const std::string name = QueryOf(req, "name");
+  if (name.empty()) {
+    return Json(resp, 400, api::Error("name is required"));
+  }
+
+  std::string inspect;
+  std::string error;
+  if (!docker_manager_.InspectContainer(name, &inspect, &error)) {
+    const std::string lowered = ToLower(error);
+    const bool bad_request = lowered.find("invalid") != std::string::npos;
+    return Json(resp, bad_request ? 400 : 500, api::Error(error, bad_request ? "bad_request" : "docker_failed"));
+  }
+
+  audit_logger_.Append(session->token, "docker.inspect", name);
+  return Json(resp, 200, api::Success({
+                             {"name", name, false},
+                             {"inspect", inspect, false},
+                         }));
+}
+
+int ServerApp::HandleDockerStats(HttpRequest* req, HttpResponse* resp) {
+  auto session = RequireSession(req, resp);
+  if (!session.has_value()) {
+    return resp->status_code;
+  }
+
+  const std::string name = QueryOf(req, "name");
+  if (name.empty()) {
+    return Json(resp, 400, api::Error("name is required"));
+  }
+
+  docker_runtime::ContainerStats stats;
+  std::string error;
+  if (!docker_manager_.GetStats(name, &stats, &error)) {
+    const std::string lowered = ToLower(error);
+    const bool bad_request = lowered.find("invalid") != std::string::npos;
+    return Json(resp, bad_request ? 400 : 500, api::Error(error, bad_request ? "bad_request" : "docker_failed"));
+  }
+
+  return Json(resp, 200, api::Success({
+                             {"name", name, false},
+                             {"stats", SerializeDockerStats(stats), true},
+                         }));
+}
+
+int ServerApp::HandleDockerProcesses(HttpRequest* req, HttpResponse* resp) {
+  auto session = RequireSession(req, resp);
+  if (!session.has_value()) {
+    return resp->status_code;
+  }
+
+  const std::string name = QueryOf(req, "name");
+  if (name.empty()) {
+    return Json(resp, 400, api::Error("name is required"));
+  }
+  const int limit = ParseInt(QueryOf(req, "limit"), 120);
+
+  docker_runtime::ContainerProcessSnapshot processes;
+  std::string error;
+  if (!docker_manager_.GetProcesses(name, limit, &processes, &error)) {
+    const std::string lowered = ToLower(error);
+    const bool bad_request = lowered.find("invalid") != std::string::npos;
+    return Json(resp, bad_request ? 400 : 500, api::Error(error, bad_request ? "bad_request" : "docker_failed"));
+  }
+
+  std::vector<std::string> serialized_rows;
+  serialized_rows.reserve(processes.rows.size());
+  for (const auto& row : processes.rows) {
+    serialized_rows.push_back(SerializeStringArray(row));
+  }
+
+  return Json(resp, 200, api::Success({
+                             {"name", name, false},
+                             {"columns", SerializeStringArray(processes.columns), true},
+                             {"rows", JsonArray(serialized_rows), true},
+                         }));
+}
+
+int ServerApp::HandleDockerFileList(HttpRequest* req, HttpResponse* resp) {
+  auto session = RequireSession(req, resp);
+  if (!session.has_value()) {
+    return resp->status_code;
+  }
+
+  const std::string name = QueryOf(req, "name");
+  if (name.empty()) {
+    return Json(resp, 400, api::Error("name is required"));
+  }
+  const std::string path = QueryOf(req, "path");
+
+  std::vector<docker_runtime::ContainerFileEntry> entries;
+  std::string current_path;
+  std::string error;
+  if (!docker_manager_.ListFiles(name, path, &entries, &current_path, &error)) {
+    const std::string lowered = ToLower(error);
+    const bool bad_request = lowered.find("invalid") != std::string::npos ||
+                             lowered.find("directory") != std::string::npos ||
+                             lowered.find("required") != std::string::npos;
+    return Json(resp, bad_request ? 400 : 500, api::Error(error, bad_request ? "bad_request" : "docker_failed"));
+  }
+
+  std::vector<std::string> serialized;
+  serialized.reserve(entries.size());
+  for (const auto& entry : entries) {
+    serialized.push_back(SerializeDockerFileEntry(entry));
+  }
+
+  return Json(resp, 200, api::Success({
+                             {"name", name, false},
+                             {"entries", JsonArray(serialized), true},
+                             {"current_path", current_path, false},
+                         }));
+}
+
+int ServerApp::HandleDockerFileRead(HttpRequest* req, HttpResponse* resp) {
+  auto session = RequireSession(req, resp);
+  if (!session.has_value()) {
+    return resp->status_code;
+  }
+
+  const std::string name = QueryOf(req, "name");
+  const std::string path = QueryOf(req, "path");
+  if (name.empty() || path.empty()) {
+    return Json(resp, 400, api::Error("name and path are required"));
+  }
+
+  std::string content;
+  std::string error;
+  if (!docker_manager_.ReadFile(name, path, &content, &error)) {
+    const std::string lowered = ToLower(error);
+    const bool bad_request = lowered.find("invalid") != std::string::npos ||
+                             lowered.find("path") != std::string::npos;
+    return Json(resp, bad_request ? 400 : 500, api::Error(error, bad_request ? "bad_request" : "docker_failed"));
+  }
+
+  audit_logger_.Append(session->token, "docker.file.read", name + ":" + path);
+  return Json(resp, 200, api::Success({
+                             {"name", name, false},
+                             {"path", path, false},
+                             {"content_base64", util::Base64Encode(content), false},
+                         }));
+}
+
+int ServerApp::HandleDockerFileWrite(HttpRequest* req, HttpResponse* resp) {
+  auto session = RequireSession(req, resp);
+  if (!session.has_value()) {
+    return resp->status_code;
+  }
+
+  const auto payload = ParseJsonOrNull(req->body);
+  const std::string name = JsonString(payload, "name", QueryOf(req, "name"));
+  const std::string path = JsonString(payload, "path", QueryOf(req, "path"));
+  if (name.empty() || path.empty()) {
+    return Json(resp, 400, api::Error("name and path are required"));
+  }
+
+  bool base64 = ParseBool(QueryOf(req, "base64"), true);
+  std::string raw = req->body;
+  if (payload.has_value()) {
+    if (payload->contains("content_base64")) {
+      raw = JsonString(payload, "content_base64");
+      base64 = true;
+    } else if (payload->contains("content")) {
+      raw = JsonString(payload, "content");
+      if (QueryOf(req, "base64").empty()) {
+        base64 = false;
+      }
+    }
+  }
+  const std::string content = base64 ? util::Base64Decode(raw) : raw;
+
+  std::string error;
+  if (!docker_manager_.WriteFile(name, path, content, &error)) {
+    const std::string lowered = ToLower(error);
+    const bool bad_request = lowered.find("invalid") != std::string::npos ||
+                             lowered.find("path") != std::string::npos;
+    return Json(resp, bad_request ? 400 : 500, api::Error(error, bad_request ? "bad_request" : "docker_failed"));
+  }
+
+  audit_logger_.Append(session->token, "docker.file.write", name + ":" + path);
+  return Json(resp, 200, api::Success({
+                             {"name", name, false},
+                             {"path", path, false},
+                             {"bytes", std::to_string(content.size()), true},
                          }));
 }
 

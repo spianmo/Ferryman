@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "../toast";
 import {
   FiArchive,
   FiChevronLeft,
   FiCode,
   FiDatabase,
+  FiDownload,
   FiFilm,
   FiFileText,
   FiFolder,
@@ -16,6 +17,7 @@ import {
   FiPackage,
   FiRefreshCw,
   FiSave,
+  FiUpload,
   FiX,
 } from "react-icons/fi";
 import * as mammoth from "mammoth";
@@ -345,6 +347,19 @@ function base64ToBytes(base64: string) {
   return bytes;
 }
 
+function bytesToBase64(bytes: Uint8Array) {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 1) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+async function browserFileToBase64(file: File) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  return bytesToBase64(bytes);
+}
+
 function base64ToObjectUrl(base64: string, mimeType: string) {
   const bytes = base64ToBytes(base64);
   return URL.createObjectURL(new Blob([bytes], { type: mimeType }));
@@ -431,6 +446,7 @@ function monacoLanguageForFile(name: string) {
 export default function FilesPage({ token, query }: Props) {
   const { t } = useI18n();
   const { theme } = useTheme();
+  const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const [path, setPath] = useState(() => {
     if (typeof window === "undefined") return "/";
     const raw = window.localStorage.getItem(FILES_PATH_KEY) ?? "/";
@@ -472,6 +488,8 @@ export default function FilesPage({ token, query }: Props) {
     return "atom";
   });
   const [loading, setLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [downloading, setDownloading] = useState(false);
   const [viewMode, setViewMode] = useState<FilesViewMode>(() => {
     if (typeof window === "undefined") return "list";
     const raw = window.localStorage.getItem(FILES_VIEW_MODE_KEY);
@@ -694,6 +712,44 @@ export default function FilesPage({ token, query }: Props) {
     await loadList(path);
   };
 
+  const uploadFileToCurrentPath = async (file: File) => {
+    const dir = normalizePath(path);
+    const targetPath = dir === "/" ? `/${file.name}` : `${dir}/${file.name}`;
+    setUploading(true);
+    const base64 = await browserFileToBase64(file);
+    const res = await writeFile(token, targetPath, base64);
+    setUploading(false);
+    if (!res.ok) {
+      toast.error(res.error ?? t("toast.request_failed"));
+      return;
+    }
+    toast.success(t("files.saved_path", { path: targetPath }));
+    await loadList(path);
+  };
+
+  const downloadSelectedFile = async () => {
+    if (!selectedFile) {
+      toast.error(t("files.select_file"));
+      return;
+    }
+    setDownloading(true);
+    const res = await readFile(token, selectedFile);
+    setDownloading(false);
+    if (!res.ok) {
+      toast.error(res.error ?? t("toast.request_failed"));
+      return;
+    }
+    const bytes = base64ToBytes(res.content_base64 ?? "");
+    const fileName = selectedFile.split(/[\\/]/).pop() || "download.bin";
+    const mimeType = mediaMimeType(fileName);
+    const url = URL.createObjectURL(new Blob([bytes], { type: mimeType }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = fileName;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+
   const parentPath = (() => {
     if (atRoot) return normalizedRootPath;
     const trimmed = normalizedPath;
@@ -785,6 +841,32 @@ export default function FilesPage({ token, query }: Props) {
               >
                 <FiRefreshCw />
               </button>
+              <button
+                className={cn(
+                  "inline-flex h-10 items-center gap-2 rounded-2xl px-3 text-xs font-semibold transition-colors",
+                  uploading
+                    ? "cursor-wait bg-slate-200 text-slate-500 dark:bg-neutral-800 dark:text-neutral-500"
+                    : "bg-sky-100 text-sky-800 hover:bg-sky-200 dark:bg-sky-900/40 dark:text-sky-300 dark:hover:bg-sky-900/60"
+                )}
+                onClick={() => uploadInputRef.current?.click()}
+                disabled={uploading}
+                title={t("common.upload")}
+              >
+                <FiUpload />
+                {t("common.upload")}
+              </button>
+              <input
+                ref={uploadInputRef}
+                type="file"
+                className="hidden"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file) {
+                    void uploadFileToCurrentPath(file);
+                  }
+                  event.target.value = "";
+                }}
+              />
               <div className="inline-flex rounded-2xl bg-slate-100 p-1 dark:bg-neutral-800">
                 <button
                   className={cn(
@@ -994,6 +1076,13 @@ export default function FilesPage({ token, query }: Props) {
                     </button>
                   </>
                 ) : null}
+                <button
+                  onClick={() => void downloadSelectedFile()}
+                  disabled={!selectedFile || downloading}
+                  className="inline-flex h-10 items-center gap-2 rounded-2xl bg-slate-100 px-3 text-sm font-semibold text-slate-700 hover:bg-slate-200 disabled:opacity-50 dark:bg-neutral-800 dark:text-neutral-100 dark:hover:bg-neutral-700"
+                >
+                  <FiDownload /> {t("common.download")}
+                </button>
                 <button
                   onClick={closeViewer}
                   className="inline-flex h-10 w-10 items-center justify-center rounded-2xl bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-neutral-800 dark:text-neutral-100 dark:hover:bg-neutral-700"

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "./toast";
 import {
   FiActivity,
+  FiBox,
   FiClipboard,
   FiCommand,
   FiFolder,
@@ -19,6 +20,7 @@ import {
 
 import { getSessionMe, login, UNAUTHORIZED_EVENT } from "./api/client";
 import { useI18n } from "./i18n";
+import DockerPage from "./pages/DockerPage";
 import FilesPage from "./pages/FilesPage";
 import LoginPage from "./pages/LoginPage";
 import LogsPage from "./pages/LogsPage";
@@ -31,7 +33,7 @@ import { useTheme } from "./theme";
 import type { SessionInfo } from "./types";
 import { cn } from "./util/cn";
 
-type TabKey = "files" | "terminal" | "tasks" | "dockurr" | "screen" | "monitor" | "logs";
+type TabKey = "files" | "terminal" | "tasks" | "dockurr" | "docker" | "screen" | "monitor" | "logs";
 
 type NavItem = {
   key: TabKey;
@@ -41,6 +43,7 @@ type NavItem = {
 
 const navItems: NavItem[] = [
   { key: "monitor", labelKey: "nav.monitor", icon: <FiActivity /> },
+  { key: "docker", labelKey: "nav.docker", icon: <FiBox /> },
   { key: "files", labelKey: "nav.files", icon: <FiFolder /> },
   { key: "terminal", labelKey: "nav.terminal", icon: <FiTerminal /> },
   { key: "tasks", labelKey: "nav.tasks", icon: <FiCommand /> },
@@ -53,7 +56,7 @@ const SESSION_KEY = "ferryman.session";
 const SIDEBAR_COLLAPSED_KEY = "ferryman.sidebar.collapsed";
 const DEFAULT_TAB: TabKey = "monitor";
 
-const VALID_TABS: TabKey[] = ["files", "terminal", "tasks", "dockurr", "screen", "monitor", "logs"];
+const VALID_TABS: TabKey[] = ["files", "terminal", "tasks", "dockurr", "docker", "screen", "monitor", "logs"];
 
 function isTabKey(value: string): value is TabKey {
   return VALID_TABS.includes(value as TabKey);
@@ -202,6 +205,8 @@ export default function App() {
         return <TasksPage token={session.token} />;
       case "dockurr":
         return <DockurrPage session={session} />;
+      case "docker":
+        return <DockerPage session={session} />;
       case "screen":
         return <ScreenPage session={session} />;
       case "monitor":
