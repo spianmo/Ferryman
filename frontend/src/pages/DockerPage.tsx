@@ -1024,10 +1024,10 @@ export default function DockerPage({ session }: Props) {
             </div>
 
             {detailTab === "load" ? (
-              <div className="mt-3 min-h-0 min-w-0 flex-1 space-y-3 overflow-y-auto pr-1 [scrollbar-gutter:stable]">
+              <div className="mt-3 min-h-0 min-w-0 flex flex-1 flex-col gap-3 overflow-y-auto pr-1 [scrollbar-gutter:stable]">
                 {isRunning(selectedContainer.state) ? (
                   <>
-                    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                    <div className="shrink-0 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                       <div className="rounded-2xl bg-slate-100/80 p-3 dark:bg-neutral-900">
                         <div className="text-xs text-slate-500 dark:text-neutral-400">{t("docker.cpu_load")}</div>
                         <div className="mt-1 text-xl font-semibold text-slate-900 dark:text-neutral-50">
@@ -1058,7 +1058,7 @@ export default function DockerPage({ session }: Props) {
                       </div>
                     </div>
 
-                    <div className="grid gap-3 xl:grid-cols-2">
+                    <div className="shrink-0 grid gap-3 xl:grid-cols-2">
                       <div className="rounded-2xl bg-slate-100/60 p-3 dark:bg-neutral-900">
                         <div className="mb-1 text-xs text-slate-500 dark:text-neutral-400">{t("docker.cpu_trend")}</div>
                         <TrendChart points={cpuHistory} strokeColor={cpuStyle.strokeColor} fillColor={cpuStyle.fillColor} />
@@ -1072,13 +1072,13 @@ export default function DockerPage({ session }: Props) {
                         />
                       </div>
                     </div>
-                    <div className="text-xs text-slate-500 dark:text-neutral-400">
+                    <div className="shrink-0 text-xs text-slate-500 dark:text-neutral-400">
                       {statsLoading ? t("docker.loading") : `${t("docker.pids")}: ${stats?.pids ?? 0}`}
                     </div>
 
-                    <div className="min-w-0 rounded-2xl bg-slate-100/60 p-3 dark:bg-neutral-900">
-                      <div className="mb-2 text-xs text-slate-500 dark:text-neutral-400">{t("docker.processes")}</div>
-                      <div className="h-[260px] min-w-0 overflow-x-auto overflow-y-auto rounded-xl border border-slate-200 bg-white/85 dark:border-neutral-800 dark:bg-neutral-950/45">
+                    <div className="min-h-0 min-w-0 flex flex-1 flex-col rounded-2xl bg-slate-100/60 p-3 dark:bg-neutral-900">
+                      <div className="mb-2 shrink-0 text-xs text-slate-500 dark:text-neutral-400">{t("docker.processes")}</div>
+                      <div className="min-h-0 min-w-0 flex-1 overflow-x-auto overflow-y-auto rounded-xl border border-slate-200 bg-white/85 dark:border-neutral-800 dark:bg-neutral-950/45">
                         {processesLoading ? (
                           <div className="grid h-28 place-items-center text-xs text-slate-500 dark:text-neutral-400">
                             {t("docker.loading")}
@@ -1115,7 +1115,7 @@ export default function DockerPage({ session }: Props) {
                     </div>
                   </>
                 ) : (
-                  <div className="rounded-2xl border border-dashed border-slate-200 p-5 text-center text-sm text-slate-500 dark:border-neutral-800 dark:text-neutral-400">
+                  <div className="grid min-h-0 flex-1 place-items-center rounded-2xl border border-dashed border-slate-200 p-5 text-center text-sm text-slate-500 dark:border-neutral-800 dark:text-neutral-400">
                     {t("docker.not_running")}
                   </div>
                 )}

@@ -16,6 +16,31 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+set(FERRYMAN_USING_VCPKG_TOOLCHAIN OFF)
+if(DEFINED CMAKE_TOOLCHAIN_FILE AND CMAKE_TOOLCHAIN_FILE MATCHES "vcpkg\\.cmake$")
+  set(FERRYMAN_USING_VCPKG_TOOLCHAIN ON)
+endif()
+
+if(WIN32 AND MSVC AND DEFINED VCPKG_TARGET_TRIPLET AND VCPKG_TARGET_TRIPLET MATCHES "-static$")
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
+if(WIN32 AND FERRYMAN_USING_VCPKG_TOOLCHAIN)
+  if(DEFINED VCPKG_TARGET_TRIPLET)
+    if(VCPKG_TARGET_TRIPLET MATCHES "-static")
+      message(STATUS "Windows static vcpkg triplet detected: ${VCPKG_TARGET_TRIPLET}")
+    else()
+      message(WARNING
+        "VCPKG_TARGET_TRIPLET=${VCPKG_TARGET_TRIPLET} uses dynamic third-party libraries. "
+        "Use x64-windows-static to avoid runtime DLL dependencies.")
+    endif()
+  else()
+    message(WARNING
+      "VCPKG_TARGET_TRIPLET is not set for Windows build. "
+      "Use -DVCPKG_TARGET_TRIPLET=x64-windows-static to avoid runtime DLL dependencies.")
+  endif()
+endif()
+
 if(APPLE)
   enable_language(OBJCXX)
   set(CMAKE_OBJCXX_STANDARD 20)

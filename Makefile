@@ -6,7 +6,29 @@ NPM_USERCONFIG ?= $(CURDIR)/.npmrc.local
 VCPKG_ROOT ?= $(HOME)/vcpkg
 VCPKG ?= $(VCPKG_ROOT)/vcpkg
 VCPKG_TOOLCHAIN ?= $(VCPKG_ROOT)/scripts/buildsystems/vcpkg.cmake
-VCPKG_TRIPLET ?= arm64-osx
+
+UNAME_S := $(shell uname -s 2>/dev/null)
+UNAME_M := $(shell uname -m 2>/dev/null)
+
+ifeq ($(OS),Windows_NT)
+	DEFAULT_VCPKG_TRIPLET := x64-windows-static
+else ifeq ($(UNAME_S),Darwin)
+	ifeq ($(UNAME_M),arm64)
+		DEFAULT_VCPKG_TRIPLET := arm64-osx
+	else
+		DEFAULT_VCPKG_TRIPLET := x64-osx
+	endif
+else ifeq ($(UNAME_S),Linux)
+	ifeq ($(UNAME_M),aarch64)
+		DEFAULT_VCPKG_TRIPLET := arm64-linux
+	else
+		DEFAULT_VCPKG_TRIPLET := x64-linux
+	endif
+else
+	DEFAULT_VCPKG_TRIPLET := x64-linux
+endif
+
+VCPKG_TRIPLET ?= $(DEFAULT_VCPKG_TRIPLET)
 VCPKG_DOWNLOADS_DIR ?= $(CURDIR)/.vcpkg-downloads
 VCPKG_BINARY_CACHE_DIR ?= $(CURDIR)/.vcpkg-binary-cache
 

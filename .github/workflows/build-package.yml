@@ -27,7 +27,7 @@ jobs:
             package_suffix: macos-arm64
             package_ext: tar.gz
           - os: windows-2022
-            triplet: x64-windows
+            triplet: x64-windows-static
             package_suffix: windows-x64
             package_ext: zip
 

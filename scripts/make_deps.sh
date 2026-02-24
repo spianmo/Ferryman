@@ -4,7 +4,37 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VCPKG_ROOT="${VCPKG_ROOT:-$HOME/vcpkg}"
 VCPKG_BIN="${VCPKG:-$VCPKG_ROOT/vcpkg}"
-TRIPLET="${VCPKG_TRIPLET:-arm64-osx}"
+
+detect_default_triplet() {
+  local uname_s uname_m
+  uname_s="$(uname -s 2>/dev/null || echo unknown)"
+  uname_m="$(uname -m 2>/dev/null || echo unknown)"
+
+  case "$uname_s" in
+    Darwin)
+      if [[ "$uname_m" == "arm64" ]]; then
+        echo "arm64-osx"
+      else
+        echo "x64-osx"
+      fi
+      ;;
+    Linux)
+      if [[ "$uname_m" == "aarch64" || "$uname_m" == "arm64" ]]; then
+        echo "arm64-linux"
+      else
+        echo "x64-linux"
+      fi
+      ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT)
+      echo "x64-windows-static"
+      ;;
+    *)
+      echo "x64-linux"
+      ;;
+  esac
+}
+
+TRIPLET="${VCPKG_TRIPLET:-$(detect_default_triplet)}"
 
 DOWNLOADS_DIR="${VCPKG_DOWNLOADS:-$ROOT_DIR/.vcpkg-downloads}"
 BINARY_CACHE_DIR="${VCPKG_DEFAULT_BINARY_CACHE:-$ROOT_DIR/.vcpkg-binary-cache}"

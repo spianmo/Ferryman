@@ -121,6 +121,17 @@ make deps-proxy
 - `GITHUB_MIRROR_PREFIX=<prefix>`
 - `VCPKG_ASSET_SOURCES=<asset-source-config>`（透传为 `X_VCPKG_ASSET_SOURCES`）
 
+Windows 若希望产出不依赖三方 DLL 的单文件可执行程序，请使用静态 triplet：
+
+```powershell
+$env:VCPKG_TARGET_TRIPLET = "x64-windows-static"
+cmake -S . -B build -A x64 `
+  -DCMAKE_BUILD_TYPE=Release `
+  -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
+  -DVCPKG_TARGET_TRIPLET=$env:VCPKG_TARGET_TRIPLET
+cmake --build build --config Release --parallel
+```
+
 ### 1) 构建前端资源
 
 ```bash

@@ -121,6 +121,17 @@ Optional mirror/proxy envs:
 - `GITHUB_MIRROR_PREFIX=<prefix>`
 - `VCPKG_ASSET_SOURCES=<asset-source-config>` (passed through to `X_VCPKG_ASSET_SOURCES`)
 
+For Windows single-exe builds without third-party DLLs, use a static triplet:
+
+```powershell
+$env:VCPKG_TARGET_TRIPLET = "x64-windows-static"
+cmake -S . -B build -A x64 `
+  -DCMAKE_BUILD_TYPE=Release `
+  -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
+  -DVCPKG_TARGET_TRIPLET=$env:VCPKG_TARGET_TRIPLET
+cmake --build build --config Release --parallel
+```
+
 ### 1) Build frontend assets
 
 ```bash
