@@ -513,7 +513,7 @@ export default function DockurrPage({ session }: Props) {
                       ? "ring-2 ring-slate-900/70 dark:ring-neutral-50/70"
                       : "hover:bg-slate-50 dark:hover:bg-neutral-900/50"
                   )}
-                  onClick={() => setSelectedName(vm.name)}
+                  onClick={() => loadDetail(vm, "logs")}
                 >
                   <div className="flex flex-wrap items-start justify-between gap-2">
                     <div className="min-w-0">
