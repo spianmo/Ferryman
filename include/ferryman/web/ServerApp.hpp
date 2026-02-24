@@ -4,6 +4,7 @@
 #include "ferryman/core/ConfigManager.hpp"
 #include "ferryman/core/FileService.hpp"
 #include "ferryman/core/SessionManager.hpp"
+#include "ferryman/dockurr/DockurrManager.hpp"
 #include "ferryman/pty/PtyManager.hpp"
 #include "ferryman/task/TaskManager.hpp"
 #include "ferryman/web/ScreenService.hpp"
@@ -93,6 +94,12 @@ class ServerApp {
   int HandleTaskList(HttpRequest* req, HttpResponse* resp);
   int HandleTaskGet(HttpRequest* req, HttpResponse* resp);
   int HandleLogsTail(HttpRequest* req, HttpResponse* resp);
+  int HandleDockurrList(HttpRequest* req, HttpResponse* resp);
+  int HandleDockurrCreate(HttpRequest* req, HttpResponse* resp);
+  int HandleDockurrStop(HttpRequest* req, HttpResponse* resp);
+  int HandleDockurrRestart(HttpRequest* req, HttpResponse* resp);
+  int HandleDockurrLogs(HttpRequest* req, HttpResponse* resp);
+  int HandleDockurrInspect(HttpRequest* req, HttpResponse* resp);
   int HandleScreenCaps(HttpRequest* req, HttpResponse* resp);
   int HandleScreenSources(HttpRequest* req, HttpResponse* resp);
   int HandleScreenInput(HttpRequest* req, HttpResponse* resp);
@@ -114,9 +121,11 @@ class ServerApp {
   void HandleTerminalWsMessage(std::uintptr_t channel_key, const std::string& message);
   void HandleWebRtcWsMessage(std::uintptr_t channel_key, const std::string& message);
   void HandleLogsWsMessage(std::uintptr_t channel_key, const std::string& message);
+  void HandleDockurrWsMessage(std::uintptr_t channel_key, const std::string& message);
   void BroadcastTerminalOutput(const std::string& terminal_id, const std::string& chunk);
   void BroadcastLogEntry(const std::string& serialized_entry);
   void BroadcastNativeFrames();
+  void BroadcastDockurrSnapshots();
   void SyncNativeSubscribersToActiveSource();
   void SendToWs(std::uintptr_t channel_key, const std::string& payload);
   NativeCaptureDemand CollectNativeCaptureDemandLocked() const;
@@ -127,6 +136,7 @@ class ServerApp {
   core::SessionManager session_manager_;
   core::AuditLogger audit_logger_;
   core::FileService file_service_;
+  dockurr::DockurrManager dockurr_manager_;
   task::TaskManager task_manager_;
   pty::PtyManager pty_manager_;
   ScreenService screen_service_;
@@ -141,6 +151,7 @@ class ServerApp {
 
   std::thread http_thread_;
   std::thread native_screen_thread_;
+  std::thread dockurr_thread_;
 
   std::mutex ws_mu_;
   std::unordered_map<std::uintptr_t, WsClient> ws_clients_;

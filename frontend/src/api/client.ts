@@ -1,4 +1,4 @@
-import type { ScreenSource, SessionInfo } from "../types";
+import type { DockurrVmInfo, ScreenSource, SessionInfo } from "../types";
 
 export type ApiResponse<T = unknown> = {
   ok: boolean;
@@ -156,6 +156,73 @@ export async function getLogs(token: string, lines = 200) {
   );
 }
 
+export type CreateDockurrVmPayload = {
+  os: "windows" | "macos";
+  version: string;
+  ram: string;
+  name?: string;
+  persist: boolean;
+};
+
+export async function listDockurrVms(token: string) {
+  return request<{ vms: Array<DockurrVmInfo> }>(
+    "/api/dockurr/list",
+    { method: "GET" },
+    token
+  );
+}
+
+export async function createDockurrVm(token: string, payload: CreateDockurrVmPayload) {
+  return request<{ vm: DockurrVmInfo }>(
+    "/api/dockurr/create",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+    token
+  );
+}
+
+export async function stopDockurrVm(token: string, name: string) {
+  return request<{ name: string }>(
+    "/api/dockurr/stop",
+    {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    },
+    token
+  );
+}
+
+export async function restartDockurrVm(token: string, name: string) {
+  return request<{ name: string }>(
+    "/api/dockurr/restart",
+    {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    },
+    token
+  );
+}
+
+export async function getDockurrVmLogs(token: string, name: string, tail = 50) {
+  const encoded = encodeURIComponent(name);
+  return request<{ name: string; logs: string }>(
+    `/api/dockurr/logs?name=${encoded}&tail=${tail}`,
+    { method: "GET" },
+    token
+  );
+}
+
+export async function getDockurrVmInspect(token: string, name: string) {
+  const encoded = encodeURIComponent(name);
+  return request<{ name: string; inspect: string }>(
+    `/api/dockurr/inspect?name=${encoded}`,
+    { method: "GET" },
+    token
+  );
+}
+
 export async function getScreenCapabilities(token: string) {
   return request<{ capabilities: Record<string, unknown>; screen_authorized: boolean }>(
     "/api/screen/capabilities",
@@ -176,7 +243,10 @@ export async function getScreenSources(token: string) {
   );
 }
 
-export function wsUrl(session: SessionInfo, path: "/ws/terminal" | "/ws/webrtc" | "/ws/logs"): string {
+export function wsUrl(
+  session: SessionInfo,
+  path: "/ws/terminal" | "/ws/webrtc" | "/ws/logs" | "/ws/dockurr"
+): string {
   const url = new URL(path, window.location.origin);
   url.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   url.searchParams.set("token", session.token);

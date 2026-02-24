@@ -10,6 +10,7 @@ import {
   FiMoon,
   FiMonitor,
   FiSearch,
+  FiServer,
   FiSun,
   FiTerminal,
   FiX,
@@ -20,6 +21,7 @@ import { useI18n } from "./i18n";
 import FilesPage from "./pages/FilesPage";
 import LoginPage from "./pages/LoginPage";
 import LogsPage from "./pages/LogsPage";
+import DockurrPage from "./pages/DockurrPage";
 import ScreenPage from "./pages/ScreenPage";
 import TasksPage from "./pages/TasksPage";
 import TerminalPage from "./pages/TerminalPage";
@@ -27,7 +29,7 @@ import { useTheme } from "./theme";
 import type { SessionInfo } from "./types";
 import { cn } from "./util/cn";
 
-type TabKey = "files" | "terminal" | "tasks" | "screen" | "logs";
+type TabKey = "files" | "terminal" | "tasks" | "dockurr" | "screen" | "logs";
 
 type NavItem = {
   key: TabKey;
@@ -39,6 +41,7 @@ const navItems: NavItem[] = [
   { key: "files", labelKey: "nav.files", icon: <FiFolder /> },
   { key: "terminal", labelKey: "nav.terminal", icon: <FiTerminal /> },
   { key: "tasks", labelKey: "nav.tasks", icon: <FiCommand /> },
+  { key: "dockurr", labelKey: "nav.dockurr", icon: <FiServer /> },
   { key: "screen", labelKey: "nav.screen", icon: <FiMonitor /> },
   { key: "logs", labelKey: "nav.logs", icon: <FiClipboard /> },
 ];
@@ -47,7 +50,7 @@ const SESSION_KEY = "ferryman.session";
 const SIDEBAR_COLLAPSED_KEY = "ferryman.sidebar.collapsed";
 const DEFAULT_TAB: TabKey = "files";
 
-const VALID_TABS: TabKey[] = ["files", "terminal", "tasks", "screen", "logs"];
+const VALID_TABS: TabKey[] = ["files", "terminal", "tasks", "dockurr", "screen", "logs"];
 
 function isTabKey(value: string): value is TabKey {
   return VALID_TABS.includes(value as TabKey);
@@ -194,6 +197,8 @@ export default function App() {
         return <TerminalPage session={session} />;
       case "tasks":
         return <TasksPage token={session.token} />;
+      case "dockurr":
+        return <DockurrPage session={session} />;
       case "screen":
         return <ScreenPage session={session} />;
       case "logs":

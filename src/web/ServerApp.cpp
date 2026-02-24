@@ -2,6 +2,7 @@
 
 #include "ferryman/api/ResponseUtil.hpp"
 #include "ferryman/util/StringUtil.hpp"
+#include "ferryman/util/Time.hpp"
 #include "ferryman/web/EmbeddedAssets.hpp"
 
 #include <algorithm>
@@ -36,6 +37,8 @@ constexpr uint8_t kNativeBinaryCodecH265 = 3;
 constexpr uint8_t kNativeBinaryCodecVP8 = 4;
 constexpr uint8_t kNativeBinaryCodecVP9 = 5;
 constexpr uint8_t kNativeBinaryCodecAV1 = 6;
+constexpr int kDockurrSnapshotIntervalMs = 1000;
+constexpr int kDockurrCreateLogWaitSeconds = 90;
 
 std::string ToLower(std::string value) {
   std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
@@ -73,6 +76,20 @@ std::string JsonArray(const std::vector<std::string>& items) {
     }
   }
   out << ']';
+  return out.str();
+}
+
+std::string JoinStrings(const std::vector<std::string>& items, const std::string& delimiter) {
+  if (items.empty()) {
+    return "";
+  }
+  std::ostringstream out;
+  for (size_t i = 0; i < items.size(); ++i) {
+    if (i > 0) {
+      out << delimiter;
+    }
+    out << items[i];
+  }
   return out.str();
 }
 
@@ -226,12 +243,51 @@ std::string BuildNativeBinaryFramePacket(uint8_t codec, bool keyframe, uint64_t 
   return packet;
 }
 
+std::string SerializeDockurrVm(const dockurr::VmInfo& vm) {
+  return util::BuildJsonObject({
+      {"id", vm.id, false},
+      {"name", vm.name, false},
+      {"os", vm.os, false},
+      {"image", vm.image, false},
+      {"ports", vm.ports, false},
+      {"running_for", vm.running_for, false},
+      {"persistent", vm.persistent ? "true" : "false", true},
+      {"novnc_port", vm.novnc_port, false},
+      {"desktop_port", vm.desktop_port, false},
+  });
+}
+
+std::string BuildDockurrSnapshotPayload(const std::vector<dockurr::VmInfo>& vms) {
+  std::vector<std::string> serialized;
+  serialized.reserve(vms.size());
+  for (const auto& vm : vms) {
+    serialized.push_back(SerializeDockurrVm(vm));
+  }
+  return api::Success({
+      {"event", "dockurr_snapshot", false},
+      {"vms", JsonArray(serialized), true},
+  });
+}
+
+std::string BuildDockurrRuntimeLogPayload(const std::string& level, const std::string& action,
+                                          const std::string& message, const std::string& request_id = "") {
+  return api::Success({
+      {"event", "dockurr_runtime_log", false},
+      {"ts", util::UtcNowIso8601(), false},
+      {"level", level, false},
+      {"action", action, false},
+      {"message", message, false},
+      {"request_id", request_id, false},
+  });
+}
+
 }  // namespace
 
 ServerApp::ServerApp(core::AppConfig config)
     : config_(std::move(config)),
       audit_logger_(config_.audit_log_path),
-      file_service_(config_.workspace_root) {
+      file_service_(config_.workspace_root),
+      dockurr_manager_(config_.workspace_root) {
 #if FERRYMAN_WITH_LIBHV
   audit_logger_.SetRealtimeCallback([this](const std::string& serialized_entry) {
     BroadcastLogEntry(serialized_entry);
@@ -278,6 +334,9 @@ bool ServerApp::Start() {
   native_screen_thread_ = std::thread([this]() {
     BroadcastNativeFrames();
   });
+  dockurr_thread_ = std::thread([this]() {
+    BroadcastDockurrSnapshots();
+  });
 
   std::cout << "[ferryman] http: http://" << config_.http_host << ':' << config_.http_port << '\n';
   std::cout << "[ferryman] ws:   ws://" << config_.http_host << ':' << config_.ws_port << '\n';
@@ -303,6 +362,9 @@ void ServerApp::Stop() {
   if (native_screen_thread_.joinable()) {
     native_screen_thread_.join();
   }
+  if (dockurr_thread_.joinable()) {
+    dockurr_thread_.join();
+  }
 #endif
   screen_service_.StopCapture();
 #if FERRYMAN_WITH_LIBHV
@@ -311,6 +373,18 @@ void ServerApp::Stop() {
   active_capture_video_bitrate_bps_ = kNativeBitrateDefaultBps;
 #endif
   pty_manager_.Shutdown();
+  if (was_running) {
+    std::vector<std::string> stopped_names;
+    std::string cleanup_error;
+    if (!dockurr_manager_.StopTemporaryVms(&stopped_names, &cleanup_error)) {
+      if (!cleanup_error.empty()) {
+        audit_logger_.AppendSystem("warn", "dockurr.cleanup", cleanup_error);
+      }
+    } else if (!stopped_names.empty()) {
+      audit_logger_.AppendSystem("info", "dockurr.cleanup",
+                                 "stopped temporary vm(s): " + JoinStrings(stopped_names, ", "));
+    }
+  }
   if (was_running) {
     audit_logger_.AppendSystem("info", "server.stop", "runtime shutdown completed");
   }
@@ -358,6 +432,30 @@ bool ServerApp::RegisterHttpRoutes() {
 
   http_service_.GET("/api/logs/tail", [this](HttpRequest* req, HttpResponse* resp) {
     return HandleLogsTail(req, resp);
+  });
+
+  http_service_.GET("/api/dockurr/list", [this](HttpRequest* req, HttpResponse* resp) {
+    return HandleDockurrList(req, resp);
+  });
+
+  http_service_.POST("/api/dockurr/create", [this](HttpRequest* req, HttpResponse* resp) {
+    return HandleDockurrCreate(req, resp);
+  });
+
+  http_service_.POST("/api/dockurr/stop", [this](HttpRequest* req, HttpResponse* resp) {
+    return HandleDockurrStop(req, resp);
+  });
+
+  http_service_.POST("/api/dockurr/restart", [this](HttpRequest* req, HttpResponse* resp) {
+    return HandleDockurrRestart(req, resp);
+  });
+
+  http_service_.GET("/api/dockurr/logs", [this](HttpRequest* req, HttpResponse* resp) {
+    return HandleDockurrLogs(req, resp);
+  });
+
+  http_service_.GET("/api/dockurr/inspect", [this](HttpRequest* req, HttpResponse* resp) {
+    return HandleDockurrInspect(req, resp);
   });
 
   http_service_.GET("/api/screen/capabilities", [this](HttpRequest* req, HttpResponse* resp) {
@@ -667,6 +765,157 @@ int ServerApp::HandleLogsTail(HttpRequest* req, HttpResponse* resp) {
   const int lines = ParseInt(QueryOf(req, "lines"), 200);
   return Json(resp, 200, api::Success({
                              {"items", audit_logger_.Tail(static_cast<size_t>(std::max(1, lines))), true},
+                         }));
+}
+
+int ServerApp::HandleDockurrList(HttpRequest* req, HttpResponse* resp) {
+  auto session = RequireSession(req, resp);
+  if (!session.has_value()) {
+    return resp->status_code;
+  }
+
+  std::string error;
+  const auto vms = dockurr_manager_.ListVms(&error);
+  if (!error.empty()) {
+    return Json(resp, 500, api::Error(error, "dockurr_unavailable"));
+  }
+  return Json(resp, 200, BuildDockurrSnapshotPayload(vms));
+}
+
+int ServerApp::HandleDockurrCreate(HttpRequest* req, HttpResponse* resp) {
+  auto session = RequireSession(req, resp);
+  if (!session.has_value()) {
+    return resp->status_code;
+  }
+
+  const auto payload = ParseJsonOrNull(req->body);
+  dockurr::CreateVmRequest create_request;
+  create_request.os = ToLower(JsonString(payload, "os"));
+  create_request.version = JsonString(payload, "version");
+  create_request.ram_size = JsonString(payload, "ram", JsonString(payload, "ram_size", "4G"));
+  create_request.name = JsonString(payload, "name");
+  create_request.persistent = JsonBool(payload, "persist", JsonBool(payload, "persistent", false));
+
+  if (create_request.os.empty()) {
+    return Json(resp, 400, api::Error("os is required"));
+  }
+
+  dockurr::VmInfo vm;
+  std::string error;
+  if (!dockurr_manager_.CreateVm(create_request, &vm, &error)) {
+    const std::string lowered = ToLower(error);
+    const bool bad_request = lowered.find("invalid") != std::string::npos ||
+                             lowered.find("required") != std::string::npos;
+    return Json(resp, bad_request ? 400 : 500, api::Error(error, bad_request ? "bad_request" : "dockurr_failed"));
+  }
+
+  audit_logger_.Append(session->token, "dockurr.create",
+                       vm.name + " (" + create_request.os + " " + create_request.version + ")");
+  return Json(resp, 200, api::Success({
+                             {"vm", SerializeDockurrVm(vm), true},
+                         }));
+}
+
+int ServerApp::HandleDockurrStop(HttpRequest* req, HttpResponse* resp) {
+  auto session = RequireSession(req, resp);
+  if (!session.has_value()) {
+    return resp->status_code;
+  }
+
+  const auto payload = ParseJsonOrNull(req->body);
+  const std::string name = JsonString(payload, "name", QueryOf(req, "name"));
+  if (name.empty()) {
+    return Json(resp, 400, api::Error("name is required"));
+  }
+
+  std::string error;
+  if (!dockurr_manager_.StopVm(name, &error)) {
+    const std::string lowered = ToLower(error);
+    const bool bad_request = lowered.find("invalid") != std::string::npos;
+    return Json(resp, bad_request ? 400 : 500, api::Error(error, bad_request ? "bad_request" : "dockurr_failed"));
+  }
+
+  audit_logger_.Append(session->token, "dockurr.stop", name);
+  return Json(resp, 200, api::Success({
+                             {"name", name, false},
+                         }));
+}
+
+int ServerApp::HandleDockurrRestart(HttpRequest* req, HttpResponse* resp) {
+  auto session = RequireSession(req, resp);
+  if (!session.has_value()) {
+    return resp->status_code;
+  }
+
+  const auto payload = ParseJsonOrNull(req->body);
+  const std::string name = JsonString(payload, "name", QueryOf(req, "name"));
+  if (name.empty()) {
+    return Json(resp, 400, api::Error("name is required"));
+  }
+
+  std::string error;
+  if (!dockurr_manager_.RestartVm(name, &error)) {
+    const std::string lowered = ToLower(error);
+    const bool bad_request = lowered.find("invalid") != std::string::npos;
+    return Json(resp, bad_request ? 400 : 500, api::Error(error, bad_request ? "bad_request" : "dockurr_failed"));
+  }
+
+  audit_logger_.Append(session->token, "dockurr.restart", name);
+  return Json(resp, 200, api::Success({
+                             {"name", name, false},
+                         }));
+}
+
+int ServerApp::HandleDockurrLogs(HttpRequest* req, HttpResponse* resp) {
+  auto session = RequireSession(req, resp);
+  if (!session.has_value()) {
+    return resp->status_code;
+  }
+
+  const std::string name = QueryOf(req, "name");
+  if (name.empty()) {
+    return Json(resp, 400, api::Error("name is required"));
+  }
+  const int tail = ParseInt(QueryOf(req, "tail"), 50);
+
+  std::string logs;
+  std::string error;
+  if (!dockurr_manager_.GetLogs(name, tail, &logs, &error)) {
+    const std::string lowered = ToLower(error);
+    const bool bad_request = lowered.find("invalid") != std::string::npos;
+    return Json(resp, bad_request ? 400 : 500, api::Error(error, bad_request ? "bad_request" : "dockurr_failed"));
+  }
+
+  audit_logger_.Append(session->token, "dockurr.logs", name + " (tail=" + std::to_string(tail) + ")");
+  return Json(resp, 200, api::Success({
+                             {"name", name, false},
+                             {"logs", logs, false},
+                         }));
+}
+
+int ServerApp::HandleDockurrInspect(HttpRequest* req, HttpResponse* resp) {
+  auto session = RequireSession(req, resp);
+  if (!session.has_value()) {
+    return resp->status_code;
+  }
+
+  const std::string name = QueryOf(req, "name");
+  if (name.empty()) {
+    return Json(resp, 400, api::Error("name is required"));
+  }
+
+  std::string inspect;
+  std::string error;
+  if (!dockurr_manager_.InspectVm(name, &inspect, &error)) {
+    const std::string lowered = ToLower(error);
+    const bool bad_request = lowered.find("invalid") != std::string::npos;
+    return Json(resp, bad_request ? 400 : 500, api::Error(error, bad_request ? "bad_request" : "dockurr_failed"));
+  }
+
+  audit_logger_.Append(session->token, "dockurr.inspect", name);
+  return Json(resp, 200, api::Success({
+                             {"name", name, false},
+                             {"inspect", inspect, false},
                          }));
 }
 
@@ -995,6 +1244,8 @@ void ServerApp::HandleWsOpen(const WebSocketChannelPtr& channel, const HttpReque
     channel_type = "webrtc";
   } else if (ws_path == "/ws/logs") {
     channel_type = "logs";
+  } else if (ws_path == "/ws/dockurr") {
+    channel_type = "dockurr";
   } else {
     audit_logger_.Append(session->token, "ws.open.reject", "unknown path: " + req->path);
     channel->send(api::Error("unknown websocket path"));
@@ -1024,6 +1275,17 @@ void ServerApp::HandleWsOpen(const WebSocketChannelPtr& channel, const HttpReque
         {"items", audit_logger_.Tail(300), true},
     });
     channel->send(snapshot);
+  } else if (channel_type == "dockurr") {
+    std::string error;
+    const auto vms = dockurr_manager_.ListVms(&error);
+    if (!error.empty()) {
+      channel->send(api::Success({
+          {"event", "dockurr_error", false},
+          {"error", error, false},
+      }));
+    } else {
+      channel->send(BuildDockurrSnapshotPayload(vms));
+    }
   }
 }
 
@@ -1045,6 +1307,8 @@ void ServerApp::HandleWsMessage(const WebSocketChannelPtr& channel, const std::s
     HandleWebRtcWsMessage(key, message);
   } else if (channel_type == "logs") {
     HandleLogsWsMessage(key, message);
+  } else if (channel_type == "dockurr") {
+    HandleDockurrWsMessage(key, message);
   } else {
     audit_logger_.AppendSystem("warn", "ws.message.reject", "unknown channel type");
   }
@@ -1381,6 +1645,61 @@ void ServerApp::BroadcastNativeFrames() {
   }
 }
 
+void ServerApp::BroadcastDockurrSnapshots() {
+  std::string last_snapshot_payload;
+  std::string last_error;
+  while (running_) {
+    std::vector<std::uintptr_t> channels;
+    {
+      std::lock_guard<std::mutex> lock(ws_mu_);
+      channels.reserve(ws_clients_.size());
+      for (const auto& [channel_key, client] : ws_clients_) {
+        if (client.channel_type == "dockurr" && client.channel) {
+          channels.push_back(channel_key);
+        }
+      }
+    }
+
+    if (channels.empty()) {
+      last_snapshot_payload.clear();
+      last_error.clear();
+      std::this_thread::sleep_for(std::chrono::milliseconds(kDockurrSnapshotIntervalMs));
+      continue;
+    }
+
+    std::string list_error;
+    const auto vms = dockurr_manager_.ListVms(&list_error);
+    if (!list_error.empty()) {
+      if (list_error != last_error) {
+        const std::string payload = api::Success({
+            {"event", "dockurr_error", false},
+            {"error", list_error, false},
+        });
+        const std::string log_payload =
+            BuildDockurrRuntimeLogPayload("error", "list", "snapshot failed: " + list_error);
+        for (const auto& channel_key : channels) {
+          SendToWs(channel_key, payload);
+          SendToWs(channel_key, log_payload);
+        }
+        last_error = list_error;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(kDockurrSnapshotIntervalMs));
+      continue;
+    }
+
+    const std::string payload = BuildDockurrSnapshotPayload(vms);
+    if (payload != last_snapshot_payload) {
+      for (const auto& channel_key : channels) {
+        SendToWs(channel_key, payload);
+      }
+      last_snapshot_payload = payload;
+    }
+    last_error.clear();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(kDockurrSnapshotIntervalMs));
+  }
+}
+
 void ServerApp::HandleWebRtcWsMessage(std::uintptr_t channel_key, const std::string& message) {
   const auto payload = ParseJsonOrNull(message);
   if (!payload.has_value() || !payload->is_object()) {
@@ -1655,6 +1974,225 @@ void ServerApp::HandleLogsWsMessage(std::uintptr_t channel_key, const std::strin
   }
 
   SendToWs(channel_key, api::Error("unknown logs action"));
+}
+
+void ServerApp::HandleDockurrWsMessage(std::uintptr_t channel_key, const std::string& message) {
+  const auto payload = ParseJsonOrNull(message);
+  if (!payload.has_value() || !payload->is_object()) {
+    SendToWs(channel_key, api::Error("invalid json payload"));
+    return;
+  }
+
+  WsClient client;
+  {
+    std::lock_guard<std::mutex> lock(ws_mu_);
+    auto it = ws_clients_.find(channel_key);
+    if (it == ws_clients_.end()) {
+      return;
+    }
+    client = it->second;
+  }
+
+  auto session = session_manager_.GetSession(client.session_token);
+  if (!session.has_value()) {
+    SendToWs(channel_key, api::Error("session expired", "unauthorized"));
+    return;
+  }
+  (void)session;
+
+  const std::string action = JsonString(payload, "action", "list");
+  const std::string request_id = JsonString(payload, "request_id");
+  const auto send_runtime_log =
+      [this, channel_key, &request_id](const std::string& level, const std::string& action_name,
+                                       const std::string& detail) {
+        SendToWs(channel_key, BuildDockurrRuntimeLogPayload(level, action_name, detail, request_id));
+      };
+
+  const auto send_action_result =
+      [this, channel_key, &action, &request_id](bool success, const std::string& error,
+                                                const std::vector<util::JsonField>& extra_fields = {}) {
+        std::vector<util::JsonField> fields{
+            {"event", "dockurr_action_result", false},
+            {"action", action, false},
+            {"request_id", request_id, false},
+            {"success", success ? "true" : "false", true},
+        };
+        if (!error.empty()) {
+          fields.push_back({"error", error, false});
+        }
+        fields.insert(fields.end(), extra_fields.begin(), extra_fields.end());
+        SendToWs(channel_key, api::Success(fields));
+      };
+
+  if (action == "list" || action == "snapshot") {
+    std::string error;
+    const auto vms = dockurr_manager_.ListVms(&error);
+    if (!error.empty()) {
+      send_runtime_log("error", action, error);
+      send_action_result(false, error);
+      return;
+    }
+    SendToWs(channel_key, BuildDockurrSnapshotPayload(vms));
+    send_runtime_log("info", action, "snapshot updated (" + std::to_string(vms.size()) + " vm)");
+    send_action_result(true, "");
+    return;
+  }
+
+  if (action == "stop" || action == "restart" || action == "logs" || action == "inspect") {
+    const std::string name = JsonString(payload, "name");
+    if (name.empty()) {
+      send_runtime_log("error", action, "name is required");
+      send_action_result(false, "name is required");
+      return;
+    }
+
+    send_runtime_log("info", action, "executing for vm: " + name);
+    std::string error;
+    if (action == "stop") {
+      if (!dockurr_manager_.StopVm(name, &error)) {
+        send_runtime_log("error", action, error);
+        send_action_result(false, error);
+        return;
+      }
+      audit_logger_.Append(client.session_token, "dockurr.stop", name);
+      send_runtime_log("info", action, "vm stopped: " + name);
+      send_action_result(true, "", {{"name", name, false}});
+    } else if (action == "restart") {
+      if (!dockurr_manager_.RestartVm(name, &error)) {
+        send_runtime_log("error", action, error);
+        send_action_result(false, error);
+        return;
+      }
+      audit_logger_.Append(client.session_token, "dockurr.restart", name);
+      send_runtime_log("info", action, "vm restarted: " + name);
+      send_action_result(true, "", {{"name", name, false}});
+    } else if (action == "logs") {
+      const int tail = std::clamp(JsonInt(payload, "tail", 50), 1, 500);
+      std::string logs;
+      if (!dockurr_manager_.GetLogs(name, tail, &logs, &error)) {
+        send_runtime_log("error", action, error);
+        send_action_result(false, error);
+        return;
+      }
+      send_runtime_log("info", action, "fetched " + std::to_string(tail) + " lines for " + name);
+      send_action_result(true, "", {
+                                      {"name", name, false},
+                                      {"logs", logs, false},
+                                  });
+    } else {
+      std::string inspect;
+      if (!dockurr_manager_.InspectVm(name, &inspect, &error)) {
+        send_runtime_log("error", action, error);
+        send_action_result(false, error);
+        return;
+      }
+      send_runtime_log("info", action, "inspect loaded for " + name);
+      send_action_result(true, "", {
+                                      {"name", name, false},
+                                      {"inspect", inspect, false},
+                                  });
+    }
+
+    std::string list_error;
+    const auto vms = dockurr_manager_.ListVms(&list_error);
+    if (list_error.empty()) {
+      SendToWs(channel_key, BuildDockurrSnapshotPayload(vms));
+    } else {
+      send_runtime_log("warn", action, "post-action snapshot failed: " + list_error);
+    }
+    return;
+  }
+
+  if (action == "create") {
+    dockurr::CreateVmRequest create_request;
+    create_request.os = ToLower(JsonString(payload, "os"));
+    create_request.version = JsonString(payload, "version");
+    create_request.ram_size = JsonString(payload, "ram", JsonString(payload, "ram_size", "4G"));
+    create_request.name = JsonString(payload, "name");
+    create_request.persistent = JsonBool(payload, "persist", JsonBool(payload, "persistent", false));
+    if (create_request.os.empty()) {
+      send_runtime_log("error", action, "os is required");
+      send_action_result(false, "os is required");
+      return;
+    }
+
+    send_runtime_log("info", action,
+                     "accepted request: os=" + create_request.os + ", version=" + create_request.version +
+                         ", ram=" + create_request.ram_size +
+                         ", persist=" + (create_request.persistent ? "true" : "false"));
+    send_action_result(true, "", {
+                                     {"accepted", "true", true},
+                                 });
+
+    std::thread([this, channel_key, request_id, create_request, session_token = client.session_token]() {
+      const auto emit_runtime_log = [this, channel_key, request_id](const std::string& level,
+                                                                     const std::string& action_name,
+                                                                     const std::string& detail) {
+        SendToWs(channel_key, BuildDockurrRuntimeLogPayload(level, action_name, detail, request_id));
+      };
+      const auto emit_startup_line = [this, channel_key, &request_id](const std::string& line) {
+        SendToWs(channel_key, api::Success({
+                                 {"event", "dockurr_startup_log", false},
+                                 {"ts", util::UtcNowIso8601(), false},
+                                 {"request_id", request_id, false},
+                                 {"line", line, false},
+                             }));
+      };
+
+      dockurr::VmInfo vm;
+      std::string create_error;
+      const bool created = dockurr_manager_.CreateVmWithStartupLogs(
+          create_request, kDockurrCreateLogWaitSeconds,
+          [emit_startup_line, emit_runtime_log](const std::string& line) {
+            emit_startup_line(line);
+            emit_runtime_log("info", "create.startup", line);
+          },
+          &vm, &create_error);
+      if (!created) {
+        emit_runtime_log("error", "create", create_error);
+        SendToWs(channel_key, api::Success({
+                                 {"event", "dockurr_action_result", false},
+                                 {"action", "create", false},
+                                 {"request_id", request_id, false},
+                                 {"success", "false", true},
+                                 {"error", create_error, false},
+                             }));
+      } else {
+        audit_logger_.Append(session_token, "dockurr.create",
+                             vm.name + " (" + create_request.os + " " + create_request.version + ")");
+        emit_runtime_log("info", "create",
+                         "vm created: " + vm.name + ", novnc_port=" +
+                             (vm.novnc_port.empty() ? "pending" : vm.novnc_port));
+        SendToWs(channel_key, api::Success({
+                                 {"event", "dockurr_action_result", false},
+                                 {"action", "create", false},
+                                 {"request_id", request_id, false},
+                                 {"success", "true", true},
+                                 {"accepted", "false", true},
+                                 {"vm", SerializeDockurrVm(vm), true},
+                             }));
+      }
+
+      std::string list_error;
+      const auto vms = dockurr_manager_.ListVms(&list_error);
+      if (list_error.empty()) {
+        SendToWs(channel_key, BuildDockurrSnapshotPayload(vms));
+      } else {
+        emit_runtime_log("warn", "create", "post-create snapshot failed: " + list_error);
+      }
+
+      SendToWs(channel_key, api::Success({
+                               {"event", "dockurr_startup_done", false},
+                               {"ts", util::UtcNowIso8601(), false},
+                               {"request_id", request_id, false},
+                               {"success", created ? "true" : "false", true},
+                           }));
+    }).detach();
+    return;
+  }
+
+  send_runtime_log("error", action, "unknown dockurr action");
+  send_action_result(false, "unknown dockurr action");
 }
 
 #endif

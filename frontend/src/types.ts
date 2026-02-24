@@ -30,3 +30,15 @@ export type ScreenSource = {
   height: number;
   is_default: boolean;
 };
+
+export type DockurrVmInfo = {
+  id: string;
+  name: string;
+  os: "windows" | "macos" | string;
+  image: string;
+  ports: string;
+  running_for: string;
+  persistent: boolean;
+  novnc_port: string;
+  desktop_port: string;
+};
