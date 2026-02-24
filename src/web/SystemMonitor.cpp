@@ -20,6 +20,9 @@
 #include <thread>
 
 #if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #elif defined(__APPLE__)
 #include <mach/mach.h>
@@ -294,7 +297,7 @@ double SystemMonitor::CpuUsagePercent(const CpuTimes& previous, const CpuTimes& 
   if (total_delta == 0) {
     return 0.0;
   }
-  const double active = static_cast<double>(total_delta - std::min(total_delta, idle_delta));
+  const double active = static_cast<double>(total_delta - (std::min)(total_delta, idle_delta));
   return ClampPercent(active * 100.0 / static_cast<double>(total_delta));
 }
 
@@ -611,7 +614,7 @@ bool SystemMonitor::ReadMemoryStats(uint64_t* total_bytes, uint64_t* used_bytes,
   const uint64_t used_estimate = total > free_estimate ? (total - free_estimate) : 0;
 
   *total_bytes = total;
-  *used_bytes = std::min(total, used_estimate);
+  *used_bytes = (std::min)(total, used_estimate);
   *free_bytes = total - *used_bytes;
   return true;
 #elif defined(__linux__)
