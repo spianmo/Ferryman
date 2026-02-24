@@ -160,6 +160,7 @@ export type CreateDockurrVmPayload = {
   os: "windows" | "macos";
   version: string;
   ram: string;
+  disk: string;
   name?: string;
   persist: boolean;
 };

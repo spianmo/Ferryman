@@ -58,6 +58,10 @@ const MACOS_VERSIONS: VersionOption[] = [
 ];
 
 const MAX_STARTUP_LINES = 800;
+const RAM_MIN_GB = 1;
+const RAM_MAX_GB = 64;
+const DISK_MIN_GB = 16;
+const DISK_MAX_GB = 512;
 
 const actionButtonClass =
   "inline-flex h-8 items-center gap-1 rounded-xl px-2.5 text-xs font-semibold transition-colors";
@@ -161,6 +165,11 @@ function makeRequestId(action: string) {
   return `${action}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function clampInt(value: number, min: number, max: number) {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+
 export default function DockurrPage({ session }: Props) {
   const { t } = useI18n();
   const socket = useMemo(() => getDockurrSocket(), []);
@@ -172,7 +181,8 @@ export default function DockurrPage({ session }: Props) {
 
   const [os, setOs] = useState<"windows" | "macos">("windows");
   const [version, setVersion] = useState(WINDOWS_VERSIONS[0]?.value ?? "11");
-  const [ram, setRam] = useState("4G");
+  const [ramGb, setRamGb] = useState(4);
+  const [diskGb, setDiskGb] = useState(64);
   const [name, setName] = useState("");
   const [persist, setPersist] = useState(false);
   const [createLoading, setCreateLoading] = useState(false);
@@ -434,10 +444,13 @@ export default function DockurrPage({ session }: Props) {
     setCreateLoading(true);
     pendingCreateNameRef.current = name.trim();
     appendRuntimeLog("info", "create", t("dockurr.startup_submitted"), new Date().toISOString());
+    const ram = `${clampInt(ramGb, RAM_MIN_GB, RAM_MAX_GB)}G`;
+    const disk = `${clampInt(diskGb, DISK_MIN_GB, DISK_MAX_GB)}G`;
     const requestId = sendAction("create", {
       os,
       version,
       ram,
+      disk,
       name: name.trim(),
       persist,
     });
@@ -700,13 +713,80 @@ export default function DockurrPage({ session }: Props) {
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <label className="text-xs font-semibold text-slate-600 dark:text-neutral-300">
                 {t("dockurr.ram")}
-                <input
-                  value={ram}
-                  onChange={(event) => setRam(event.target.value)}
-                  className="mt-1 w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none placeholder:text-slate-400 focus:border-slate-300 dark:border-neutral-800 dark:bg-neutral-950/40 dark:text-neutral-50 dark:placeholder:text-neutral-500 dark:focus:border-neutral-700"
-                />
+                <div className="mt-1 flex items-center gap-2">
+                  <input
+                    type="range"
+                    min={RAM_MIN_GB}
+                    max={RAM_MAX_GB}
+                    step={1}
+                    value={ramGb}
+                    onChange={(event) =>
+                      setRamGb(clampInt(event.currentTarget.valueAsNumber, RAM_MIN_GB, RAM_MAX_GB))
+                    }
+                    className="h-2 w-full cursor-pointer accent-slate-900 dark:accent-neutral-200"
+                  />
+                  <div className="relative w-24 shrink-0">
+                    <input
+                      type="number"
+                      min={RAM_MIN_GB}
+                      max={RAM_MAX_GB}
+                      step={1}
+                      value={ramGb}
+                      onChange={(event) =>
+                        setRamGb(clampInt(event.currentTarget.valueAsNumber, RAM_MIN_GB, RAM_MAX_GB))
+                      }
+                      className="w-full rounded-2xl border border-slate-200 bg-white py-2 pl-3 pr-9 text-sm text-slate-900 shadow-sm outline-none focus:border-slate-300 dark:border-neutral-800 dark:bg-neutral-950/40 dark:text-neutral-50 dark:focus:border-neutral-700"
+                    />
+                    <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[11px] text-slate-500 dark:text-neutral-400">
+                      GB
+                    </span>
+                  </div>
+                </div>
+                <div className="mt-1 flex items-center justify-between text-[11px] text-slate-500 dark:text-neutral-400">
+                  <span>{RAM_MIN_GB} GB</span>
+                  <span>{RAM_MAX_GB} GB</span>
+                </div>
               </label>
 
+              <label className="text-xs font-semibold text-slate-600 dark:text-neutral-300">
+                {t("dockurr.disk")}
+                <div className="mt-1 flex items-center gap-2">
+                  <input
+                    type="range"
+                    min={DISK_MIN_GB}
+                    max={DISK_MAX_GB}
+                    step={1}
+                    value={diskGb}
+                    onChange={(event) =>
+                      setDiskGb(clampInt(event.currentTarget.valueAsNumber, DISK_MIN_GB, DISK_MAX_GB))
+                    }
+                    className="h-2 w-full cursor-pointer accent-slate-900 dark:accent-neutral-200"
+                  />
+                  <div className="relative w-24 shrink-0">
+                    <input
+                      type="number"
+                      min={DISK_MIN_GB}
+                      max={DISK_MAX_GB}
+                      step={1}
+                      value={diskGb}
+                      onChange={(event) =>
+                        setDiskGb(clampInt(event.currentTarget.valueAsNumber, DISK_MIN_GB, DISK_MAX_GB))
+                      }
+                      className="w-full rounded-2xl border border-slate-200 bg-white py-2 pl-3 pr-9 text-sm text-slate-900 shadow-sm outline-none focus:border-slate-300 dark:border-neutral-800 dark:bg-neutral-950/40 dark:text-neutral-50 dark:focus:border-neutral-700"
+                    />
+                    <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[11px] text-slate-500 dark:text-neutral-400">
+                      GB
+                    </span>
+                  </div>
+                </div>
+                <div className="mt-1 flex items-center justify-between text-[11px] text-slate-500 dark:text-neutral-400">
+                  <span>{DISK_MIN_GB} GB</span>
+                  <span>{DISK_MAX_GB} GB</span>
+                </div>
+              </label>
+            </div>
+
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <label className="text-xs font-semibold text-slate-600 dark:text-neutral-300">
                 {t("dockurr.name")}
                 <input

@@ -800,6 +800,7 @@ int ServerApp::HandleDockurrCreate(HttpRequest* req, HttpResponse* resp) {
   create_request.os = ToLower(JsonString(payload, "os"));
   create_request.version = JsonString(payload, "version");
   create_request.ram_size = JsonString(payload, "ram", JsonString(payload, "ram_size", "4G"));
+  create_request.disk_size = JsonString(payload, "disk", JsonString(payload, "disk_size", "64G"));
   create_request.name = JsonString(payload, "name");
   create_request.persistent = JsonBool(payload, "persist", JsonBool(payload, "persistent", false));
 
@@ -2154,6 +2155,7 @@ void ServerApp::HandleDockurrWsMessage(std::uintptr_t channel_key, const std::st
     create_request.os = ToLower(JsonString(payload, "os"));
     create_request.version = JsonString(payload, "version");
     create_request.ram_size = JsonString(payload, "ram", JsonString(payload, "ram_size", "4G"));
+    create_request.disk_size = JsonString(payload, "disk", JsonString(payload, "disk_size", "64G"));
     create_request.name = JsonString(payload, "name");
     create_request.persistent = JsonBool(payload, "persist", JsonBool(payload, "persistent", false));
     if (create_request.os.empty()) {
@@ -2165,6 +2167,7 @@ void ServerApp::HandleDockurrWsMessage(std::uintptr_t channel_key, const std::st
     send_runtime_log("info", action,
                      "accepted request: os=" + create_request.os + ", version=" + create_request.version +
                          ", ram=" + create_request.ram_size +
+                         ", disk=" + create_request.disk_size +
                          ", persist=" + (create_request.persistent ? "true" : "false"));
     send_action_result(true, "", {
                                      {"accepted", "true", true},

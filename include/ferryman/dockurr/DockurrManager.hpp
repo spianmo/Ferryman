@@ -23,6 +23,7 @@ struct CreateVmRequest {
   std::string os;
   std::string version;
   std::string ram_size = "4G";
+  std::string disk_size = "64G";
   std::string name;
   bool persistent = false;
 };

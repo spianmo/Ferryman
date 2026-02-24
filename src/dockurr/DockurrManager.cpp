@@ -495,6 +495,10 @@ bool DockurrManager::CreateVm(const CreateVmRequest& request, VmInfo* created_vm
   if (ram_size.empty()) {
     ram_size = "4G";
   }
+  std::string disk_size = util::Trim(request.disk_size);
+  if (disk_size.empty()) {
+    disk_size = "64G";
+  }
 
   std::string name = util::Trim(request.name);
   if (name.empty()) {
@@ -534,6 +538,8 @@ bool DockurrManager::CreateVm(const CreateVmRequest& request, VmInfo* created_vm
   run_command.push_back("VERSION=" + version);
   run_command.push_back("-e");
   run_command.push_back("RAM_SIZE=" + ram_size);
+  run_command.push_back("-e");
+  run_command.push_back("DISK_SIZE=" + disk_size);
   run_command.push_back(image);
 
   CommandResult run_result;
