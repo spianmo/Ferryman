@@ -30,6 +30,8 @@ const char* VideoCodecToken(VideoCodec codec) {
       return "vp8";
     case VideoCodec::kVP9:
       return "vp9";
+    case VideoCodec::kAV1:
+      return "av1";
   }
   return "unknown";
 }
@@ -44,6 +46,8 @@ const char* VideoCodecDisplayName(VideoCodec codec) {
       return "VP8";
     case VideoCodec::kVP9:
       return "VP9";
+    case VideoCodec::kAV1:
+      return "AV1";
   }
   return "unknown";
 }
@@ -60,6 +64,12 @@ AVCodecID ToAvCodecId(VideoCodec codec) {
       return AV_CODEC_ID_VP8;
     case VideoCodec::kVP9:
       return AV_CODEC_ID_VP9;
+    case VideoCodec::kAV1:
+#ifdef AV_CODEC_ID_AV1
+      return AV_CODEC_ID_AV1;
+#else
+      return AV_CODEC_ID_NONE;
+#endif
   }
   return AV_CODEC_ID_NONE;
 }
@@ -70,6 +80,8 @@ const char* VideoToolboxEncoderName(VideoCodec codec) {
       return "h264_videotoolbox";
     case VideoCodec::kH265:
       return "hevc_videotoolbox";
+    case VideoCodec::kAV1:
+      return "av1_videotoolbox";
     case VideoCodec::kVP8:
     case VideoCodec::kVP9:
       return "";
@@ -226,6 +238,7 @@ class FfmpegVideoEncoder final : public VideoEncoder {
           break;
         case VideoCodec::kVP8:
         case VideoCodec::kVP9:
+        case VideoCodec::kAV1:
           break;
       }
 

@@ -8,17 +8,17 @@ import type {
 import { FiMaximize, FiMinimize, FiMonitor, FiPause, FiPlay } from "react-icons/fi";
 import { createPortal } from "react-dom";
 
-import { emitUnauthorized, getScreenCapabilities, wsUrl } from "../api/client";
+import { emitUnauthorized, getScreenCapabilities, getScreenSources, wsUrl } from "../api/client";
 import { useI18n } from "../i18n";
 import { toast } from "../toast";
-import type { SessionInfo } from "../types";
+import type { ScreenSource, SessionInfo } from "../types";
 import { cn } from "../util/cn";
 
 type Props = {
   session: SessionInfo;
 };
 
-type NativeCodec = "jpeg" | "h264" | "h265" | "vp8" | "vp9";
+type NativeCodec = "jpeg" | "h264" | "h265" | "vp8" | "vp9" | "av1";
 type ResolutionTier = "full" | "balanced" | "performance";
 type BitrateTier = "sd" | "hd" | "uhd";
 
@@ -34,6 +34,7 @@ const H264_WEBCODECS_CODEC = "avc1.42E01E";
 const H265_WEBCODECS_CODEC = "hvc1.1.6.L93.B0";
 const VP8_WEBCODECS_CODEC = "vp8";
 const VP9_WEBCODECS_CODEC = "vp09.00.10.08";
+const AV1_WEBCODECS_CODEC = "av01.0.08M.08";
 const H265_WEBCODECS_CODEC_CANDIDATES = [
   "hvc1.1.6.L123.B0",
   "hev1.1.6.L123.B0",
@@ -44,6 +45,11 @@ const VP9_WEBCODECS_CODEC_CANDIDATES = [
   VP9_WEBCODECS_CODEC,
   "vp09.00.10.10",
   "vp09.00.10.08.01.01.01.01.00",
+] as const;
+const AV1_WEBCODECS_CODEC_CANDIDATES = [
+  AV1_WEBCODECS_CODEC,
+  "av01.0.05M.08",
+  "av01.0.04M.08",
 ] as const;
 const MAX_DECODE_QUEUE_SIZE = 3;
 
@@ -100,6 +106,26 @@ function isBitrateTier(value: string): value is BitrateTier {
   return value === "sd" || value === "hd" || value === "uhd";
 }
 
+function parseScreenSource(value: unknown): ScreenSource | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const raw = value as Record<string, unknown>;
+  const id = String(raw.id ?? "");
+  if (!id) {
+    return null;
+  }
+  const widthRaw = Number(raw.width ?? 0);
+  const heightRaw = Number(raw.height ?? 0);
+  return {
+    id,
+    name: String(raw.name ?? id),
+    width: Number.isFinite(widthRaw) && widthRaw > 0 ? Math.round(widthRaw) : 0,
+    height: Number.isFinite(heightRaw) && heightRaw > 0 ? Math.round(heightRaw) : 0,
+    is_default: raw.is_default === true || raw.is_default === "true" || raw.is_default === 1 || raw.is_default === "1",
+  };
+}
+
 function parseNativeBinaryFrame(buffer: ArrayBuffer): NativeBinaryFrame | null {
   if (buffer.byteLength < NATIVE_BINARY_HEADER_BYTES) {
     return null;
@@ -112,7 +138,9 @@ function parseNativeBinaryFrame(buffer: ArrayBuffer): NativeBinaryFrame | null {
 
   const codecByte = view.getUint8(4);
   let codec: NativeCodec | null = null;
-  if (codecByte === 5) {
+  if (codecByte === 6) {
+    codec = "av1";
+  } else if (codecByte === 5) {
     codec = "vp9";
   } else if (codecByte === 4) {
     codec = "vp8";
@@ -351,6 +379,9 @@ function waitForFullscreenState(targetIsFullscreen: boolean, timeoutMs = 450): P
 export default function ScreenPage({ session }: Props) {
   const { t } = useI18n();
   const wsRef = useRef<WebSocket | null>(null);
+  const selectedScreenSourceIdRef = useRef("");
+  const defaultScreenSourceIdRef = useRef("");
+  const fallbackToastSourceIdRef = useRef("");
   const nativeSurfaceRef = useRef<HTMLDivElement | null>(null);
   const nativeCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const nativeDecoderRef = useRef<VideoDecoder | null>(null);
@@ -359,10 +390,12 @@ export default function ScreenPage({ session }: Props) {
   const supportedH265CodecRef = useRef<string | null>(null);
   const supportedVP8CodecRef = useRef<string | null>(VP8_WEBCODECS_CODEC);
   const supportedVP9CodecRef = useRef<string | null>(null);
+  const supportedAV1CodecRef = useRef<string | null>(null);
   const supportsH264DecodeRef = useRef<boolean | null>(null);
   const supportsH265DecodeRef = useRef<boolean | null>(null);
   const supportsVP8DecodeRef = useRef<boolean | null>(null);
   const supportsVP9DecodeRef = useRef<boolean | null>(null);
+  const supportsAV1DecodeRef = useRef<boolean | null>(null);
   const nativeDecoderWidthRef = useRef(0);
   const nativeDecoderHeightRef = useRef(0);
   const nativeFrameWidthRef = useRef(0);
@@ -396,6 +429,9 @@ export default function ScreenPage({ session }: Props) {
       }
       if (stored === "vp9" && hasWebCodecs) {
         return "vp9";
+      }
+      if (stored === "av1" && hasWebCodecs) {
+        return "av1";
       }
       if (stored === "vp8" && hasWebCodecs) {
         return "vp8";
@@ -439,6 +475,9 @@ export default function ScreenPage({ session }: Props) {
     const stored = window.localStorage.getItem(NATIVE_BITRATE_STORAGE_KEY) ?? "";
     return isBitrateTier(stored) ? stored : "hd";
   });
+  const [screenSources, setScreenSources] = useState<ScreenSource[]>([]);
+  const [screenSourcesLoading, setScreenSourcesLoading] = useState(true);
+  const [selectedScreenSourceId, setSelectedScreenSourceId] = useState("");
   const [nativeHasFrame, setNativeHasFrame] = useState(false);
   const [nativeFrameUrl, setNativeFrameUrl] = useState("");
   const [nativeActualFps, setNativeActualFps] = useState(0);
@@ -539,6 +578,10 @@ export default function ScreenPage({ session }: Props) {
     return probeDecodeSupport(VP9_WEBCODECS_CODEC_CANDIDATES, supportsVP9DecodeRef, supportedVP9CodecRef);
   };
 
+  const supportsAV1Decode = () => {
+    return probeDecodeSupport(AV1_WEBCODECS_CODEC_CANDIDATES, supportsAV1DecodeRef, supportedAV1CodecRef);
+  };
+
   const supportsNativeVideoCodec = (codec: NativeCodec): boolean => {
     if (codec === "h264") {
       return supportsH264Decode();
@@ -551,6 +594,9 @@ export default function ScreenPage({ session }: Props) {
     }
     if (codec === "vp9") {
       return supportsVP9Decode();
+    }
+    if (codec === "av1") {
+      return supportsAV1Decode();
     }
     return true;
   };
@@ -570,6 +616,9 @@ export default function ScreenPage({ session }: Props) {
     }
     if (supportsVP9Decode()) {
       return "vp9";
+    }
+    if (supportsAV1Decode()) {
+      return "av1";
     }
     return "jpeg";
   };
@@ -745,6 +794,88 @@ export default function ScreenPage({ session }: Props) {
   }, [session.token]);
 
   useEffect(() => {
+    selectedScreenSourceIdRef.current = selectedScreenSourceId;
+    if (
+      selectedScreenSourceId.length === 0 ||
+      selectedScreenSourceId !== defaultScreenSourceIdRef.current
+    ) {
+      fallbackToastSourceIdRef.current = "";
+    }
+  }, [selectedScreenSourceId]);
+
+  useEffect(() => {
+    let active = true;
+    setScreenSourcesLoading(true);
+    void (async () => {
+      try {
+        const response = await getScreenSources(session.token);
+        if (!active || !response.ok) {
+          return;
+        }
+        const nextSources = Array.isArray(response.sources)
+          ? response.sources.map((item) => parseScreenSource(item)).filter((item): item is ScreenSource => item !== null)
+          : [];
+        setScreenSources(nextSources);
+
+        const responseActiveSourceId = String(response.active_source_id ?? "");
+        const responseDefaultSourceId = String(response.default_source_id ?? "");
+        const previousSourceId = selectedScreenSourceIdRef.current;
+        const resolvedDefaultSourceId = nextSources.some((item) => item.id === responseDefaultSourceId)
+          ? responseDefaultSourceId
+          : nextSources.find((item) => item.is_default)?.id ?? nextSources[0]?.id ?? "";
+        defaultScreenSourceIdRef.current = resolvedDefaultSourceId;
+        const fallbackSourceId =
+          nextSources.find((item) => item.is_default)?.id ?? nextSources[0]?.id ?? "";
+        const nextSourceId = nextSources.some((item) => item.id === previousSourceId)
+          ? previousSourceId
+          : nextSources.some((item) => item.id === responseActiveSourceId)
+          ? responseActiveSourceId
+          : nextSources.some((item) => item.id === responseDefaultSourceId)
+            ? responseDefaultSourceId
+            : fallbackSourceId;
+        const sourceWentOffline =
+          previousSourceId.length > 0 &&
+          !nextSources.some((item) => item.id === previousSourceId) &&
+          nextSourceId.length > 0 &&
+          nextSourceId !== previousSourceId;
+        if (
+          sourceWentOffline &&
+          nextSourceId === resolvedDefaultSourceId &&
+          fallbackToastSourceIdRef.current !== previousSourceId
+        ) {
+          fallbackToastSourceIdRef.current = previousSourceId;
+          toast.info(t("screen.source_fallback_default"));
+        }
+        setSelectedScreenSourceId(nextSourceId);
+      } catch {
+        // Keep existing source list on transient failures.
+      } finally {
+        if (active) {
+          setScreenSourcesLoading(false);
+        }
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [session.token, t]);
+
+  useEffect(() => {
+    if (screenSources.length === 0) {
+      if (selectedScreenSourceId !== "") {
+        setSelectedScreenSourceId("");
+      }
+      return;
+    }
+    if (screenSources.some((item) => item.id === selectedScreenSourceId)) {
+      return;
+    }
+    const fallbackSourceId =
+      screenSources.find((item) => item.is_default)?.id ?? screenSources[0]?.id ?? "";
+    setSelectedScreenSourceId(fallbackSourceId);
+  }, [screenSources, selectedScreenSourceId]);
+
+  useEffect(() => {
     if (!nativeStreaming) {
       return;
     }
@@ -873,6 +1004,13 @@ export default function ScreenPage({ session }: Props) {
       : (bitrateOptions[0]?.id ?? "hd");
   };
 
+  const requestedNativeSourceId = (): string => {
+    if (screenSources.some((item) => item.id === selectedScreenSourceId)) {
+      return selectedScreenSourceId;
+    }
+    return screenSources.find((item) => item.is_default)?.id ?? screenSources[0]?.id ?? "";
+  };
+
   const decoderCodecFor = (codec: NativeCodec): string | null => {
     if (codec === "h264") {
       if (!supportsH264Decode()) {
@@ -897,6 +1035,12 @@ export default function ScreenPage({ session }: Props) {
         return null;
       }
       return supportedVP9CodecRef.current ?? VP9_WEBCODECS_CODEC;
+    }
+    if (codec === "av1") {
+      if (!supportsAV1Decode()) {
+        return null;
+      }
+      return supportedAV1CodecRef.current ?? AV1_WEBCODECS_CODEC;
     }
     return null;
   };
@@ -928,7 +1072,8 @@ export default function ScreenPage({ session }: Props) {
       frame.codec === "h264" ||
       frame.codec === "h265" ||
       frame.codec === "vp8" ||
-      frame.codec === "vp9"
+      frame.codec === "vp9" ||
+      frame.codec === "av1"
     ) {
       const decoderCodec = decoderCodecFor(frame.codec);
       if (!decoderCodec) {
@@ -1019,6 +1164,7 @@ export default function ScreenPage({ session }: Props) {
       if (nativeWantedRef.current) {
         send({
           action: "native_subscribe",
+          source_id: requestedNativeSourceId(),
           codec: requestedNativeCodec(),
           fps: requestedNativeFps(),
           resolution_tier: requestedResolutionTier(),
@@ -1082,8 +1228,11 @@ export default function ScreenPage({ session }: Props) {
       const eventType = String(payload.event ?? "");
       if (eventType === "native_subscribed") {
         const negotiatedCodec = String(payload.codec ?? "");
+        const negotiatedSourceId = String(payload.source_id ?? "");
         const nextCodec: NativeCodec =
-          negotiatedCodec === "vp9" && supportsVP9Decode()
+          negotiatedCodec === "av1" && supportsAV1Decode()
+            ? "av1"
+            : negotiatedCodec === "vp9" && supportsVP9Decode()
             ? "vp9"
             : negotiatedCodec === "vp8" && supportsVP8Decode()
               ? "vp8"
@@ -1099,6 +1248,20 @@ export default function ScreenPage({ session }: Props) {
         }
         if (isBitrateTier(negotiatedBitrateTier)) {
           setPreferredBitrateTier(negotiatedBitrateTier);
+        }
+        if (negotiatedSourceId.length > 0) {
+          const currentSourceId = selectedScreenSourceIdRef.current;
+          const defaultSourceId = defaultScreenSourceIdRef.current;
+          if (
+            currentSourceId.length > 0 &&
+            currentSourceId !== negotiatedSourceId &&
+            negotiatedSourceId === defaultSourceId &&
+            fallbackToastSourceIdRef.current !== currentSourceId
+          ) {
+            fallbackToastSourceIdRef.current = currentSourceId;
+            toast.info(t("screen.source_fallback_default"));
+          }
+          setSelectedScreenSourceId(negotiatedSourceId);
         }
         nativeWantedRef.current = true;
         setNativeStreaming(true);
@@ -1122,13 +1285,16 @@ export default function ScreenPage({ session }: Props) {
         return;
       }
       if (
+        eventType === "native_av1" ||
         eventType === "native_h264" ||
         eventType === "native_h265" ||
         eventType === "native_vp8" ||
         eventType === "native_vp9"
       ) {
         const streamCodec: NativeCodec =
-          eventType === "native_h265"
+          eventType === "native_av1"
+            ? "av1"
+            : eventType === "native_h265"
             ? "h265"
             : eventType === "native_vp8"
               ? "vp8"
@@ -1136,7 +1302,9 @@ export default function ScreenPage({ session }: Props) {
                 ? "vp9"
                 : "h264";
         const frame = String(
-          streamCodec === "h265"
+          streamCodec === "av1"
+            ? payload.av1_base64 ?? ""
+            : streamCodec === "h265"
             ? payload.h265_base64 ?? ""
             : streamCodec === "vp8"
               ? payload.vp8_base64 ?? ""
@@ -1174,7 +1342,9 @@ export default function ScreenPage({ session }: Props) {
               ? hasH264Idr(bytes)
               : streamCodec === "vp8"
                 ? hasVp8Keyframe(bytes)
-                : hasVp9Keyframe(bytes)
+                : streamCodec === "vp9"
+                  ? hasVp9Keyframe(bytes)
+                  : false
         );
         if (!isKeyframe && !nativeDecoderSawKeyRef.current) {
           return;
@@ -1243,6 +1413,12 @@ export default function ScreenPage({ session }: Props) {
 
   const toggleNativeStreaming = () => {
     const nextWanted = !nativeWantedRef.current;
+    if (nextWanted && !requestedNativeSourceId()) {
+      setStatus(t("screen.source_empty"));
+      setDotState("error");
+      nativeWantedRef.current = false;
+      return;
+    }
     nativeWantedRef.current = nextWanted;
     setDotState(nextWanted ? "connecting" : "idle");
 
@@ -1265,6 +1441,7 @@ export default function ScreenPage({ session }: Props) {
         nextWanted
           ? {
             action: "native_subscribe",
+            source_id: requestedNativeSourceId(),
             codec: requestedNativeCodec(),
             fps: requestedNativeFps(),
             resolution_tier: requestedResolutionTier(),
@@ -1294,7 +1471,9 @@ export default function ScreenPage({ session }: Props) {
   const onNativeCodecChange = (event: ReactChangeEvent<HTMLSelectElement>) => {
     const rawValue = event.target.value;
     const nextCodec: NativeCodec =
-      rawValue === "vp9"
+      rawValue === "av1"
+        ? "av1"
+        : rawValue === "vp9"
         ? "vp9"
         : rawValue === "vp8"
           ? "vp8"
@@ -1316,6 +1495,7 @@ export default function ScreenPage({ session }: Props) {
     const requestedCodec = requestedNativeCodecFor(nextCodec);
     send({
       action: "native_subscribe",
+      source_id: requestedNativeSourceId(),
       codec: requestedCodec,
       fps: requestedNativeFps(),
       resolution_tier: requestedResolutionTier(),
@@ -1335,6 +1515,7 @@ export default function ScreenPage({ session }: Props) {
     setDotState("connecting");
     send({
       action: "native_subscribe",
+      source_id: requestedNativeSourceId(),
       codec: requestedNativeCodec(),
       fps: nextFps,
       resolution_tier: requestedResolutionTier(),
@@ -1357,6 +1538,7 @@ export default function ScreenPage({ session }: Props) {
     resetNativeFrameState();
     send({
       action: "native_subscribe",
+      source_id: requestedNativeSourceId(),
       codec: requestedNativeCodec(),
       fps: requestedNativeFps(),
       resolution_tier: nextTier,
@@ -1378,10 +1560,32 @@ export default function ScreenPage({ session }: Props) {
     setDotState("connecting");
     send({
       action: "native_subscribe",
+      source_id: requestedNativeSourceId(),
       codec: requestedNativeCodec(),
       fps: requestedNativeFps(),
       resolution_tier: requestedResolutionTier(),
       bitrate_tier: nextTier,
+    });
+  };
+
+  const onNativeSourceChange = (event: ReactChangeEvent<HTMLSelectElement>) => {
+    const nextSourceId = event.target.value;
+    setSelectedScreenSourceId(nextSourceId);
+
+    const ws = wsRef.current;
+    if (!nativeWantedRef.current || !ws || ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    setDotState("connecting");
+    resetNativeFrameState();
+    closeNativeDecoder();
+    send({
+      action: "native_subscribe",
+      source_id: nextSourceId,
+      codec: requestedNativeCodec(),
+      fps: requestedNativeFps(),
+      resolution_tier: requestedResolutionTier(),
+      bitrate_tier: requestedBitrateTier(),
     });
   };
 
@@ -1549,6 +1753,9 @@ export default function ScreenPage({ session }: Props) {
   };
 
   const screenIsFullscreen = nativeFullscreen || nativePseudoFullscreen;
+  const requestedSourceId = requestedNativeSourceId();
+  const hasScreenSources = screenSources.length > 0;
+  const disableNativeStart = !nativeStreaming && (!hasScreenSources || screenSourcesLoading);
 
   const renderNativeSurface = () => (
     <div
@@ -1674,6 +1881,27 @@ export default function ScreenPage({ session }: Props) {
         </div>
 
         <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:flex-row sm:items-center lg:w-auto lg:flex-wrap">
+          <label className="col-span-2 flex h-10 w-full items-center justify-between gap-2 rounded-2xl bg-slate-100 px-3 text-xs font-semibold text-slate-600 sm:col-span-1 sm:w-auto dark:bg-neutral-800 dark:text-neutral-200">
+            <span>{t("screen.source")}</span>
+            <select
+              className="h-7 min-w-[14rem] rounded-lg border border-slate-200 bg-white px-2 text-xs font-semibold text-slate-700 outline-none focus:border-slate-400 disabled:cursor-not-allowed disabled:opacity-70 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100"
+              value={requestedSourceId}
+              onChange={onNativeSourceChange}
+              disabled={screenSourcesLoading || !hasScreenSources}
+            >
+              {screenSourcesLoading ? (
+                <option value="">{t("screen.source_loading")}</option>
+              ) : !hasScreenSources ? (
+                <option value="">{t("screen.source_empty")}</option>
+              ) : (
+                screenSources.map((source) => (
+                  <option key={source.id} value={source.id}>
+                    {source.name || source.id}
+                  </option>
+                ))
+              )}
+            </select>
+          </label>
           <label className="flex h-10 w-full items-center justify-between gap-2 rounded-2xl bg-slate-100 px-3 text-xs font-semibold text-slate-600 sm:w-auto dark:bg-neutral-800 dark:text-neutral-200">
             <span>{t("screen.codec")}</span>
             <select
@@ -1682,6 +1910,9 @@ export default function ScreenPage({ session }: Props) {
               onChange={onNativeCodecChange}
             >
               <option value="jpeg">{t("screen.codec_jpeg")}</option>
+              <option value="av1" disabled={!supportsAV1Decode()}>
+                {t("screen.codec_av1")}
+              </option>
               <option value="h264" disabled={!supportsH264Decode()}>
                 {t("screen.codec_h264")}
               </option>
@@ -1739,8 +1970,9 @@ export default function ScreenPage({ session }: Props) {
             </select>
           </label>
           <button
-            className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-2xl bg-slate-900 px-4 text-sm font-semibold text-white shadow-sm hover:bg-slate-800 sm:w-auto dark:bg-neutral-50 dark:text-neutral-900 dark:hover:bg-white"
+            className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-2xl bg-slate-900 px-4 text-sm font-semibold text-white shadow-sm hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto dark:bg-neutral-50 dark:text-neutral-900 dark:hover:bg-white"
             onClick={toggleNativeStreaming}
+            disabled={disableNativeStart}
           >
             {nativeStreaming ? <FiPause /> : <FiPlay />}{" "}
             {nativeStreaming ? t("screen.native_stop") : t("screen.native_start")}

@@ -162,6 +162,7 @@ if(APPLE)
     "-framework CoreVideo"
     "-framework Foundation"
     "-framework ImageIO"
+    "-framework IOKit"
     "-framework ScreenCaptureKit"
   )
 endif()

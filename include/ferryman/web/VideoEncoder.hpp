@@ -11,6 +11,7 @@ enum class VideoCodec {
   kH265,
   kVP8,
   kVP9,
+  kAV1,
 };
 
 const char* VideoCodecName(VideoCodec codec);

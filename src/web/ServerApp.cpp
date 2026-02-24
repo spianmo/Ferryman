@@ -35,6 +35,7 @@ constexpr uint8_t kNativeBinaryCodecH264 = 2;
 constexpr uint8_t kNativeBinaryCodecH265 = 3;
 constexpr uint8_t kNativeBinaryCodecVP8 = 4;
 constexpr uint8_t kNativeBinaryCodecVP9 = 5;
+constexpr uint8_t kNativeBinaryCodecAV1 = 6;
 
 std::string ToLower(std::string value) {
   std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
@@ -259,7 +260,7 @@ bool ServerApp::Start() {
     running_ = false;
     return false;
   }
-  screen_service_.SetEncodingTargets(false, false, false, false, false);
+  screen_service_.SetEncodingTargets(false, false, false, false, false, false);
 
   pty_manager_.SetOutputCallback([this](const std::string& terminal_id, const std::string& chunk) {
     BroadcastTerminalOutput(terminal_id, chunk);
@@ -361,6 +362,10 @@ bool ServerApp::RegisterHttpRoutes() {
 
   http_service_.GET("/api/screen/capabilities", [this](HttpRequest* req, HttpResponse* resp) {
     return HandleScreenCaps(req, resp);
+  });
+
+  http_service_.GET("/api/screen/sources", [this](HttpRequest* req, HttpResponse* resp) {
+    return HandleScreenSources(req, resp);
   });
 
   http_service_.POST("/api/screen/input", [this](HttpRequest* req, HttpResponse* resp) {
@@ -678,6 +683,51 @@ int ServerApp::HandleScreenCaps(HttpRequest* req, HttpResponse* resp) {
                          }));
 }
 
+int ServerApp::HandleScreenSources(HttpRequest* req, HttpResponse* resp) {
+  auto session = RequireSession(req, resp);
+  if (!session.has_value()) {
+    return resp->status_code;
+  }
+
+  std::string source_error;
+  const auto sources = screen_service_.ListCaptureSources(&source_error);
+  if (sources.empty()) {
+    return Json(resp, 500, api::Error(source_error.empty() ? "no capture source available" : source_error));
+  }
+
+  json source_payload = json::array();
+  std::string default_source_id;
+  for (const auto& source : sources) {
+    if (default_source_id.empty() && source.is_default) {
+      default_source_id = source.id;
+    }
+    source_payload.push_back({
+        {"id", source.id},
+        {"name", source.name},
+        {"width", source.width},
+        {"height", source.height},
+        {"is_default", source.is_default},
+    });
+  }
+  if (default_source_id.empty()) {
+    default_source_id = sources.front().id;
+  }
+
+  std::string active_source_id = screen_service_.ActiveCaptureSourceId();
+  if (active_source_id.empty()) {
+    active_source_id = screen_service_.NormalizeCaptureSourceId(default_source_id, nullptr);
+  }
+  if (active_source_id.empty()) {
+    active_source_id = default_source_id;
+  }
+
+  return Json(resp, 200, api::Success({
+                             {"sources", source_payload.dump(), true},
+                             {"default_source_id", default_source_id, false},
+                             {"active_source_id", active_source_id, false},
+                         }));
+}
+
 int ServerApp::HandleScreenInput(HttpRequest* req, HttpResponse* resp) {
   auto session = RequireSession(req, resp);
   if (!session.has_value()) {
@@ -745,6 +795,7 @@ void ServerApp::SendToWs(std::uintptr_t channel_key, const std::string& payload)
 
 ServerApp::NativeCaptureDemand ServerApp::CollectNativeCaptureDemandLocked() const {
   NativeCaptureDemand demand;
+  std::unordered_map<std::string, size_t> source_counts;
   for (const auto& [_, client] : ws_clients_) {
     if (client.channel_type != "webrtc" || !client.native_stream_subscribed || !client.channel) {
       continue;
@@ -752,7 +803,9 @@ ServerApp::NativeCaptureDemand ServerApp::CollectNativeCaptureDemandLocked() con
     demand.subscriber_count += 1;
     demand.fps = std::max(demand.fps, std::clamp(client.native_stream_fps, kNativeCaptureMinFps,
                                                  kNativeCaptureMaxFps));
-    if (client.native_stream_codec == "vp9") {
+    if (client.native_stream_codec == "av1") {
+      demand.want_av1 = true;
+    } else if (client.native_stream_codec == "vp9") {
       demand.want_vp9 = true;
     } else if (client.native_stream_codec == "vp8") {
       demand.want_vp8 = true;
@@ -769,6 +822,15 @@ ServerApp::NativeCaptureDemand ServerApp::CollectNativeCaptureDemandLocked() con
     demand.video_bitrate_bps =
         std::max(demand.video_bitrate_bps,
                  std::clamp(client.native_stream_video_bitrate_bps, kNativeBitrateMinBps, kNativeBitrateMaxBps));
+    source_counts[client.native_stream_source_id] += 1;
+  }
+
+  size_t best_source_votes = 0;
+  for (const auto& [source_id, votes] : source_counts) {
+    if (votes > best_source_votes || (votes == best_source_votes && source_id < demand.source_id)) {
+      demand.source_id = source_id;
+      best_source_votes = votes;
+    }
   }
   return demand;
 }
@@ -781,7 +843,7 @@ void ServerApp::RefreshNativeCaptureState() {
   }
 
   screen_service_.SetEncodingTargets(demand.want_jpeg, demand.want_h264, demand.want_h265, demand.want_vp8,
-                                     demand.want_vp9);
+                                     demand.want_vp9, demand.want_av1);
 
   if (demand.subscriber_count == 0) {
     if (screen_service_.IsCapturing()) {
@@ -802,12 +864,24 @@ void ServerApp::RefreshNativeCaptureState() {
   const int target_video_bitrate_bps =
       std::clamp(demand.video_bitrate_bps > 0 ? demand.video_bitrate_bps : kNativeBitrateDefaultBps,
                  kNativeBitrateMinBps, kNativeBitrateMaxBps);
+  std::string source_error;
+  const std::string target_source_id = screen_service_.NormalizeCaptureSourceId(demand.source_id, &source_error);
+  if (target_source_id.empty()) {
+    if (screen_service_.IsCapturing()) {
+      screen_service_.StopCapture();
+    }
+    active_capture_fps_ = 0;
+    audit_logger_.AppendSystem("warn", "screen.capture",
+                               source_error.empty() ? "no capture source available" : source_error);
+    return;
+  }
 
   screen_service_.SetEncodingProfile(target_scale_percent, target_video_bitrate_bps);
   active_capture_scale_percent_ = target_scale_percent;
   active_capture_video_bitrate_bps_ = target_video_bitrate_bps;
 
-  if (screen_service_.IsCapturing() && active_capture_fps_ == target_fps) {
+  const std::string active_source_id = screen_service_.ActiveCaptureSourceId();
+  if (screen_service_.IsCapturing() && active_capture_fps_ == target_fps && active_source_id == target_source_id) {
     return;
   }
 
@@ -817,19 +891,71 @@ void ServerApp::RefreshNativeCaptureState() {
   }
 
   std::string screen_error;
-  if (!screen_service_.StartCapture(target_fps, &screen_error)) {
+  if (!screen_service_.StartCapture(target_fps, target_source_id, &screen_error)) {
     std::cerr << "[ferryman] native screen capture unavailable: " << screen_error << '\n';
     audit_logger_.AppendSystem("warn", "screen.capture", screen_error);
     return;
   }
   active_capture_fps_ = target_fps;
+  const std::string running_source_id = screen_service_.ActiveCaptureSourceId();
 
   audit_logger_.AppendSystem("info", "screen.capture",
                              "native capture started (subscribers=" +
                                  std::to_string(demand.subscriber_count) +
                                  ", fps=" + std::to_string(target_fps) +
                                  ", scale=" + std::to_string(target_scale_percent) +
-                                 ", bitrate=" + std::to_string(target_video_bitrate_bps) + ")");
+                                 ", bitrate=" + std::to_string(target_video_bitrate_bps) +
+                                 ", source_id=" + (running_source_id.empty() ? target_source_id : running_source_id) + ")");
+}
+
+void ServerApp::SyncNativeSubscribersToActiveSource() {
+  const std::string active_source_id = screen_service_.ActiveCaptureSourceId();
+  if (active_source_id.empty()) {
+    return;
+  }
+
+  const int effective_fps = active_capture_fps_.load();
+  const int effective_scale_percent = active_capture_scale_percent_.load();
+  const int effective_video_bitrate_bps = active_capture_video_bitrate_bps_.load();
+
+  struct UpdateTarget {
+    WebSocketChannelPtr channel;
+    std::string codec;
+  };
+  std::vector<UpdateTarget> targets;
+  {
+    std::lock_guard<std::mutex> lock(ws_mu_);
+    for (auto& [_, client] : ws_clients_) {
+      if (client.channel_type != "webrtc" || !client.native_stream_subscribed || !client.channel) {
+        continue;
+      }
+      if (client.native_stream_source_id == active_source_id) {
+        continue;
+      }
+      client.native_stream_source_id = active_source_id;
+      targets.push_back({client.channel, client.native_stream_codec});
+    }
+  }
+  if (targets.empty()) {
+    return;
+  }
+
+  const std::string resolution_tier = NativeResolutionTierFromScale(effective_scale_percent);
+  const std::string bitrate_tier = NativeBitrateTierFromBps(effective_video_bitrate_bps);
+  for (auto& target : targets) {
+    target.channel->send(api::Success({
+        {"event", "native_subscribed", false},
+        {"capture_running", screen_service_.IsCapturing() ? "true" : "false", true},
+        {"codec", target.codec, false},
+        {"source_id", active_source_id, false},
+        {"fps", std::to_string(effective_fps > 0 ? effective_fps : kNativeCaptureFps), true},
+        {"resolution_tier", resolution_tier, false},
+        {"scale_percent", std::to_string(effective_scale_percent), true},
+        {"bitrate_tier", bitrate_tier, false},
+        {"bitrate_bps", std::to_string(effective_video_bitrate_bps), true},
+        {"transport", "ws-binary", false},
+    }));
+  }
 }
 
 void ServerApp::HandleWsOpen(const WebSocketChannelPtr& channel, const HttpRequestPtr& req) {
@@ -1151,7 +1277,15 @@ void ServerApp::BroadcastLogEntry(const std::string& serialized_entry) {
 
 void ServerApp::BroadcastNativeFrames() {
   uint64_t last_sequence = 0;
+  auto next_source_health_check = std::chrono::steady_clock::now();
   while (running_) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= next_source_health_check) {
+      RefreshNativeCaptureState();
+      SyncNativeSubscribersToActiveSource();
+      next_source_health_check = now + std::chrono::seconds(1);
+    }
+
     auto frame = screen_service_.LatestFrame();
     if (!frame.has_value() || frame->sequence == last_sequence) {
       std::this_thread::sleep_for(std::chrono::milliseconds(24));
@@ -1180,8 +1314,9 @@ void ServerApp::BroadcastNativeFrames() {
     const bool has_h265 = !frame->h265_bytes.empty();
     const bool has_vp8 = !frame->vp8_bytes.empty();
     const bool has_vp9 = !frame->vp9_bytes.empty();
+    const bool has_av1 = !frame->av1_bytes.empty();
     const bool has_jpeg = !frame->jpeg_bytes.empty();
-    if (!has_h264 && !has_h265 && !has_vp8 && !has_vp9 && !has_jpeg) {
+    if (!has_h264 && !has_h265 && !has_vp8 && !has_vp9 && !has_av1 && !has_jpeg) {
       continue;
     }
 
@@ -1201,12 +1336,20 @@ void ServerApp::BroadcastNativeFrames() {
         ? BuildNativeBinaryFramePacket(kNativeBinaryCodecVP9, frame->vp9_keyframe, frame->sequence,
                                        frame->captured_at_ms, frame->width, frame->height, frame->vp9_bytes)
         : "";
+    const std::string av1_payload = has_av1
+        ? BuildNativeBinaryFramePacket(kNativeBinaryCodecAV1, frame->av1_keyframe, frame->sequence,
+                                       frame->captured_at_ms, frame->width, frame->height, frame->av1_bytes)
+        : "";
     const std::string jpeg_payload = has_jpeg
         ? BuildNativeBinaryFramePacket(kNativeBinaryCodecJpeg, false, frame->sequence,
                                        frame->captured_at_ms, frame->width, frame->height, frame->jpeg_bytes)
         : "";
 
     for (auto& target : targets) {
+      if (target.codec == "av1" && !av1_payload.empty()) {
+        target.channel->send(av1_payload, WS_OPCODE_BINARY);
+        continue;
+      }
       if (target.codec == "vp9" && !vp9_payload.empty()) {
         target.channel->send(vp9_payload, WS_OPCODE_BINARY);
         continue;
@@ -1352,12 +1495,16 @@ void ServerApp::HandleWebRtcWsMessage(std::uintptr_t channel_key, const std::str
 
   if (action == "native_subscribe") {
     const std::string requested_codec = JsonString(payload, "codec");
+    const std::string requested_source_id = JsonString(payload, "source_id");
+    const bool wants_av1 = requested_codec == "av1";
     const bool wants_vp9 = requested_codec == "vp9";
     const bool wants_vp8 = requested_codec == "vp8";
     const bool wants_h265 = requested_codec == "h265";
     const bool wants_h264 = requested_codec == "h264";
     std::string negotiated_codec = "jpeg";
-    if (wants_vp9 && screen_service_.SupportsVP9()) {
+    if (wants_av1 && screen_service_.SupportsAV1()) {
+      negotiated_codec = "av1";
+    } else if (wants_vp9 && screen_service_.SupportsVP9()) {
       negotiated_codec = "vp9";
     } else if (wants_vp8 && screen_service_.SupportsVP8()) {
       negotiated_codec = "vp8";
@@ -1376,6 +1523,14 @@ void ServerApp::HandleWebRtcWsMessage(std::uintptr_t channel_key, const std::str
         JsonString(payload, "bitrate_tier"),
         std::clamp(JsonInt(payload, "bitrate_bps", kNativeBitrateDefaultBps),
                    kNativeBitrateMinBps, kNativeBitrateMaxBps));
+    std::string source_error;
+    const std::string normalized_source_id =
+        screen_service_.NormalizeCaptureSourceId(requested_source_id, &source_error);
+    if (normalized_source_id.empty()) {
+      SendToWs(channel_key,
+               api::Error(source_error.empty() ? "no capture source available" : source_error));
+      return;
+    }
 
     {
       std::lock_guard<std::mutex> lock(ws_mu_);
@@ -1383,6 +1538,7 @@ void ServerApp::HandleWebRtcWsMessage(std::uintptr_t channel_key, const std::str
       if (it != ws_clients_.end()) {
         it->second.native_stream_subscribed = true;
         it->second.native_stream_codec = negotiated_codec;
+        it->second.native_stream_source_id = normalized_source_id;
         it->second.native_stream_fps = requested_fps;
         it->second.native_stream_scale_percent = requested_scale_percent;
         it->second.native_stream_video_bitrate_bps = requested_video_bitrate_bps;
@@ -1393,11 +1549,16 @@ void ServerApp::HandleWebRtcWsMessage(std::uintptr_t channel_key, const std::str
     const int effective_fps = active_capture_fps_.load();
     const int effective_scale_percent = active_capture_scale_percent_.load();
     const int effective_video_bitrate_bps = active_capture_video_bitrate_bps_.load();
+    const std::string effective_source_id = [this, &normalized_source_id]() {
+      const std::string active = screen_service_.ActiveCaptureSourceId();
+      return active.empty() ? normalized_source_id : active;
+    }();
 
     SendToWs(channel_key, api::Success({
         {"event", "native_subscribed", false},
         {"capture_running", screen_service_.IsCapturing() ? "true" : "false", true},
         {"codec", negotiated_codec, false},
+        {"source_id", effective_source_id, false},
         {"fps", std::to_string(effective_fps > 0 ? effective_fps : requested_fps), true},
         {"resolution_tier", NativeResolutionTierFromScale(effective_scale_percent), false},
         {"scale_percent", std::to_string(effective_scale_percent), true},
@@ -1414,6 +1575,7 @@ void ServerApp::HandleWebRtcWsMessage(std::uintptr_t channel_key, const std::str
       auto it = ws_clients_.find(channel_key);
       if (it != ws_clients_.end()) {
         it->second.native_stream_subscribed = false;
+        it->second.native_stream_source_id.clear();
       }
     }
 

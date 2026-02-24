@@ -66,7 +66,7 @@ int64_t EpochMillisNow() {
 
 std::string JsonCapabilities(bool native_stream, bool input_injection, const std::string& backend,
                              bool supports_h264, bool supports_h265, bool supports_vp8,
-                             bool supports_vp9) {
+                             bool supports_vp9, bool supports_av1) {
   json native_codecs = json::array();
   if (native_stream) {
     native_codecs.push_back("jpeg");
@@ -82,6 +82,9 @@ std::string JsonCapabilities(bool native_stream, bool input_injection, const std
     if (supports_vp9) {
       native_codecs.push_back("vp9");
     }
+    if (supports_av1) {
+      native_codecs.push_back("av1");
+    }
   }
   std::vector<std::string> video_codecs;
   if (supports_h264) {
@@ -95,6 +98,9 @@ std::string JsonCapabilities(bool native_stream, bool input_injection, const std
   }
   if (supports_vp9) {
     video_codecs.emplace_back("vp9");
+  }
+  if (supports_av1) {
+    video_codecs.emplace_back("av1");
   }
 
   std::string encoding = "unsupported";
@@ -901,19 +907,138 @@ std::string ScreenService::CapabilitiesJson() const {
   const bool supports_h265 = SupportsH265();
   const bool supports_vp8 = SupportsVP8();
   const bool supports_vp9 = SupportsVP9();
-  const bool supports_any_video = supports_h264 || supports_h265 || supports_vp8 || supports_vp9;
+  const bool supports_av1 = SupportsAV1();
+  const bool supports_any_video = supports_h264 || supports_h265 || supports_vp8 || supports_vp9 || supports_av1;
 #if defined(__APPLE__)
   return JsonCapabilities(supports_any_video, true, "screencapturekit", supports_h264, supports_h265,
-                          supports_vp8, supports_vp9);
+                          supports_vp8, supports_vp9, supports_av1);
 #elif defined(__linux__)
   return JsonCapabilities(supports_any_video, true, "x11", supports_h264, supports_h265,
-                          supports_vp8, supports_vp9);
+                          supports_vp8, supports_vp9, supports_av1);
 #elif defined(_WIN32)
   return JsonCapabilities(supports_any_video, true, "gdi", supports_h264, supports_h265,
-                          supports_vp8, supports_vp9);
+                          supports_vp8, supports_vp9, supports_av1);
 #else
-  return JsonCapabilities(false, false, "unsupported", false, false, false, false);
+  return JsonCapabilities(false, false, "unsupported", false, false, false, false, false);
 #endif
+}
+
+std::vector<ScreenService::CaptureSource> ScreenService::ListCaptureSources(std::string* error) {
+  std::vector<CaptureSource> sources;
+#if defined(__APPLE__)
+  if (!capture_bridge_) {
+    capture_bridge_ = std::make_unique<ScreenCaptureKitBridge>();
+  }
+  if (!capture_bridge_) {
+    if (error != nullptr) {
+      *error = "screen capture bridge is not initialized";
+    }
+    return sources;
+  }
+
+  std::string list_error;
+  auto displays = capture_bridge_->ListDisplays(&list_error);
+  if (displays.empty()) {
+    if (error != nullptr) {
+      *error = list_error.empty() ? "no capture display available" : list_error;
+    }
+    return sources;
+  }
+
+  sources.reserve(displays.size());
+  for (const auto& display : displays) {
+    CaptureSource source;
+    source.id = display.id;
+    source.name = display.name;
+    source.width = display.width;
+    source.height = display.height;
+    source.is_default = display.is_default;
+    sources.push_back(std::move(source));
+  }
+  return sources;
+#elif defined(__linux__)
+  Display* display = XOpenDisplay(nullptr);
+  if (display == nullptr) {
+    if (error != nullptr) {
+      *error = "failed to open X11 display";
+    }
+    return sources;
+  }
+
+  const int screen = DefaultScreen(display);
+  const int width = DisplayWidth(display, screen);
+  const int height = DisplayHeight(display, screen);
+  XCloseDisplay(display);
+
+  CaptureSource source;
+  source.id = "default";
+  source.width = std::max(width, 0);
+  source.height = std::max(height, 0);
+  source.is_default = true;
+  source.name = "Display 1 (" + std::to_string(source.width) + "x" + std::to_string(source.height) + ")";
+  sources.push_back(std::move(source));
+  return sources;
+#elif defined(_WIN32)
+  int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+  int height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+  if (width <= 0 || height <= 0) {
+    width = GetSystemMetrics(SM_CXSCREEN);
+    height = GetSystemMetrics(SM_CYSCREEN);
+  }
+
+  CaptureSource source;
+  source.id = "default";
+  source.width = std::max(width, 0);
+  source.height = std::max(height, 0);
+  source.is_default = true;
+  source.name = "Display 1 (" + std::to_string(source.width) + "x" + std::to_string(source.height) + ")";
+  sources.push_back(std::move(source));
+  return sources;
+#else
+  if (error != nullptr) {
+    *error = "native capture is unsupported on this platform";
+  }
+  return sources;
+#endif
+}
+
+std::string ScreenService::NormalizeCaptureSourceId(const std::string& requested_source_id,
+                                                    std::string* error) {
+  std::string list_error;
+  const auto sources = ListCaptureSources(&list_error);
+  if (sources.empty()) {
+    if (error != nullptr) {
+      *error = list_error.empty() ? "no capture source available" : list_error;
+    }
+    return "";
+  }
+
+  if (requested_source_id.empty()) {
+    for (const auto& source : sources) {
+      if (source.is_default && !source.id.empty()) {
+        return source.id;
+      }
+    }
+    return sources.front().id;
+  }
+
+  for (const auto& source : sources) {
+    if (source.id == requested_source_id) {
+      return source.id;
+    }
+  }
+
+  for (const auto& source : sources) {
+    if (source.is_default && !source.id.empty()) {
+      return source.id;
+    }
+  }
+  return sources.front().id;
+}
+
+std::string ScreenService::ActiveCaptureSourceId() const {
+  std::lock_guard<std::mutex> lock(capture_source_mu_);
+  return active_capture_source_id_;
 }
 
 bool ScreenService::SupportsH264() const {
@@ -932,13 +1057,18 @@ bool ScreenService::SupportsVP9() const {
   return SupportsVideoCodec(VideoCodec::kVP9);
 }
 
+bool ScreenService::SupportsAV1() const {
+  return SupportsVideoCodec(VideoCodec::kAV1);
+}
+
 void ScreenService::SetEncodingTargets(bool enable_jpeg, bool enable_h264, bool enable_h265, bool enable_vp8,
-                                       bool enable_vp9) {
+                                       bool enable_vp9, bool enable_av1) {
   encode_jpeg_.store(enable_jpeg);
   encode_h264_.store(enable_h264);
   encode_h265_.store(enable_h265);
   encode_vp8_.store(enable_vp8);
   encode_vp9_.store(enable_vp9);
+  encode_av1_.store(enable_av1);
 }
 
 void ScreenService::SetEncodingProfile(int scale_percent, int video_bitrate_bps) {
@@ -973,18 +1103,28 @@ bool ScreenService::InjectInputEvent(const std::string& session_token, const Inp
   return InjectInputEventNative(event, error);
 }
 
-bool ScreenService::StartCapture(int fps, std::string* error) {
+bool ScreenService::StartCapture(int fps, const std::string& source_id, std::string* error) {
 #if !defined(__APPLE__) && !defined(__linux__) && !defined(_WIN32)
   (void)fps;
+  (void)source_id;
   if (error != nullptr) {
     *error = "native capture is unsupported on this platform";
   }
   return false;
 #else
   if (!encode_jpeg_.load() && !encode_h264_.load() && !encode_h265_.load() && !encode_vp8_.load() &&
-      !encode_vp9_.load()) {
+      !encode_vp9_.load() && !encode_av1_.load()) {
     if (error != nullptr) {
       *error = "native capture has no active encoding targets";
+    }
+    return false;
+  }
+
+  std::string source_error;
+  const std::string normalized_source_id = NormalizeCaptureSourceId(source_id, &source_error);
+  if (normalized_source_id.empty()) {
+    if (error != nullptr) {
+      *error = source_error.empty() ? "no capture source available" : source_error;
     }
     return false;
   }
@@ -1006,6 +1146,9 @@ bool ScreenService::StartCapture(int fps, std::string* error) {
   }
   if (encode_vp9_.load() && !vp9_encoder_) {
     vp9_encoder_ = CreateVideoEncoder(VideoCodec::kVP9);
+  }
+  if (encode_av1_.load() && !av1_encoder_) {
+    av1_encoder_ = CreateVideoEncoder(VideoCodec::kAV1);
   }
 
 #if !FERRYMAN_WITH_FFMPEG
@@ -1029,11 +1172,16 @@ bool ScreenService::StartCapture(int fps, std::string* error) {
     capture_bridge_ = std::make_unique<ScreenCaptureKitBridge>();
   }
 
-  if (!capture_bridge_->Start(safe_fps, error)) {
+  if (!capture_bridge_->Start(safe_fps, normalized_source_id, error)) {
     capture_running_ = false;
     return false;
   }
 #endif
+
+  {
+    std::lock_guard<std::mutex> lock(capture_source_mu_);
+    active_capture_source_id_ = normalized_source_id;
+  }
 
   capture_thread_ = std::thread([this, safe_fps]() {
     CaptureLoop(safe_fps);
@@ -1063,6 +1211,13 @@ void ScreenService::StopCapture() {
   }
   if (vp9_encoder_) {
     vp9_encoder_->Reset();
+  }
+  if (av1_encoder_) {
+    av1_encoder_->Reset();
+  }
+  {
+    std::lock_guard<std::mutex> lock(capture_source_mu_);
+    active_capture_source_id_.clear();
   }
 }
 
@@ -1102,7 +1257,8 @@ bool ScreenService::CaptureFrame(EncodedFrame* frame, std::string* error) {
   const bool want_h265 = encode_h265_.load();
   const bool want_vp8 = encode_vp8_.load();
   const bool want_vp9 = encode_vp9_.load();
-  const bool want_video = want_h264 || want_h265 || want_vp8 || want_vp9;
+  const bool want_av1 = encode_av1_.load();
+  const bool want_video = want_h264 || want_h265 || want_vp8 || want_vp9 || want_av1;
   const int scale_percent = std::clamp(capture_scale_percent_.load(), 40, 100);
   const int target_video_bitrate_bps = std::clamp(video_bitrate_bps_.load(), 500'000, 12'000'000);
   if (!want_jpeg && !want_video) {
@@ -1227,6 +1383,9 @@ bool ScreenService::CaptureFrame(EncodedFrame* frame, std::string* error) {
   }
   if (want_vp9) {
     encode_video(VideoCodec::kVP9, &vp9_encoder_, &frame->vp9_bytes, &frame->vp9_keyframe);
+  }
+  if (want_av1) {
+    encode_video(VideoCodec::kAV1, &av1_encoder_, &frame->av1_bytes, &frame->av1_keyframe);
   }
 
   if (!produced_any) {
@@ -1382,6 +1541,9 @@ bool ScreenService::CaptureFrame(EncodedFrame* frame, std::string* error) {
   }
   if (want_vp9) {
     encode_video(VideoCodec::kVP9, &vp9_encoder_, &frame->vp9_bytes, &frame->vp9_keyframe);
+  }
+  if (want_av1) {
+    encode_video(VideoCodec::kAV1, &av1_encoder_, &frame->av1_bytes, &frame->av1_keyframe);
   }
 
   if (!produced_any) {
@@ -1555,6 +1717,9 @@ bool ScreenService::CaptureFrame(EncodedFrame* frame, std::string* error) {
   }
   if (want_vp9) {
     encode_video(VideoCodec::kVP9, &vp9_encoder_, &frame->vp9_bytes, &frame->vp9_keyframe);
+  }
+  if (want_av1) {
+    encode_video(VideoCodec::kAV1, &av1_encoder_, &frame->av1_bytes, &frame->av1_keyframe);
   }
 
   if (!produced_any) {

@@ -22,3 +22,11 @@ export type TaskInfo = {
   created_at: string;
   updated_at: string;
 };
+
+export type ScreenSource = {
+  id: string;
+  name: string;
+  width: number;
+  height: number;
+  is_default: boolean;
+};

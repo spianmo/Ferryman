@@ -1,4 +1,4 @@
-import type { SessionInfo } from "../types";
+import type { ScreenSource, SessionInfo } from "../types";
 
 export type ApiResponse<T = unknown> = {
   ok: boolean;
@@ -159,6 +159,18 @@ export async function getLogs(token: string, lines = 200) {
 export async function getScreenCapabilities(token: string) {
   return request<{ capabilities: Record<string, unknown>; screen_authorized: boolean }>(
     "/api/screen/capabilities",
+    { method: "GET" },
+    token
+  );
+}
+
+export async function getScreenSources(token: string) {
+  return request<{
+    sources: Array<ScreenSource>;
+    default_source_id: string;
+    active_source_id: string;
+  }>(
+    "/api/screen/sources",
     { method: "GET" },
     token
   );

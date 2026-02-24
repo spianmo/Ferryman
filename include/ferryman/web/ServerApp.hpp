@@ -58,6 +58,7 @@ class ServerApp {
     std::string peer_id;
     bool native_stream_subscribed = false;
     std::string native_stream_codec = "jpeg";
+    std::string native_stream_source_id;
     int native_stream_fps = 8;
     int native_stream_scale_percent = 100;
     int native_stream_video_bitrate_bps = 3'000'000;
@@ -71,9 +72,11 @@ class ServerApp {
     bool want_h265 = false;
     bool want_vp8 = false;
     bool want_vp9 = false;
+    bool want_av1 = false;
     int fps = 0;
     int scale_percent = 0;
     int video_bitrate_bps = 0;
+    std::string source_id;
   };
 #endif
 
@@ -91,6 +94,7 @@ class ServerApp {
   int HandleTaskGet(HttpRequest* req, HttpResponse* resp);
   int HandleLogsTail(HttpRequest* req, HttpResponse* resp);
   int HandleScreenCaps(HttpRequest* req, HttpResponse* resp);
+  int HandleScreenSources(HttpRequest* req, HttpResponse* resp);
   int HandleScreenInput(HttpRequest* req, HttpResponse* resp);
   int HandleHealth(HttpRequest* req, HttpResponse* resp);
   int HandleStaticAsset(HttpRequest* req, HttpResponse* resp);
@@ -113,6 +117,7 @@ class ServerApp {
   void BroadcastTerminalOutput(const std::string& terminal_id, const std::string& chunk);
   void BroadcastLogEntry(const std::string& serialized_entry);
   void BroadcastNativeFrames();
+  void SyncNativeSubscribersToActiveSource();
   void SendToWs(std::uintptr_t channel_key, const std::string& payload);
   NativeCaptureDemand CollectNativeCaptureDemandLocked() const;
   void RefreshNativeCaptureState();

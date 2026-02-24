@@ -2,9 +2,11 @@
 
 #if defined(__APPLE__)
 
+#import <ApplicationServices/ApplicationServices.h>
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
 #import <Foundation/Foundation.h>
+#import <IOKit/graphics/IOGraphicsLib.h>
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 
 #include <algorithm>
@@ -13,6 +15,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace ferryman::web {
 class ScreenCaptureKitBridgeImpl;
@@ -69,22 +72,102 @@ std::string NSErrorToString(NSError* error) {
   return NsStringToStdString(error.localizedDescription);
 }
 
+bool ReadUint32CfNumber(CFTypeRef value, uint32_t* out) {
+  if (value == nullptr || out == nullptr || CFGetTypeID(value) != CFNumberGetTypeID()) {
+    return false;
+  }
+  uint32_t parsed = 0;
+  if (!CFNumberGetValue(static_cast<CFNumberRef>(value), kCFNumberSInt32Type, &parsed)) {
+    return false;
+  }
+  *out = parsed;
+  return true;
+}
+
+std::string PreferredDisplayName(CFDictionaryRef display_info) {
+  if (display_info == nullptr || CFGetTypeID(display_info) != CFDictionaryGetTypeID()) {
+    return "";
+  }
+  CFTypeRef names_value = CFDictionaryGetValue(display_info, CFSTR(kDisplayProductName));
+  if (names_value == nullptr || CFGetTypeID(names_value) != CFDictionaryGetTypeID()) {
+    return "";
+  }
+  CFDictionaryRef names = static_cast<CFDictionaryRef>(names_value);
+  const CFIndex count = CFDictionaryGetCount(names);
+  if (count <= 0) {
+    return "";
+  }
+  std::vector<const void*> values(static_cast<size_t>(count));
+  CFDictionaryGetKeysAndValues(names, nullptr, values.data());
+  for (const void* value : values) {
+    if (value != nullptr && CFGetTypeID(value) == CFStringGetTypeID()) {
+      return NsStringToStdString((__bridge NSString*)static_cast<CFStringRef>(value));
+    }
+  }
+  return "";
+}
+
+std::string DisplayNameFromSystem(CGDirectDisplayID display_id) {
+  CFMutableDictionaryRef matching = IOServiceMatching("IODisplayConnect");
+  if (matching == nullptr) {
+    return "";
+  }
+
+  io_iterator_t iterator = IO_OBJECT_NULL;
+  const kern_return_t status = IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator);
+  if (status != KERN_SUCCESS || iterator == IO_OBJECT_NULL) {
+    return "";
+  }
+
+  const uint32_t target_vendor = CGDisplayVendorNumber(display_id);
+  const uint32_t target_model = CGDisplayModelNumber(display_id);
+  const uint32_t target_serial = CGDisplaySerialNumber(display_id);
+  std::string name;
+
+  io_service_t service = IO_OBJECT_NULL;
+  while ((service = IOIteratorNext(iterator)) != IO_OBJECT_NULL) {
+    CFDictionaryRef info = IODisplayCreateInfoDictionary(service, kIODisplayOnlyPreferredName);
+    if (info != nullptr) {
+      uint32_t vendor = 0;
+      uint32_t model = 0;
+      uint32_t serial = 0;
+      const bool has_vendor = ReadUint32CfNumber(CFDictionaryGetValue(info, CFSTR(kDisplayVendorID)), &vendor);
+      const bool has_model = ReadUint32CfNumber(CFDictionaryGetValue(info, CFSTR(kDisplayProductID)), &model);
+      const bool has_serial = ReadUint32CfNumber(CFDictionaryGetValue(info, CFSTR(kDisplaySerialNumber)), &serial);
+      const bool serial_matches = target_serial == 0 || !has_serial || serial == target_serial;
+      if (has_vendor && has_model && vendor == target_vendor && model == target_model && serial_matches) {
+        name = PreferredDisplayName(info);
+        CFRelease(info);
+        IOObjectRelease(service);
+        break;
+      }
+      CFRelease(info);
+    }
+    IOObjectRelease(service);
+  }
+  IOObjectRelease(iterator);
+  return name;
+}
+
 }  // namespace
 
 class ScreenCaptureKitBridgeImpl {
  public:
-  bool Start(int fps, std::string* error);
+  bool Start(int fps, const std::string& display_id, std::string* error);
   void Stop();
+  std::vector<ScreenCaptureKitBridge::DisplayInfo> ListDisplays(std::string* error);
+  std::string ActiveDisplayId() const;
   bool WaitForFrame(int timeout_ms, ScreenCaptureKitBridge::RawFrame* frame, std::string* error);
   void OnSampleBuffer(CMSampleBufferRef sample_buffer, SCStreamOutputType type);
 
  private:
-  std::mutex mu_;
+  mutable std::mutex mu_;
   std::condition_variable cv_;
 
   bool started_ = false;
   uint64_t frame_sequence_ = 0;
   uint64_t consumed_sequence_ = 0;
+  std::string active_display_id_;
 
   int width_ = 0;
   int height_ = 0;
@@ -98,13 +181,98 @@ class ScreenCaptureKitBridgeImpl {
   dispatch_queue_t sample_queue_ = nullptr;
 };
 
-bool ScreenCaptureKitBridgeImpl::Start(int fps, std::string* error) {
+std::vector<ScreenCaptureKitBridge::DisplayInfo> ScreenCaptureKitBridgeImpl::ListDisplays(
+    std::string* error) {
+  std::vector<ScreenCaptureKitBridge::DisplayInfo> displays;
+  if (@available(macOS 12.3, *)) {
+    __block SCShareableContent* shareable_content = nil;
+    __block NSError* shareable_error = nil;
+    dispatch_semaphore_t content_semaphore = dispatch_semaphore_create(0);
+    [SCShareableContent getShareableContentWithCompletionHandler:^(SCShareableContent* content, NSError* err) {
+      shareable_content = content;
+      shareable_error = err;
+      dispatch_semaphore_signal(content_semaphore);
+    }];
+
+    const dispatch_time_t content_timeout =
+        dispatch_time(DISPATCH_TIME_NOW, static_cast<int64_t>(kStartTimeoutMs) * NSEC_PER_MSEC);
+    if (dispatch_semaphore_wait(content_semaphore, content_timeout) != 0) {
+      if (error != nullptr) {
+        *error = "timed out while loading ScreenCaptureKit shareable content";
+      }
+      return displays;
+    }
+
+    if (shareable_error != nil) {
+      if (error != nullptr) {
+        *error = "failed to enumerate displays: " + NSErrorToString(shareable_error);
+      }
+      return displays;
+    }
+
+    if (shareable_content == nil || shareable_content.displays.count == 0) {
+      if (error != nullptr) {
+        *error = "no capture display available";
+      }
+      return displays;
+    }
+
+    const NSUInteger display_count = shareable_content.displays.count;
+    displays.reserve(static_cast<size_t>(display_count));
+    for (NSUInteger idx = 0; idx < display_count; ++idx) {
+      SCDisplay* display = shareable_content.displays[idx];
+      if (display == nil) {
+        continue;
+      }
+      ScreenCaptureKitBridge::DisplayInfo info;
+      info.id = std::to_string(static_cast<uint64_t>(display.displayID));
+      info.width = static_cast<int>(display.width);
+      info.height = static_cast<int>(display.height);
+      info.is_default = displays.empty();
+      const std::string real_name =
+          DisplayNameFromSystem(static_cast<CGDirectDisplayID>(display.displayID));
+      if (!real_name.empty()) {
+        info.name = real_name + " (" + std::to_string(info.width) + "x" + std::to_string(info.height) + ")";
+      } else {
+        info.name = "Display " + std::to_string(static_cast<unsigned long long>(idx + 1)) +
+                    " (" + std::to_string(info.width) + "x" + std::to_string(info.height) + ")";
+      }
+      displays.push_back(std::move(info));
+    }
+    if (displays.empty() && error != nullptr) {
+      *error = "no capture display available";
+    }
+    return displays;
+  }
+
+  if (error != nullptr) {
+    *error = "ScreenCaptureKit requires macOS 12.3 or newer";
+  }
+  return displays;
+}
+
+std::string ScreenCaptureKitBridgeImpl::ActiveDisplayId() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return active_display_id_;
+}
+
+bool ScreenCaptureKitBridgeImpl::Start(int fps, const std::string& display_id, std::string* error) {
   if (@available(macOS 12.3, *)) {
     {
       std::lock_guard<std::mutex> lock(mu_);
       if (started_) {
+        if (display_id.empty() || display_id == active_display_id_) {
+          return true;
+        }
+      }
+    }
+
+    if (!display_id.empty()) {
+      const std::string current_display_id = ActiveDisplayId();
+      if (!current_display_id.empty() && current_display_id == display_id) {
         return true;
       }
+      Stop();
     }
 
     const int safe_fps = std::max(1, std::min(fps, 60));
@@ -142,6 +310,17 @@ bool ScreenCaptureKitBridgeImpl::Start(int fps, std::string* error) {
     }
 
     SCDisplay* display = shareable_content.displays.firstObject;
+    if (!display_id.empty()) {
+      for (SCDisplay* candidate in shareable_content.displays) {
+        if (candidate == nil) {
+          continue;
+        }
+        if (std::to_string(static_cast<uint64_t>(candidate.displayID)) == display_id) {
+          display = candidate;
+          break;
+        }
+      }
+    }
     if (display == nil) {
       if (error != nullptr) {
         *error = "failed to select target display";
@@ -218,6 +397,7 @@ bool ScreenCaptureKitBridgeImpl::Start(int fps, std::string* error) {
       height_ = 0;
       stride_bytes_ = 0;
       latest_bgra_.clear();
+      active_display_id_ = std::to_string(static_cast<uint64_t>(display.displayID));
     }
     return true;
   }
@@ -278,6 +458,7 @@ void ScreenCaptureKitBridgeImpl::Stop() {
     stride_bytes_ = 0;
     frame_sequence_ = 0;
     consumed_sequence_ = 0;
+    active_display_id_.clear();
   }
 }
 
@@ -381,14 +562,22 @@ ScreenCaptureKitBridge::~ScreenCaptureKitBridge() {
   }
 }
 
-bool ScreenCaptureKitBridge::Start(int fps, std::string* error) {
-  return impl_ != nullptr ? impl_->Start(fps, error) : false;
+bool ScreenCaptureKitBridge::Start(int fps, const std::string& display_id, std::string* error) {
+  return impl_ != nullptr ? impl_->Start(fps, display_id, error) : false;
 }
 
 void ScreenCaptureKitBridge::Stop() {
   if (impl_ != nullptr) {
     impl_->Stop();
   }
+}
+
+std::vector<ScreenCaptureKitBridge::DisplayInfo> ScreenCaptureKitBridge::ListDisplays(std::string* error) {
+  return impl_ != nullptr ? impl_->ListDisplays(error) : std::vector<DisplayInfo>{};
+}
+
+std::string ScreenCaptureKitBridge::ActiveDisplayId() const {
+  return impl_ != nullptr ? impl_->ActiveDisplayId() : "";
 }
 
 bool ScreenCaptureKitBridge::WaitForFrame(int timeout_ms, RawFrame* frame, std::string* error) {
@@ -419,8 +608,9 @@ ScreenCaptureKitBridge::~ScreenCaptureKitBridge() {
   impl_ = nullptr;
 }
 
-bool ScreenCaptureKitBridge::Start(int fps, std::string* error) {
+bool ScreenCaptureKitBridge::Start(int fps, const std::string& display_id, std::string* error) {
   (void)fps;
+  (void)display_id;
   if (error != nullptr) {
     *error = "ScreenCaptureKit is only supported on macOS";
   }
@@ -428,6 +618,17 @@ bool ScreenCaptureKitBridge::Start(int fps, std::string* error) {
 }
 
 void ScreenCaptureKitBridge::Stop() {}
+
+std::vector<ScreenCaptureKitBridge::DisplayInfo> ScreenCaptureKitBridge::ListDisplays(std::string* error) {
+  if (error != nullptr) {
+    *error = "ScreenCaptureKit is only supported on macOS";
+  }
+  return {};
+}
+
+std::string ScreenCaptureKitBridge::ActiveDisplayId() const {
+  return "";
+}
 
 bool ScreenCaptureKitBridge::WaitForFrame(int timeout_ms, RawFrame* frame, std::string* error) {
   (void)timeout_ms;
