@@ -858,8 +858,8 @@ export default function DockerPage({ session }: Props) {
   const memoryStyle = styleForLoad(stats?.memory_percent);
 
   return (
-    <div className="grid min-h-0 grid-cols-1 gap-4 xl:h-full xl:min-h-[520px] xl:grid-cols-[1.05fr_1.5fr]">
-      <section className="flex min-h-[320px] flex-col rounded-3xl bg-white/75 p-4 shadow-soft ring-1 ring-slate-200/70 backdrop-blur xl:h-full dark:bg-neutral-900/60 dark:ring-neutral-800/80">
+    <div className="grid min-h-0 grid-cols-1 gap-4 xl:h-full xl:min-h-[520px] xl:grid-cols-[minmax(0,44rem)_minmax(0,1fr)]">
+      <section className="flex min-h-[320px] min-w-0 max-w-full flex-col overflow-hidden rounded-3xl bg-white/75 p-4 shadow-soft ring-1 ring-slate-200/70 backdrop-blur xl:h-full dark:bg-neutral-900/60 dark:ring-neutral-800/80">
         <div className="flex items-center justify-between gap-2">
           <div className="inline-flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-neutral-50">
             <FiBox />
@@ -903,18 +903,18 @@ export default function DockerPage({ session }: Props) {
               <button
                 key={container.id || container.name}
                 className={cn(
-                  "block w-full rounded-2xl border border-transparent bg-white/70 px-3 py-2.5 text-left ring-1 ring-inset ring-slate-200/60 transition-colors dark:bg-neutral-950/35 dark:ring-neutral-800/70",
+                  "block w-full min-w-0 max-w-full rounded-2xl border border-transparent bg-white/70 px-3 py-2.5 text-left ring-1 ring-inset ring-slate-200/60 transition-colors dark:bg-neutral-950/35 dark:ring-neutral-800/70",
                   selected
                     ? "ring-2 ring-slate-900/70 dark:ring-neutral-50/70"
                     : "hover:bg-slate-50 dark:hover:bg-neutral-900/50"
                 )}
                 onClick={() => setSelectedName(container.name)}
               >
-                <div className="flex items-center justify-between gap-2">
-                  <div className="truncate text-sm font-semibold text-slate-900 dark:text-neutral-50">
+                <div className="flex min-w-0 items-center justify-between gap-2">
+                  <div className="min-w-0 truncate text-sm font-semibold text-slate-900 dark:text-neutral-50">
                     {container.name}
                   </div>
-                  <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-700 dark:bg-neutral-800 dark:text-neutral-200">
+                  <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-700 dark:bg-neutral-800 dark:text-neutral-200">
                     <span className={cn("h-2 w-2 rounded-full", stateDotClass(container.state))} />
                     {container.state || "--"}
                   </span>
@@ -922,8 +922,9 @@ export default function DockerPage({ session }: Props) {
                 <div className="mt-1 truncate text-xs text-slate-500 dark:text-neutral-400">
                   {container.image || "--"}
                 </div>
-                <div className="mt-2 truncate text-[11px] text-slate-600 dark:text-neutral-300">
-                  {t("docker.ports")}: <span className="font-mono">{container.ports || "-"}</span>
+                <div className="mt-2 max-w-full text-[11px] text-slate-600 dark:text-neutral-300">
+                  <span className="font-medium">{t("docker.ports")}:</span>{" "}
+                  <span className="font-mono whitespace-normal break-all">{container.ports || "-"}</span>
                 </div>
                 <div className="mt-1 truncate text-[11px] text-slate-500 dark:text-neutral-400">
                   {container.status || container.running_for || "--"}

@@ -389,6 +389,7 @@ std::vector<VmInfo> DockurrManager::ListVms(std::string* error) const {
       {
           "docker",
           "ps",
+          "-a",
           "--filter",
           "ancestor=dockurr/windows",
           "--filter",
@@ -512,7 +513,7 @@ bool DockurrManager::CreateVm(const CreateVmRequest& request, VmInfo* created_vm
   }
 
   std::vector<std::string> run_command{
-      "docker",          "run",      "-d",      "--name",     name,      "--rm",
+      "docker",          "run",      "-d",      "--name",     name,
       "--device",        "/dev/kvm", "--device", "/dev/net/tun", "--cap-add", "NET_ADMIN",
       "--label",         "ferryman.dockurr.managed=true",
       "--label",         request.persistent ? "ferryman.dockurr.persist=true" : "ferryman.dockurr.persist=false",
