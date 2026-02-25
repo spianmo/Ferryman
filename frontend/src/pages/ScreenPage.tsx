@@ -974,6 +974,21 @@ export default function ScreenPage({ session }: Props) {
       return `${code}:${key}:${location}`;
     };
 
+    const shouldBypassKeyboardCapture = (event: KeyboardEvent) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) {
+        return false;
+      }
+      if (target.closest("[data-screen-clipboard-panel='true']")) {
+        return true;
+      }
+      if (target.isContentEditable) {
+        return true;
+      }
+      const tag = target.tagName;
+      return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+    };
+
     const releasePressedKeys = () => {
       if (pressedKeysRef.current.size <= 0) {
         tappedShortcutKeysRef.current.clear();
@@ -1014,11 +1029,7 @@ export default function ScreenPage({ session }: Props) {
     };
 
     const onKeyDownCapture = (event: KeyboardEvent) => {
-      if (
-        clipboardPanelOpen &&
-        event.target instanceof HTMLElement &&
-        event.target.closest("[data-screen-clipboard-panel='true']")
-      ) {
+      if (shouldBypassKeyboardCapture(event)) {
         return;
       }
       suppressKeyboardEvent(event);
@@ -1055,11 +1066,7 @@ export default function ScreenPage({ session }: Props) {
     };
 
     const onKeyUpCapture = (event: KeyboardEvent) => {
-      if (
-        clipboardPanelOpen &&
-        event.target instanceof HTMLElement &&
-        event.target.closest("[data-screen-clipboard-panel='true']")
-      ) {
+      if (shouldBypassKeyboardCapture(event)) {
         return;
       }
       suppressKeyboardEvent(event);
@@ -1089,11 +1096,7 @@ export default function ScreenPage({ session }: Props) {
     };
 
     const onKeyPressCapture = (event: KeyboardEvent) => {
-      if (
-        clipboardPanelOpen &&
-        event.target instanceof HTMLElement &&
-        event.target.closest("[data-screen-clipboard-panel='true']")
-      ) {
+      if (shouldBypassKeyboardCapture(event)) {
         return;
       }
       suppressKeyboardEvent(event);
@@ -1115,7 +1118,7 @@ export default function ScreenPage({ session }: Props) {
       window.removeEventListener("blur", onWindowBlur);
       releasePressedKeys();
     };
-  }, [nativeStreaming, clipboardPanelOpen]);
+  }, [nativeStreaming]);
 
   useEffect(() => {
     if (!resolutionOptions.some((item) => item.id === preferredResolutionTier)) {
@@ -1893,21 +1896,6 @@ export default function ScreenPage({ session }: Props) {
     };
   };
 
-  const keyPayload = (
-    key: string,
-    code: string,
-    location = 0,
-    flags?: Partial<{ shiftKey: boolean; ctrlKey: boolean; altKey: boolean; metaKey: boolean }>
-  ) => {
-    return {
-      key,
-      code,
-      location,
-      repeat: false,
-      ...mergedModifierFlags(flags),
-    };
-  };
-
   const keyPayloadExactFlags = (
     key: string,
     code: string,
@@ -2000,7 +1988,11 @@ export default function ScreenPage({ session }: Props) {
       return;
     }
     nativeSurfaceRef.current?.focus();
-    sendInput("key_tap", keyPayload(key, code, location, flags));
+    const mods = mergedModifierFlags(flags);
+    const payload = keyPayloadExactFlags(key, code, location, mods);
+    // Use explicit down/up to avoid key_tap releasing pinned modifiers on Windows.
+    sendInput("key_down", payload);
+    sendInput("key_up", payload);
   };
 
   const sendCtrlAltDel = () => {
@@ -2237,7 +2229,7 @@ export default function ScreenPage({ session }: Props) {
   };
 
   const onNativeMouseLeave = () => {
-    if (!nativeStreaming || screenIsFullscreen) {
+    if (!nativeStreaming) {
       return;
     }
     releasePressedMouseButtons();
@@ -2273,17 +2265,27 @@ export default function ScreenPage({ session }: Props) {
   const disableNativeStart = !nativeStreaming && (!hasScreenSources || screenSourcesLoading);
 
   useEffect(() => {
-    if (!nativeStreaming || screenIsFullscreen) {
+    if (!nativeStreaming) {
       return;
     }
     const onWindowMouseUp = () => {
       releasePressedMouseButtons();
     };
+    const onWindowPointerUp = () => {
+      releasePressedMouseButtons();
+    };
+    const onWindowBlur = () => {
+      releasePressedMouseButtons();
+    };
     window.addEventListener("mouseup", onWindowMouseUp);
+    window.addEventListener("pointerup", onWindowPointerUp);
+    window.addEventListener("blur", onWindowBlur);
     return () => {
       window.removeEventListener("mouseup", onWindowMouseUp);
+      window.removeEventListener("pointerup", onWindowPointerUp);
+      window.removeEventListener("blur", onWindowBlur);
     };
-  }, [nativeStreaming, screenIsFullscreen]);
+  }, [nativeStreaming]);
 
   useEffect(() => {
     if (screenIsFullscreen) {
@@ -2362,7 +2364,20 @@ export default function ScreenPage({ session }: Props) {
           "ring-2 ring-slate-900/70 dark:ring-neutral-50/70"
       )}
       tabIndex={0}
-      onMouseDown={() => nativeSurfaceRef.current?.focus()}
+      onMouseDown={(event) => {
+        if (!(event.target instanceof HTMLElement)) {
+          nativeSurfaceRef.current?.focus();
+          return;
+        }
+        if (
+          event.target.closest("[data-screen-clipboard-panel='true']") ||
+          event.target.closest("[data-screen-softkey-panel='true']") ||
+          event.target.closest("[data-screen-softkey-toggle='true']")
+        ) {
+          return;
+        }
+        nativeSurfaceRef.current?.focus();
+      }}
       onFocus={() => setNativeInputFocused(true)}
       onBlur={() => {
         setNativeInputFocused(false);
@@ -2428,6 +2443,7 @@ export default function ScreenPage({ session }: Props) {
           <div className="absolute left-2 top-1/2 z-50 -translate-y-1/2">
               <button
                 type="button"
+                data-screen-softkey-toggle="true"
                 className="inline-flex h-12 w-7 items-center justify-center rounded-xl bg-black/55 text-white ring-1 ring-white/20 backdrop-blur-sm transition-colors hover:bg-black/70"
                 onClick={() => setSoftKeyPanelOpen((prev) => !prev)}
                 aria-label={softKeyPanelOpen ? t("screen.softkeys_hide") : t("screen.softkeys_show")}
@@ -2440,10 +2456,16 @@ export default function ScreenPage({ session }: Props) {
                   softKeyPanelOpen ? "pointer-events-auto translate-x-0 opacity-100" : "pointer-events-none -translate-x-3 opacity-0"
                 )}
               >
-                <div className="max-h-[calc(100dvh-2rem)] overflow-y-auto rounded-2xl bg-black/60 p-2.5 shadow-2xl ring-1 ring-white/20 backdrop-blur-md">
-                  <div className="mb-2 flex items-center gap-2 rounded-xl border border-white/15 bg-white/8 px-2 py-1.5 text-[11px] font-semibold text-white/90">
-                    {targetPlatformBadge.icon}
-                    <span className="leading-tight">{targetPlatformBadge.label}</span>
+                <div
+                  data-screen-softkey-panel="true"
+                  className="max-h-[calc(100dvh-2rem)] overflow-y-auto rounded-2xl bg-black/60 p-2.5 shadow-2xl ring-1 ring-white/20 backdrop-blur-md"
+                >
+                  <div className="mb-2 px-1 text-white/85">
+                    <div className="inline-flex items-center gap-2 text-[11px] font-semibold tracking-wide">
+                      {targetPlatformBadge.icon}
+                      <span className="leading-tight">{targetPlatformBadge.label}</span>
+                    </div>
+                    <div className="mt-2 h-px bg-white/15" />
                   </div>
                   <div className="space-y-2">
                     <button

@@ -898,6 +898,47 @@ void EmitLinuxPayloadModifiers(Display* display, const json& payload, bool down)
 #endif
 
 #if defined(_WIN32)
+void EnsureWindowsDpiAwareness() {
+  static std::once_flag once;
+  std::call_once(once, [] {
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    if (user32 != nullptr) {
+      using SetProcessDpiAwarenessContextFn = BOOL(WINAPI*)(HANDLE);
+      const auto set_dpi_context = reinterpret_cast<SetProcessDpiAwarenessContextFn>(
+          GetProcAddress(user32, "SetProcessDpiAwarenessContext"));
+      if (set_dpi_context != nullptr) {
+#ifdef DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+        if (set_dpi_context(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {
+          return;
+        }
+#endif
+#ifdef DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE
+        if (set_dpi_context(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE)) {
+          return;
+        }
+#endif
+      }
+    }
+
+    HMODULE shcore = LoadLibraryW(L"shcore.dll");
+    if (shcore != nullptr) {
+      using SetProcessDpiAwarenessFn = HRESULT(WINAPI*)(int);
+      const auto set_process_awareness = reinterpret_cast<SetProcessDpiAwarenessFn>(
+          GetProcAddress(shcore, "SetProcessDpiAwareness"));
+      if (set_process_awareness != nullptr) {
+        constexpr int kProcessPerMonitorDpiAware = 2;
+        if (SUCCEEDED(set_process_awareness(kProcessPerMonitorDpiAware))) {
+          FreeLibrary(shcore);
+          return;
+        }
+      }
+      FreeLibrary(shcore);
+    }
+
+    (void)SetProcessDPIAware();
+  });
+}
+
 int WindowsButtonDownFlag(int button) {
   if (button == 2) {
     return MOUSEEVENTF_RIGHTDOWN;
@@ -1144,6 +1185,7 @@ std::vector<ScreenService::CaptureSource> ScreenService::ListCaptureSources(std:
   sources.push_back(std::move(source));
   return sources;
 #elif defined(_WIN32)
+  EnsureWindowsDpiAwareness();
   int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
   int height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
   if (width <= 0 || height <= 0) {
@@ -1769,6 +1811,7 @@ bool ScreenService::CaptureFrame(EncodedFrame* frame, std::string* error) {
   }
   return false;
 #else
+  EnsureWindowsDpiAwareness();
   const int left = GetSystemMetrics(SM_XVIRTUALSCREEN);
   const int top = GetSystemMetrics(SM_YVIRTUALSCREEN);
   const int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
@@ -2327,6 +2370,7 @@ bool ScreenService::InjectInputEventNative(const InputEvent& event, std::string*
   }
   return false;
 #elif defined(_WIN32)
+  EnsureWindowsDpiAwareness();
   json payload = json::object();
   if (!event.payload.empty()) {
     payload = json::parse(event.payload, nullptr, false);
@@ -2350,6 +2394,8 @@ bool ScreenService::InjectInputEventNative(const InputEvent& event, std::string*
   const int top = GetSystemMetrics(SM_YVIRTUALSCREEN);
   const double screen_w = static_cast<double>(GetSystemMetrics(SM_CXVIRTUALSCREEN));
   const double screen_h = static_cast<double>(GetSystemMetrics(SM_CYVIRTUALSCREEN));
+  const double screen_max_x = left + std::max(1.0, screen_w - 1.0);
+  const double screen_max_y = top + std::max(1.0, screen_h - 1.0);
   const auto map_pointer = [&]() {
     const double input_x = payload.value("x", current_x);
     const double input_y = payload.value("y", current_y);
@@ -2357,11 +2403,11 @@ bool ScreenService::InjectInputEventNative(const InputEvent& event, std::string*
     const double view_h = payload.value("height", screen_h);
 
     if (view_w > 1.0 && view_h > 1.0) {
-      current_x = left + std::clamp(input_x / view_w, 0.0, 1.0) * screen_w;
-      current_y = top + std::clamp(input_y / view_h, 0.0, 1.0) * screen_h;
+      current_x = left + std::clamp(input_x / view_w, 0.0, 1.0) * std::max(1.0, screen_w - 1.0);
+      current_y = top + std::clamp(input_y / view_h, 0.0, 1.0) * std::max(1.0, screen_h - 1.0);
     } else {
-      current_x = input_x;
-      current_y = input_y;
+      current_x = std::clamp(input_x, static_cast<double>(left), screen_max_x);
+      current_y = std::clamp(input_y, static_cast<double>(top), screen_max_y);
     }
   };
   const auto persist_pointer = [&]() {

@@ -26,6 +26,8 @@ using nlohmann::json;
 
 constexpr const char* kDockurrWindowsImage = "dockurr/windows";
 constexpr const char* kDockurrMacosImage = "dockurr/macos";
+constexpr const char* kDockurWindowsImage = "dockur/windows";
+constexpr const char* kDockurMacosImage = "dockur/macos";
 constexpr int kMinLogTailLines = 1;
 constexpr int kMaxLogTailLines = 500;
 
@@ -295,11 +297,53 @@ std::string RemoveNamePrefix(std::string name) {
   return name;
 }
 
+std::string ToLower(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  return value;
+}
+
+bool IsTruthy(std::string value) {
+  value = ToLower(util::Trim(std::move(value)));
+  return value == "1" || value == "true" || value == "yes" || value == "on";
+}
+
+bool IsDockurrImage(std::string image) {
+  image = ToLower(std::move(image));
+  return image.find(kDockurrWindowsImage) != std::string::npos ||
+         image.find(kDockurrMacosImage) != std::string::npos ||
+         image.find(kDockurWindowsImage) != std::string::npos ||
+         image.find(kDockurMacosImage) != std::string::npos;
+}
+
+bool IsManagedDockurrLabel(const json& inspect_item) {
+  if (!inspect_item.is_object() || !inspect_item.contains("Config") || !inspect_item["Config"].is_object()) {
+    return false;
+  }
+  const auto& config = inspect_item["Config"];
+  if (!config.contains("Labels") || !config["Labels"].is_object()) {
+    return false;
+  }
+  const auto& labels = config["Labels"];
+  if (!labels.contains("ferryman.dockurr.managed")) {
+    return false;
+  }
+  if (labels["ferryman.dockurr.managed"].is_boolean()) {
+    return labels["ferryman.dockurr.managed"].get<bool>();
+  }
+  if (labels["ferryman.dockurr.managed"].is_string()) {
+    return IsTruthy(labels["ferryman.dockurr.managed"].get<std::string>());
+  }
+  return false;
+}
+
 std::string DetectOsFromImage(const std::string& image) {
-  if (image.find(kDockurrWindowsImage) != std::string::npos) {
+  const std::string lower = ToLower(image);
+  if (lower.find(kDockurrWindowsImage) != std::string::npos || lower.find(kDockurWindowsImage) != std::string::npos) {
     return "windows";
   }
-  if (image.find(kDockurrMacosImage) != std::string::npos) {
+  if (lower.find(kDockurrMacosImage) != std::string::npos || lower.find(kDockurMacosImage) != std::string::npos) {
     return "macos";
   }
   return "";
@@ -390,10 +434,6 @@ std::vector<VmInfo> DockurrManager::ListVms(std::string* error) const {
           "docker",
           "ps",
           "-a",
-          "--filter",
-          "ancestor=dockurr/windows",
-          "--filter",
-          "ancestor=dockurr/macos",
           "--format",
           "{{.ID}}\t{{.Image}}\t{{.Names}}\t{{.Ports}}\t{{.RunningFor}}",
       },
@@ -454,6 +494,10 @@ std::vector<VmInfo> DockurrManager::ListVms(std::string* error) const {
     vm.image = row.image;
     vm.ports = row.ports;
     vm.running_for = row.running_for;
+    bool include = IsDockurrImage(vm.image);
+    if (!inspect_item.is_null() && inspect_item.is_object() && IsManagedDockurrLabel(inspect_item)) {
+      include = true;
+    }
     if (!inspect_item.is_null() && inspect_item.is_object()) {
       if (inspect_item.contains("Name") && inspect_item["Name"].is_string()) {
         vm.name = RemoveNamePrefix(inspect_item["Name"].get<std::string>());
@@ -463,6 +507,7 @@ std::vector<VmInfo> DockurrManager::ListVms(std::string* error) const {
         if (config.contains("Image") && config["Image"].is_string()) {
           vm.image = config["Image"].get<std::string>();
           vm.os = DetectOsFromImage(vm.image);
+          include = include || IsDockurrImage(vm.image);
         }
       }
       vm.novnc_port = HostPortFromInspect(inspect_item, "8006/tcp");
@@ -472,6 +517,9 @@ std::vector<VmInfo> DockurrManager::ListVms(std::string* error) const {
         vm.desktop_port = HostPortFromInspect(inspect_item, "5900/tcp");
       }
       vm.persistent = IsPersistentVm(inspect_item);
+    }
+    if (!include) {
+      continue;
     }
     vms.push_back(std::move(vm));
   }
