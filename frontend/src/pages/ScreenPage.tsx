@@ -85,6 +85,7 @@ const AV1_WEBCODECS_CODEC_CANDIDATES = [
 ] as const;
 const MAX_DECODE_QUEUE_SIZE = 3;
 const SCREEN_UPLOAD_CHUNK_BYTES = 256 * 1024;
+const SOFT_KEY_SINGLE_TAP_DELAY_MS = 220;
 
 const DEFAULT_RESOLUTION_OPTIONS: Array<{ id: ResolutionTier; scalePercent: number }> = [
   { id: "full", scalePercent: 100 },
@@ -179,6 +180,12 @@ type ScreenUploadTask = {
   overwrittenByConflict: boolean;
   skippedByConflict: boolean;
   error: string;
+};
+
+type HoldableSoftKey = "ctrl" | "alt" | "meta" | "tab" | "escape";
+type HeldSoftNonModifierKeys = {
+  tab: boolean;
+  escape: boolean;
 };
 
 type PendingUploadBatch = {
@@ -534,6 +541,8 @@ export default function ScreenPage({ session }: Props) {
   const pressedKeysRef = useRef(new Map<string, { key: string; code: string; location: number }>());
   const tappedShortcutKeysRef = useRef(new Set<string>());
   const pinnedKeysRef = useRef({ ctrl: false, alt: false, meta: false });
+  const heldSoftNonModifiersRef = useRef<HeldSoftNonModifierKeys>({ tab: false, escape: false });
+  const softKeyClickTimersRef = useRef(new Map<HoldableSoftKey, number>());
   const nativeWantedRef = useRef(false);
   const [dotState, setDotState] = useState<"idle" | "connecting" | "active" | "error">("idle");
 
@@ -615,6 +624,10 @@ export default function ScreenPage({ session }: Props) {
   const uploadAbortRef = useRef(new Map<string, AbortController>());
   const uploadCancelledRef = useRef(new Set<string>());
   const [pinnedKeys, setPinnedKeys] = useState({ ctrl: false, alt: false, meta: false });
+  const [heldSoftNonModifiers, setHeldSoftNonModifiers] = useState<HeldSoftNonModifierKeys>({
+    tab: false,
+    escape: false,
+  });
   const [remotePlatform, setRemotePlatform] = useState<RemotePlatform>("unknown");
 
   useEffect(() => {
@@ -625,7 +638,7 @@ export default function ScreenPage({ session }: Props) {
       uploadAbortRef.current.clear();
       uploadCancelledRef.current.clear();
       pendingUploadBatchRef.current = null;
-      releasePinnedModifierKeys();
+      releaseHeldSoftKeys();
       wsRef.current?.close();
       wsRef.current = null;
       revokeNativeFrameObjectUrl();
@@ -1038,7 +1051,7 @@ export default function ScreenPage({ session }: Props) {
     setSoftKeyPanelOpen(false);
     setDragUploadActive(false);
     dragUploadCounterRef.current = 0;
-    releasePinnedModifierKeys();
+    releaseHeldSoftKeys();
   }, [nativeStreaming]);
 
   useEffect(() => {
@@ -2005,6 +2018,27 @@ export default function ScreenPage({ session }: Props) {
     setPinnedKeys(next);
   };
 
+  const setHeldSoftNonModifiersState = (next: HeldSoftNonModifierKeys) => {
+    heldSoftNonModifiersRef.current = next;
+    setHeldSoftNonModifiers(next);
+  };
+
+  const clearSoftKeyClickTimer = (softKey: HoldableSoftKey) => {
+    const timer = softKeyClickTimersRef.current.get(softKey);
+    if (timer === undefined) {
+      return;
+    }
+    window.clearTimeout(timer);
+    softKeyClickTimersRef.current.delete(softKey);
+  };
+
+  const flushSoftKeyClickTimers = () => {
+    for (const timer of softKeyClickTimersRef.current.values()) {
+      window.clearTimeout(timer);
+    }
+    softKeyClickTimersRef.current.clear();
+  };
+
   const modifierKeyMeta = (modifier: "ctrl" | "alt" | "meta") => {
     if (modifier === "ctrl") {
       return { key: "Control", code: "ControlLeft", location: 1 };
@@ -2013,6 +2047,35 @@ export default function ScreenPage({ session }: Props) {
       return { key: "Alt", code: "AltLeft", location: 1 };
     }
     return { key: "Meta", code: "MetaLeft", location: 1 };
+  };
+
+  const nonModifierSoftKeyMeta = (softKey: "tab" | "escape") => {
+    if (softKey === "tab") {
+      return { key: "Tab", code: "Tab", location: 0 };
+    }
+    return { key: "Escape", code: "Escape", location: 0 };
+  };
+
+  const isModifierSoftKey = (softKey: HoldableSoftKey): softKey is "ctrl" | "alt" | "meta" => {
+    return softKey === "ctrl" || softKey === "alt" || softKey === "meta";
+  };
+
+  const releaseHeldSoftNonModifierKeys = () => {
+    const current = heldSoftNonModifiersRef.current;
+    if (!current.tab && !current.escape) {
+      return;
+    }
+    const order: Array<"escape" | "tab"> = ["escape", "tab"];
+    const next = { ...current };
+    for (const softKey of order) {
+      if (!next[softKey]) {
+        continue;
+      }
+      next[softKey] = false;
+      const meta = nonModifierSoftKeyMeta(softKey);
+      sendInput("key_up", keyPayloadExactFlags(meta.key, meta.code, meta.location, mergedModifierFlags()));
+    }
+    setHeldSoftNonModifiersState({ tab: false, escape: false });
   };
 
   const releasePinnedModifierKeys = () => {
@@ -2042,6 +2105,12 @@ export default function ScreenPage({ session }: Props) {
     setPinnedKeysState({ ctrl: false, alt: false, meta: false });
   };
 
+  const releaseHeldSoftKeys = () => {
+    flushSoftKeyClickTimers();
+    releaseHeldSoftNonModifierKeys();
+    releasePinnedModifierKeys();
+  };
+
   const togglePinnedModifier = (modifier: "ctrl" | "alt" | "meta") => {
     if (!nativeStreaming) {
       return;
@@ -2064,6 +2133,18 @@ export default function ScreenPage({ session }: Props) {
     setPinnedKeysState(next);
   };
 
+  const toggleHeldSoftNonModifier = (softKey: "tab" | "escape") => {
+    if (!nativeStreaming) {
+      return;
+    }
+    nativeSurfaceRef.current?.focus();
+    const prev = heldSoftNonModifiersRef.current;
+    const next = { ...prev, [softKey]: !prev[softKey] };
+    const meta = nonModifierSoftKeyMeta(softKey);
+    sendInput(next[softKey] ? "key_down" : "key_up", keyPayloadExactFlags(meta.key, meta.code, meta.location, mergedModifierFlags()));
+    setHeldSoftNonModifiersState(next);
+  };
+
   const sendSoftKeyTap = (
     key: string,
     code: string,
@@ -2081,21 +2162,57 @@ export default function ScreenPage({ session }: Props) {
     sendInput("key_up", payload);
   };
 
+  const sendSoftKeySingleTap = (softKey: HoldableSoftKey) => {
+    if (!nativeStreaming) {
+      return;
+    }
+    clearSoftKeyClickTimer(softKey);
+    const timer = window.setTimeout(() => {
+      softKeyClickTimersRef.current.delete(softKey);
+      if (isModifierSoftKey(softKey)) {
+        if (pinnedKeysRef.current[softKey]) {
+          return;
+        }
+        const meta = modifierKeyMeta(softKey);
+        sendSoftKeyTap(meta.key, meta.code, meta.location);
+        return;
+      }
+      if (heldSoftNonModifiersRef.current[softKey]) {
+        return;
+      }
+      const meta = nonModifierSoftKeyMeta(softKey);
+      sendSoftKeyTap(meta.key, meta.code, meta.location);
+    }, SOFT_KEY_SINGLE_TAP_DELAY_MS);
+    softKeyClickTimersRef.current.set(softKey, timer);
+  };
+
+  const handleSoftKeyDoubleClick = (softKey: HoldableSoftKey) => {
+    clearSoftKeyClickTimer(softKey);
+    if (isModifierSoftKey(softKey)) {
+      togglePinnedModifier(softKey);
+      return;
+    }
+    toggleHeldSoftNonModifier(softKey);
+  };
+
   const sendCtrlAltDel = () => {
     if (!nativeStreaming) {
       return;
     }
+    releaseHeldSoftKeys();
     nativeSurfaceRef.current?.focus();
-    sendInput("key_tap", {
-      key: "Delete",
-      code: "Delete",
-      location: 0,
-      repeat: false,
-      shiftKey: false,
-      ctrlKey: true,
-      altKey: true,
-      metaKey: false,
-    });
+    const ctrlMeta = modifierKeyMeta("ctrl");
+    const altMeta = modifierKeyMeta("alt");
+    sendInput("key_down", keyPayloadExactFlags(ctrlMeta.key, ctrlMeta.code, ctrlMeta.location, { ctrlKey: true }));
+    sendInput(
+      "key_down",
+      keyPayloadExactFlags(altMeta.key, altMeta.code, altMeta.location, { ctrlKey: true, altKey: true })
+    );
+    const deletePayload = keyPayloadExactFlags("Delete", "Delete", 0, { ctrlKey: true, altKey: true });
+    sendInput("key_down", deletePayload);
+    sendInput("key_up", deletePayload);
+    sendInput("key_up", keyPayloadExactFlags(altMeta.key, altMeta.code, altMeta.location, { ctrlKey: true }));
+    sendInput("key_up", keyPayloadExactFlags(ctrlMeta.key, ctrlMeta.code, ctrlMeta.location));
   };
 
   const sendCommandOptionEsc = () => {
@@ -2603,6 +2720,7 @@ export default function ScreenPage({ session }: Props) {
     };
     const onWindowBlur = () => {
       releasePressedMouseButtons();
+      releaseHeldSoftKeys();
     };
     window.addEventListener("mouseup", onWindowMouseUp);
     window.addEventListener("pointerup", onWindowPointerUp);
@@ -2615,13 +2733,14 @@ export default function ScreenPage({ session }: Props) {
   }, [nativeStreaming]);
 
   useEffect(() => {
-    if (screenIsFullscreen) {
+    if (!nativeStreaming) {
       setSoftKeyPanelOpen(false);
+      releaseHeldSoftKeys();
       return;
     }
     setSoftKeyPanelOpen(false);
-    releasePinnedModifierKeys();
-  }, [screenIsFullscreen]);
+    releaseHeldSoftKeys();
+  }, [nativeStreaming, screenIsFullscreen]);
 
   const softKeyButtonClass = (active = false) => {
     return cn(
@@ -2852,91 +2971,104 @@ export default function ScreenPage({ session }: Props) {
             </div>
           </div>
         ) : null}
-        {screenIsFullscreen ? (
+        {nativeStreaming ? (
           <div className="absolute left-2 top-1/2 z-50 -translate-y-1/2">
-              <button
-                type="button"
-                data-screen-softkey-toggle="true"
-                className="inline-flex h-12 w-7 items-center justify-center rounded-xl bg-black/55 text-white ring-1 ring-white/20 backdrop-blur-sm transition-colors hover:bg-black/70"
-                onClick={() => setSoftKeyPanelOpen((prev) => !prev)}
-                aria-label={softKeyPanelOpen ? t("screen.softkeys_hide") : t("screen.softkeys_show")}
-              >
-                {softKeyPanelOpen ? <FiChevronLeft /> : <FiChevronRight />}
-              </button>
+            <button
+              type="button"
+              data-screen-softkey-toggle="true"
+              className="inline-flex h-12 w-7 items-center justify-center rounded-xl bg-black/55 text-white ring-1 ring-white/20 backdrop-blur-sm transition-colors hover:bg-black/70"
+              onClick={() => setSoftKeyPanelOpen((prev) => !prev)}
+              aria-label={softKeyPanelOpen ? t("screen.softkeys_hide") : t("screen.softkeys_show")}
+            >
+              {softKeyPanelOpen ? <FiChevronLeft /> : <FiChevronRight />}
+            </button>
+            <div
+              className={cn(
+                "absolute left-full top-1/2 ml-2 -translate-y-1/2 transition-all duration-300 ease-out",
+                screenIsFullscreen ? "w-[min(17rem,calc(100vw-4rem))]" : "w-[13.5rem]",
+                softKeyPanelOpen ? "pointer-events-auto translate-x-0 opacity-100" : "pointer-events-none -translate-x-3 opacity-0"
+              )}
+            >
               <div
+                data-screen-softkey-panel="true"
                 className={cn(
-                  "absolute left-full top-1/2 ml-2 w-[min(17rem,calc(100vw-4rem))] -translate-y-1/2 transition-all duration-300 ease-out",
-                  softKeyPanelOpen ? "pointer-events-auto translate-x-0 opacity-100" : "pointer-events-none -translate-x-3 opacity-0"
+                  "overflow-y-auto rounded-2xl p-2.5 shadow-2xl backdrop-blur-md",
+                  screenIsFullscreen
+                    ? "max-h-[calc(100dvh-2rem)] bg-black/60 ring-1 ring-white/20"
+                    : "max-h-[calc(100%-0.5rem)] bg-slate-900/82 ring-1 ring-slate-700/70"
                 )}
               >
-                <div
-                  data-screen-softkey-panel="true"
-                  className="max-h-[calc(100dvh-2rem)] overflow-y-auto rounded-2xl bg-black/60 p-2.5 shadow-2xl ring-1 ring-white/20 backdrop-blur-md"
-                >
-                  <div className="mb-2 px-1 text-white/85">
-                    <div className="inline-flex items-center gap-2 text-[11px] font-semibold tracking-wide">
-                      {targetPlatformBadge.icon}
-                      <span className="leading-tight">{targetPlatformBadge.label}</span>
-                    </div>
-                    <div className="mt-2 h-px bg-white/15" />
+                <div className="mb-2 px-1 text-white/85">
+                  <div className="inline-flex items-center gap-2 text-[11px] font-semibold tracking-wide">
+                    {targetPlatformBadge.icon}
+                    <span className="leading-tight">{targetPlatformBadge.label}</span>
                   </div>
-                  <div className="space-y-2">
-                    <button
-                      type="button"
-                      className={softKeyButtonClass(pinnedKeys.ctrl)}
-                      onClick={() => togglePinnedModifier("ctrl")}
-                      aria-pressed={pinnedKeys.ctrl}
-                    >
-                      <FiChevronsUp className="h-3.5 w-3.5 shrink-0" />
-                      <span className="min-w-0 whitespace-normal break-words">{softKeyModifierLabels.ctrlLabel}</span>
-                    </button>
-                    <button
-                      type="button"
-                      className={softKeyButtonClass(pinnedKeys.alt)}
-                      onClick={() => togglePinnedModifier("alt")}
-                      aria-pressed={pinnedKeys.alt}
-                    >
-                      <FiKey className="h-3.5 w-3.5 shrink-0" />
-                      <span className="min-w-0 whitespace-normal break-words">{softKeyModifierLabels.altLabel}</span>
-                    </button>
-                    <button
-                      type="button"
-                      className={softKeyButtonClass(pinnedKeys.meta)}
-                      onClick={() => togglePinnedModifier("meta")}
-                      aria-pressed={pinnedKeys.meta}
-                    >
-                      {metaModifierIcon}
-                      <span className="min-w-0 whitespace-normal break-words">{softKeyModifierLabels.metaLabel}</span>
-                    </button>
-                  </div>
-                  <div className="mt-2 space-y-2 border-t border-white/15 pt-2">
-                    <button
-                      type="button"
-                      className={softKeyButtonClass(false)}
-                      onClick={() => sendSoftKeyTap("Tab", "Tab")}
-                    >
-                      <FiChevronsUp className="h-3.5 w-3.5 shrink-0 rotate-90" />
-                      <span className="min-w-0 whitespace-normal break-words">{t("screen.softkey_tab")}</span>
-                    </button>
-                    <button
-                      type="button"
-                      className={softKeyButtonClass(false)}
-                      onClick={() => sendSoftKeyTap("Escape", "Escape")}
-                    >
-                      <FiXCircle className="h-3.5 w-3.5 shrink-0" />
-                      <span className="min-w-0 whitespace-normal break-words">{t("screen.softkey_esc")}</span>
-                    </button>
-                    <button
-                      type="button"
-                      className={softKeyButtonClass(false)}
-                      onClick={sendSystemAttention}
-                    >
-                      <FiDelete className="h-3.5 w-3.5 shrink-0" />
-                      <span className="min-w-0 whitespace-normal break-words">{systemAttentionLabel}</span>
-                    </button>
-                  </div>
+                  <div className="mt-2 h-px bg-white/15" />
+                </div>
+                <div className="space-y-2">
+                  <button
+                    type="button"
+                    className={softKeyButtonClass(pinnedKeys.ctrl)}
+                    onClick={() => sendSoftKeySingleTap("ctrl")}
+                    onDoubleClick={() => handleSoftKeyDoubleClick("ctrl")}
+                    aria-pressed={pinnedKeys.ctrl}
+                  >
+                    <FiChevronsUp className="h-3.5 w-3.5 shrink-0" />
+                    <span className="min-w-0 whitespace-normal break-words">{softKeyModifierLabels.ctrlLabel}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={softKeyButtonClass(pinnedKeys.alt)}
+                    onClick={() => sendSoftKeySingleTap("alt")}
+                    onDoubleClick={() => handleSoftKeyDoubleClick("alt")}
+                    aria-pressed={pinnedKeys.alt}
+                  >
+                    <FiKey className="h-3.5 w-3.5 shrink-0" />
+                    <span className="min-w-0 whitespace-normal break-words">{softKeyModifierLabels.altLabel}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={softKeyButtonClass(pinnedKeys.meta)}
+                    onClick={() => sendSoftKeySingleTap("meta")}
+                    onDoubleClick={() => handleSoftKeyDoubleClick("meta")}
+                    aria-pressed={pinnedKeys.meta}
+                  >
+                    {metaModifierIcon}
+                    <span className="min-w-0 whitespace-normal break-words">{softKeyModifierLabels.metaLabel}</span>
+                  </button>
+                </div>
+                <div className="mt-2 space-y-2 border-t border-white/15 pt-2">
+                  <button
+                    type="button"
+                    className={softKeyButtonClass(heldSoftNonModifiers.tab)}
+                    onClick={() => sendSoftKeySingleTap("tab")}
+                    onDoubleClick={() => handleSoftKeyDoubleClick("tab")}
+                    aria-pressed={heldSoftNonModifiers.tab}
+                  >
+                    <FiChevronsUp className="h-3.5 w-3.5 shrink-0 rotate-90" />
+                    <span className="min-w-0 whitespace-normal break-words">{t("screen.softkey_tab")}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={softKeyButtonClass(heldSoftNonModifiers.escape)}
+                    onClick={() => sendSoftKeySingleTap("escape")}
+                    onDoubleClick={() => handleSoftKeyDoubleClick("escape")}
+                    aria-pressed={heldSoftNonModifiers.escape}
+                  >
+                    <FiXCircle className="h-3.5 w-3.5 shrink-0" />
+                    <span className="min-w-0 whitespace-normal break-words">{t("screen.softkey_esc")}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={softKeyButtonClass(false)}
+                    onClick={sendSystemAttention}
+                  >
+                    <FiDelete className="h-3.5 w-3.5 shrink-0" />
+                    <span className="min-w-0 whitespace-normal break-words">{systemAttentionLabel}</span>
+                  </button>
                 </div>
               </div>
+            </div>
           </div>
         ) : null}
         {uploadTasks.length > 0 ? (

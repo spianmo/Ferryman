@@ -85,6 +85,7 @@ class ScreenService {
   std::optional<EncodedFrame> latest_frame_;
 
   std::atomic<bool> capture_running_{false};
+  std::mutex capture_lifecycle_mu_;
   std::thread capture_thread_;
   int capture_fps_ = 10;
   std::atomic<bool> encode_jpeg_{false};
