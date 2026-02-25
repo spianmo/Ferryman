@@ -13,6 +13,8 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <exception>
+#include <iostream>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -592,7 +594,18 @@ static void FerrymanDispatchSampleBuffer(void* owner, CMSampleBufferRef sample_b
     return;
   }
   auto* impl = static_cast<ferryman::web::ScreenCaptureKitBridgeImpl*>(owner);
-  impl->OnSampleBuffer(sample_buffer, type);
+  @try {
+    try {
+      impl->OnSampleBuffer(sample_buffer, type);
+    } catch (const std::exception& ex) {
+      std::cerr << "[ferryman] ScreenCaptureKit sample callback exception: " << ex.what() << '\n';
+    } catch (...) {
+      std::cerr << "[ferryman] ScreenCaptureKit sample callback exception: unknown" << '\n';
+    }
+  } @catch (NSException* exception) {
+    const char* reason = exception.reason != nil ? exception.reason.UTF8String : "unknown";
+    std::cerr << "[ferryman] ScreenCaptureKit sample callback ObjC exception: " << reason << '\n';
+  }
 }
 
 #else

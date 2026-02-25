@@ -12,6 +12,8 @@
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
+#include <exception>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -1346,9 +1348,41 @@ bool ScreenService::StartCapture(int fps, const std::string& source_id, std::str
     active_capture_source_id_ = normalized_source_id;
   }
 
-  capture_thread_ = std::thread([this, safe_fps]() {
-    CaptureLoop(safe_fps);
-  });
+  try {
+    capture_thread_ = std::thread([this, safe_fps]() noexcept {
+      try {
+        CaptureLoop(safe_fps);
+      } catch (const std::exception& ex) {
+        std::cerr << "[ferryman] native capture thread exception: " << ex.what() << '\n';
+        capture_running_ = false;
+      } catch (...) {
+        std::cerr << "[ferryman] native capture thread exception: unknown" << '\n';
+        capture_running_ = false;
+      }
+    });
+  } catch (const std::exception& ex) {
+    capture_running_ = false;
+#if defined(__APPLE__)
+    if (capture_bridge_) {
+      capture_bridge_->Stop();
+    }
+#endif
+    if (error != nullptr) {
+      *error = std::string("failed to start capture thread: ") + ex.what();
+    }
+    return false;
+  } catch (...) {
+    capture_running_ = false;
+#if defined(__APPLE__)
+    if (capture_bridge_) {
+      capture_bridge_->Stop();
+    }
+#endif
+    if (error != nullptr) {
+      *error = "failed to start capture thread";
+    }
+    return false;
+  }
   return true;
 #endif
 }
@@ -1394,16 +1428,26 @@ void ScreenService::CaptureLoop(int fps) {
   uint64_t seq = 0;
 
   while (capture_running_) {
-    EncodedFrame frame;
-    std::string error;
-    if (CaptureFrame(&frame, &error)) {
-      frame.sequence = ++seq;
-      frame.captured_at_ms = EpochMillisNow();
-      std::lock_guard<std::mutex> lock(frame_mu_);
-      latest_frame_ = std::move(frame);
-      continue;
+    try {
+      EncodedFrame frame;
+      std::string error;
+      if (CaptureFrame(&frame, &error)) {
+        frame.sequence = ++seq;
+        frame.captured_at_ms = EpochMillisNow();
+        std::lock_guard<std::mutex> lock(frame_mu_);
+        latest_frame_ = std::move(frame);
+        continue;
+      }
+      std::this_thread::sleep_for(retry_interval);
+    } catch (const std::exception& ex) {
+      std::cerr << "[ferryman] native capture loop exception: " << ex.what() << '\n';
+      capture_running_ = false;
+      break;
+    } catch (...) {
+      std::cerr << "[ferryman] native capture loop exception: unknown" << '\n';
+      capture_running_ = false;
+      break;
     }
-    std::this_thread::sleep_for(retry_interval);
   }
 }
 

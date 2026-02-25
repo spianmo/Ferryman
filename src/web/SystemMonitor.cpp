@@ -762,8 +762,8 @@ bool SystemMonitor::ReadDiskVolumes(std::vector<DiskVolume>* volumes) const {
       volume.id = mountpoint;
       volume.name = filesystem;
       volume.mount = mountpoint;
-      volume.total_bytes = blocks_kb * 1024ULL;
-      volume.free_bytes = (std::min)(available_kb * 1024ULL, volume.total_bytes);
+      volume.total_bytes = blocks_kb * static_cast<uint64_t>(1024);
+      volume.free_bytes = (std::min)(available_kb * static_cast<uint64_t>(1024), volume.total_bytes);
       volume.used_bytes = volume.total_bytes - volume.free_bytes;
       volume.used_percent = volume.total_bytes > 0
           ? ClampPercent(static_cast<double>(volume.used_bytes) * 100.0 / static_cast<double>(volume.total_bytes))
