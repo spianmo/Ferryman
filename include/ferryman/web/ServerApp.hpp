@@ -89,6 +89,7 @@ class ServerApp {
     std::string owner_session_token;
     std::string transfer_id;
     std::string file_name;
+    std::string conflict_strategy = "keep_both";
     std::filesystem::path temp_path;
     std::filesystem::path target_directory;
     std::uint64_t expected_bytes = 0;
@@ -131,6 +132,7 @@ class ServerApp {
   int HandleScreenCaps(HttpRequest* req, HttpResponse* resp);
   int HandleScreenSources(HttpRequest* req, HttpResponse* resp);
   int HandleScreenInput(HttpRequest* req, HttpResponse* resp);
+  int HandleScreenUploadPreflight(HttpRequest* req, HttpResponse* resp);
   int HandleScreenUploadBegin(HttpRequest* req, HttpResponse* resp);
   int HandleScreenUploadChunk(HttpRequest* req, HttpResponse* resp);
   int HandleScreenUploadCommit(HttpRequest* req, HttpResponse* resp);

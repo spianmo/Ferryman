@@ -789,6 +789,10 @@ bool ServerApp::RegisterHttpRoutes() {
     return HandleScreenInput(req, resp);
   });
 
+  http_service_.POST("/api/screen/upload/preflight", [this](HttpRequest* req, HttpResponse* resp) {
+    return HandleScreenUploadPreflight(req, resp);
+  });
+
   http_service_.POST("/api/screen/upload/begin", [this](HttpRequest* req, HttpResponse* resp) {
     return HandleScreenUploadBegin(req, resp);
   });
@@ -1686,6 +1690,57 @@ int ServerApp::HandleScreenInput(HttpRequest* req, HttpResponse* resp) {
                          }));
 }
 
+int ServerApp::HandleScreenUploadPreflight(HttpRequest* req, HttpResponse* resp) {
+  auto session = RequireSession(req, resp);
+  if (!session.has_value()) {
+    return resp->status_code;
+  }
+
+  const auto payload = ParseJsonOrNull(req->body);
+  if (!payload.has_value() || !payload->is_object()) {
+    return Json(resp, 400, api::Error("invalid payload"));
+  }
+  const auto names_it = payload->find("names");
+  if (names_it == payload->end() || !names_it->is_array()) {
+    return Json(resp, 400, api::Error("names is required"));
+  }
+
+  const std::filesystem::path target_directory = ResolveDropTargetDirectory();
+  std::error_code fs_error;
+  if (!std::filesystem::exists(target_directory, fs_error)) {
+    std::filesystem::create_directories(target_directory, fs_error);
+  }
+  if (fs_error || !std::filesystem::is_directory(target_directory)) {
+    return Json(resp, 500, api::Error("failed to resolve upload target directory"));
+  }
+
+  json conflict_names = json::array();
+  for (const auto& raw_name_value : *names_it) {
+    std::string raw_name;
+    if (raw_name_value.is_string()) {
+      raw_name = raw_name_value.get<std::string>();
+    } else {
+      raw_name = raw_name_value.dump();
+    }
+    const std::string safe_name = SanitizeUploadFilename(raw_name);
+    const std::filesystem::path target_path = target_directory / safe_name;
+    const bool exists = std::filesystem::exists(target_path, fs_error);
+    if (fs_error) {
+      return Json(resp, 500, api::Error("failed to check target file state"));
+    }
+    if (exists) {
+      conflict_names.push_back(safe_name);
+    }
+  }
+
+  return Json(resp, 200, api::Success({
+                             {"target_dir", target_directory.string(), false},
+                             {"conflicts", conflict_names.dump(), true},
+                             {"has_conflicts", conflict_names.empty() ? "false" : "true", true},
+                             {"checked_count", std::to_string(names_it->size()), true},
+                         }));
+}
+
 int ServerApp::HandleScreenUploadBegin(HttpRequest* req, HttpResponse* resp) {
   auto session = RequireSession(req, resp);
   if (!session.has_value()) {
@@ -1701,6 +1756,13 @@ int ServerApp::HandleScreenUploadBegin(HttpRequest* req, HttpResponse* resp) {
   if (file_name_raw.empty()) {
     return Json(resp, 400, api::Error("name is required"));
   }
+  std::string conflict_strategy = ToLower(util::Trim(JsonString(payload, "conflict_strategy", "keep_both")));
+  if (conflict_strategy.empty()) {
+    conflict_strategy = "keep_both";
+  }
+  if (conflict_strategy != "overwrite" && conflict_strategy != "keep_both" && conflict_strategy != "skip") {
+    return Json(resp, 400, api::Error("invalid conflict_strategy"));
+  }
 
   const std::filesystem::path target_directory = ResolveDropTargetDirectory();
   std::error_code fs_error;
@@ -1709,6 +1771,28 @@ int ServerApp::HandleScreenUploadBegin(HttpRequest* req, HttpResponse* resp) {
   }
   if (fs_error || !std::filesystem::is_directory(target_directory)) {
     return Json(resp, 500, api::Error("failed to resolve upload target directory"));
+  }
+
+  const std::string requested_safe_name = SanitizeUploadFilename(file_name_raw);
+  const std::filesystem::path desired_path = target_directory / requested_safe_name;
+  const bool desired_exists = std::filesystem::exists(desired_path, fs_error);
+  if (fs_error) {
+    return Json(resp, 500, api::Error("failed to check target file state"));
+  }
+  if (desired_exists && std::filesystem::is_directory(desired_path, fs_error)) {
+    return Json(resp, 400, api::Error("target path is a directory"));
+  }
+  if (conflict_strategy == "skip" && desired_exists) {
+    return Json(resp, 200, api::Success({
+                               {"transfer_id", transfer_id, false},
+                               {"target_dir", target_directory.string(), false},
+                               {"path", desired_path.string(), false},
+                               {"requested_name", requested_safe_name, false},
+                               {"saved_name", requested_safe_name, false},
+                               {"name_conflict", "true", true},
+                               {"skip_existing", "true", true},
+                               {"accepted", "true", true},
+                           }));
   }
 
   std::filesystem::path temp_root = std::filesystem::temp_directory_path(fs_error) / "ferryman-screen-upload";
@@ -1725,6 +1809,7 @@ int ServerApp::HandleScreenUploadBegin(HttpRequest* req, HttpResponse* resp) {
   transfer.owner_session_token = session->token;
   transfer.transfer_id = transfer_id;
   transfer.file_name = file_name_raw;
+  transfer.conflict_strategy = conflict_strategy;
   transfer.target_directory = target_directory;
   transfer.expected_bytes = JsonUint64(payload, "size", 0);
   transfer.temp_path = temp_root / (util::RandomHex(16) + ".part");
@@ -1747,6 +1832,11 @@ int ServerApp::HandleScreenUploadBegin(HttpRequest* req, HttpResponse* resp) {
   return Json(resp, 200, api::Success({
                              {"transfer_id", transfer_id, false},
                              {"target_dir", target_directory.string(), false},
+                             {"path", desired_path.string(), false},
+                             {"requested_name", requested_safe_name, false},
+                             {"saved_name", requested_safe_name, false},
+                             {"name_conflict", desired_exists ? "true" : "false", true},
+                             {"skip_existing", "false", true},
                              {"accepted", "true", true},
                          }));
 }
@@ -1863,11 +1953,70 @@ int ServerApp::HandleScreenUploadCommit(HttpRequest* req, HttpResponse* resp) {
     return Json(resp, 500, api::Error("target directory is unavailable"));
   }
 
-  const std::filesystem::path final_path = ResolveUniqueTargetPath(transfer.target_directory, transfer.file_name);
+  std::string conflict_strategy = transfer.conflict_strategy;
+  if (conflict_strategy.empty()) {
+    conflict_strategy = "keep_both";
+  }
+  const std::string requested_safe_name = SanitizeUploadFilename(transfer.file_name);
+  const std::filesystem::path desired_path = transfer.target_directory / requested_safe_name;
+  const bool desired_exists = std::filesystem::exists(desired_path, fs_error);
+  if (fs_error) {
+    std::filesystem::remove(transfer.temp_path, fs_error);
+    return Json(resp, 500, api::Error("failed to check target file state"));
+  }
+  if (desired_exists && std::filesystem::is_directory(desired_path, fs_error)) {
+    std::filesystem::remove(transfer.temp_path, fs_error);
+    return Json(resp, 400, api::Error("target path is a directory"));
+  }
+
+  bool skipped = false;
+  bool overwritten = false;
+  bool name_conflict = false;
+  std::filesystem::path final_path;
+  if (conflict_strategy == "overwrite") {
+    final_path = desired_path;
+    name_conflict = desired_exists;
+    overwritten = desired_exists;
+    if (desired_exists) {
+      std::filesystem::remove(desired_path, fs_error);
+      if (fs_error) {
+        std::filesystem::remove(transfer.temp_path, fs_error);
+        return Json(resp, 500, api::Error("failed to remove existing file for overwrite"));
+      }
+    }
+  } else if (conflict_strategy == "skip" && desired_exists) {
+    final_path = desired_path;
+    skipped = true;
+    name_conflict = true;
+  } else {
+    final_path = ResolveUniqueTargetPath(transfer.target_directory, transfer.file_name);
+    name_conflict = desired_path != final_path;
+  }
+
+  if (skipped) {
+    std::filesystem::remove(transfer.temp_path, fs_error);
+    audit_logger_.Append(session->token, "screen.upload.skip", final_path.string());
+    return Json(resp, 200, api::Success({
+                               {"transfer_id", transfer_id, false},
+                               {"name", requested_safe_name, false},
+                               {"requested_name", requested_safe_name, false},
+                               {"saved_name", requested_safe_name, false},
+                               {"name_conflict", "true", true},
+                               {"skipped", "true", true},
+                               {"overwritten", "false", true},
+                               {"path", final_path.string(), false},
+                               {"target_dir", transfer.target_directory.string(), false},
+                               {"bytes", "0", true},
+                           }));
+  }
+
   std::filesystem::rename(transfer.temp_path, final_path, fs_error);
   if (fs_error) {
     fs_error.clear();
-    std::filesystem::copy_file(transfer.temp_path, final_path, std::filesystem::copy_options::none, fs_error);
+    const auto copy_mode = conflict_strategy == "overwrite"
+                               ? std::filesystem::copy_options::overwrite_existing
+                               : std::filesystem::copy_options::none;
+    std::filesystem::copy_file(transfer.temp_path, final_path, copy_mode, fs_error);
     if (fs_error) {
       std::filesystem::remove(transfer.temp_path, fs_error);
       return Json(resp, 500, api::Error("failed to finalize uploaded file"));
@@ -1879,6 +2028,11 @@ int ServerApp::HandleScreenUploadCommit(HttpRequest* req, HttpResponse* resp) {
   return Json(resp, 200, api::Success({
                              {"transfer_id", transfer_id, false},
                              {"name", SanitizeUploadFilename(transfer.file_name), false},
+                             {"requested_name", requested_safe_name, false},
+                             {"saved_name", final_path.filename().string(), false},
+                             {"name_conflict", name_conflict ? "true" : "false", true},
+                             {"skipped", "false", true},
+                             {"overwritten", overwritten ? "true" : "false", true},
                              {"path", final_path.string(), false},
                              {"target_dir", transfer.target_directory.string(), false},
                              {"bytes", std::to_string(transfer.received_bytes), true},

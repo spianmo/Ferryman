@@ -374,18 +374,44 @@ export type ScreenUploadBeginPayload = {
   transfer_id: string;
   name: string;
   size: number;
+  conflict_strategy?: "overwrite" | "keep_both" | "skip";
   drop_x?: number;
   drop_y?: number;
   view_width?: number;
   view_height?: number;
 };
 
+export async function preflightScreenUploadConflicts(token: string, fileNames: string[]) {
+  return request<{
+    target_dir: string;
+    conflicts: string[];
+    has_conflicts: boolean;
+    checked_count: number;
+  }>(
+    "/api/screen/upload/preflight",
+    {
+      method: "POST",
+      body: JSON.stringify({ names: fileNames }),
+    },
+    token
+  );
+}
+
 export async function beginScreenUploadTransfer(
   token: string,
   payload: ScreenUploadBeginPayload,
   signal?: AbortSignal
 ) {
-  return request<{ transfer_id: string; target_dir: string; accepted: boolean }>(
+  return request<{
+    transfer_id: string;
+    target_dir: string;
+    accepted: boolean;
+    path?: string;
+    requested_name?: string;
+    saved_name?: string;
+    name_conflict?: boolean;
+    skip_existing?: boolean;
+  }>(
     "/api/screen/upload/begin",
     {
       method: "POST",
@@ -421,7 +447,18 @@ export async function commitScreenUploadTransfer(
   transferId: string,
   signal?: AbortSignal
 ) {
-  return request<{ transfer_id: string; name: string; path: string; target_dir: string; bytes: number }>(
+  return request<{
+    transfer_id: string;
+    name: string;
+    requested_name: string;
+    saved_name: string;
+    name_conflict: boolean;
+    skipped: boolean;
+    overwritten: boolean;
+    path: string;
+    target_dir: string;
+    bytes: number;
+  }>(
     "/api/screen/upload/commit",
     {
       method: "POST",

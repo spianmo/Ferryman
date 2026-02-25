@@ -37,6 +37,7 @@ import {
   emitUnauthorized,
   getScreenCapabilities,
   getScreenSources,
+  preflightScreenUploadConflicts,
   wsUrl,
 } from "../api/client";
 import { useI18n } from "../i18n";
@@ -162,7 +163,9 @@ type ScreenDropHint = {
   height: number;
 };
 
-type ScreenUploadTaskStatus = "queued" | "uploading" | "done" | "error" | "canceled";
+type UploadConflictStrategy = "overwrite" | "keep_both" | "skip";
+
+type ScreenUploadTaskStatus = "queued" | "uploading" | "done" | "skipped" | "error" | "canceled";
 
 type ScreenUploadTask = {
   id: string;
@@ -171,7 +174,17 @@ type ScreenUploadTask = {
   uploadedBytes: number;
   status: ScreenUploadTaskStatus;
   destination: string;
+  savedName: string;
+  renamedByConflict: boolean;
+  overwrittenByConflict: boolean;
+  skippedByConflict: boolean;
   error: string;
+};
+
+type PendingUploadBatch = {
+  files: File[];
+  dropHint: ScreenDropHint | null;
+  conflictNames: string[];
 };
 
 function readUint64LE(view: DataView, offset: number): number {
@@ -596,6 +609,9 @@ export default function ScreenPage({ session }: Props) {
   const [dragUploadActive, setDragUploadActive] = useState(false);
   const dragUploadCounterRef = useRef(0);
   const [uploadTasks, setUploadTasks] = useState<ScreenUploadTask[]>([]);
+  const [uploadConflictDialogOpen, setUploadConflictDialogOpen] = useState(false);
+  const [uploadConflictNames, setUploadConflictNames] = useState<string[]>([]);
+  const pendingUploadBatchRef = useRef<PendingUploadBatch | null>(null);
   const uploadAbortRef = useRef(new Map<string, AbortController>());
   const uploadCancelledRef = useRef(new Set<string>());
   const [pinnedKeys, setPinnedKeys] = useState({ ctrl: false, alt: false, meta: false });
@@ -608,6 +624,7 @@ export default function ScreenPage({ session }: Props) {
       }
       uploadAbortRef.current.clear();
       uploadCancelledRef.current.clear();
+      pendingUploadBatchRef.current = null;
       releasePinnedModifierKeys();
       wsRef.current?.close();
       wsRef.current = null;
@@ -2119,7 +2136,12 @@ export default function ScreenPage({ session }: Props) {
     );
   };
 
-  const uploadSingleFile = async (task: ScreenUploadTask, file: File, dropHint: ScreenDropHint | null) => {
+  const uploadSingleFile = async (
+    task: ScreenUploadTask,
+    file: File,
+    dropHint: ScreenDropHint | null,
+    conflictStrategy: UploadConflictStrategy
+  ) => {
     if (uploadCancelledRef.current.has(task.id)) {
       patchUploadTask(task.id, { status: "canceled", error: "" });
       return;
@@ -2135,6 +2157,7 @@ export default function ScreenPage({ session }: Props) {
           transfer_id: task.id,
           name: sanitizeUploadName(file.name),
           size: file.size,
+          conflict_strategy: conflictStrategy,
           drop_x: dropHint ? Math.round(dropHint.x) : undefined,
           drop_y: dropHint ? Math.round(dropHint.y) : undefined,
           view_width: dropHint ? Math.round(dropHint.width) : undefined,
@@ -2147,6 +2170,19 @@ export default function ScreenPage({ session }: Props) {
       }
       if (beginResult.target_dir) {
         patchUploadTask(task.id, { destination: beginResult.target_dir });
+      }
+      if (beginResult.skip_existing === true) {
+        patchUploadTask(task.id, {
+          status: "skipped",
+          uploadedBytes: 0,
+          destination: beginResult.path || beginResult.target_dir || "",
+          savedName: beginResult.saved_name || sanitizeUploadName(file.name),
+          renamedByConflict: false,
+          overwrittenByConflict: false,
+          skippedByConflict: beginResult.name_conflict === true,
+          error: "",
+        });
+        return;
       }
 
       let offset = 0;
@@ -2175,10 +2211,19 @@ export default function ScreenPage({ session }: Props) {
       }
 
       const uploadedPath = commitResult.path || beginResult.target_dir || "";
+      const savedName = commitResult.saved_name || sanitizeUploadName(file.name);
+      const skippedByConflict = commitResult.skipped === true;
+      const overwrittenByConflict = commitResult.overwritten === true;
+      const renamedByConflict =
+        commitResult.name_conflict === true && !overwrittenByConflict && !skippedByConflict;
       patchUploadTask(task.id, {
-        status: "done",
-        uploadedBytes: file.size,
+        status: skippedByConflict ? "skipped" : "done",
+        uploadedBytes: skippedByConflict ? 0 : file.size,
         destination: uploadedPath,
+        savedName,
+        renamedByConflict,
+        overwrittenByConflict,
+        skippedByConflict,
         error: "",
       });
     } catch (error) {
@@ -2204,7 +2249,11 @@ export default function ScreenPage({ session }: Props) {
     }
   };
 
-  const uploadDroppedFiles = (files: readonly File[], dropHint: ScreenDropHint | null) => {
+  const uploadDroppedFiles = (
+    files: readonly File[],
+    dropHint: ScreenDropHint | null,
+    conflictStrategy: UploadConflictStrategy
+  ) => {
     if (files.length <= 0) {
       return;
     }
@@ -2219,6 +2268,10 @@ export default function ScreenPage({ session }: Props) {
         uploadedBytes: 0,
         status: "queued",
         destination: "",
+        savedName: "",
+        renamedByConflict: false,
+        overwrittenByConflict: false,
+        skippedByConflict: false,
         error: "",
       };
       createdTasks.push({ task, file });
@@ -2226,8 +2279,49 @@ export default function ScreenPage({ session }: Props) {
 
     setUploadTasks((prev) => [...createdTasks.map((item) => item.task), ...prev].slice(0, 200));
     for (const item of createdTasks) {
-      void uploadSingleFile(item.task, item.file, dropHint);
+      void uploadSingleFile(item.task, item.file, dropHint, conflictStrategy);
     }
+  };
+
+  const closeUploadConflictDialog = () => {
+    pendingUploadBatchRef.current = null;
+    setUploadConflictDialogOpen(false);
+    setUploadConflictNames([]);
+  };
+
+  const applyUploadConflictStrategy = (strategy: UploadConflictStrategy) => {
+    const pending = pendingUploadBatchRef.current;
+    if (!pending) {
+      closeUploadConflictDialog();
+      return;
+    }
+    closeUploadConflictDialog();
+    uploadDroppedFiles(pending.files, pending.dropHint, strategy);
+  };
+
+  const preflightDroppedFiles = async (files: File[], dropHint: ScreenDropHint | null) => {
+    const names = files.map((file) => sanitizeUploadName(file.name));
+    const preflightResult = await preflightScreenUploadConflicts(session.token, names);
+    if (!preflightResult.ok) {
+      toast.error(preflightResult.error || t("screen.upload_failed", { name: names[0] || "-" }));
+      return;
+    }
+
+    const conflicts = Array.isArray(preflightResult.conflicts)
+      ? preflightResult.conflicts.filter((item): item is string => typeof item === "string" && item.length > 0)
+      : [];
+    if (conflicts.length <= 0) {
+      uploadDroppedFiles(files, dropHint, "keep_both");
+      return;
+    }
+
+    pendingUploadBatchRef.current = {
+      files,
+      dropHint,
+      conflictNames: conflicts,
+    };
+    setUploadConflictNames(conflicts);
+    setUploadConflictDialogOpen(true);
   };
 
   const onNativeDragEnter = (event: ReactDragEvent<HTMLDivElement>) => {
@@ -2277,7 +2371,7 @@ export default function ScreenPage({ session }: Props) {
       return;
     }
     const dropHint = pointerPayloadForEvent(event.currentTarget, event.clientX, event.clientY);
-    void uploadDroppedFiles(files, dropHint);
+    void preflightDroppedFiles(files, dropHint);
   };
 
   const pointerPayloadForEvent = (element: HTMLElement, clientX: number, clientY: number) => {
@@ -2587,6 +2681,7 @@ export default function ScreenPage({ session }: Props) {
     if (status === "queued") return t("screen.transfer_status_queued");
     if (status === "uploading") return t("screen.transfer_status_uploading");
     if (status === "done") return t("screen.transfer_status_done");
+    if (status === "skipped") return t("screen.transfer_status_skipped");
     if (status === "canceled") return t("screen.transfer_status_canceled");
     return t("screen.transfer_status_error");
   };
@@ -2597,6 +2692,9 @@ export default function ScreenPage({ session }: Props) {
     }
     if (status === "error") {
       return "text-rose-600 dark:text-rose-300";
+    }
+    if (status === "skipped") {
+      return "text-amber-600 dark:text-amber-300";
     }
     if (status === "canceled") {
       return "text-amber-600 dark:text-amber-300";
@@ -2699,6 +2797,58 @@ export default function ScreenPage({ session }: Props) {
             <div className="inline-flex items-center gap-2 rounded-xl border border-white/25 bg-black/50 px-3 py-2 text-xs font-semibold">
               <FiUpload className={cn("h-4 w-4", hasUploadInFlight && "animate-pulse")} />
               <span>{hasUploadInFlight ? t("screen.uploading") : t("screen.upload_hint")}</span>
+            </div>
+          </div>
+        ) : null}
+        {uploadConflictDialogOpen ? (
+          <div className="pointer-events-auto absolute inset-0 z-[65] grid place-items-center bg-slate-900/45 p-4 backdrop-blur-[1px]">
+            <div className="w-[min(34rem,100%)] rounded-2xl bg-white p-4 shadow-2xl ring-1 ring-slate-200 dark:bg-neutral-900 dark:ring-neutral-700">
+              <div className="text-sm font-semibold text-slate-900 dark:text-neutral-50">
+                {t("screen.transfer_conflict_dialog_title")}
+              </div>
+              <div className="mt-1 text-xs text-slate-600 dark:text-neutral-300">
+                {t("screen.transfer_conflict_dialog_desc", { count: String(uploadConflictNames.length) })}
+              </div>
+              <div className="mt-3 max-h-36 overflow-auto rounded-xl bg-slate-50 p-2 text-[11px] text-slate-700 ring-1 ring-slate-200 dark:bg-neutral-950 dark:text-neutral-200 dark:ring-neutral-800">
+                {uploadConflictNames.slice(0, 12).map((name) => (
+                  <div key={name} className="truncate">
+                    {name}
+                  </div>
+                ))}
+                {uploadConflictNames.length > 12 ? (
+                  <div className="mt-1 text-slate-500 dark:text-neutral-400">+{uploadConflictNames.length - 12}</div>
+                ) : null}
+              </div>
+              <div className="mt-3 flex flex-wrap justify-end gap-2">
+                <button
+                  type="button"
+                  className="inline-flex h-8 items-center rounded-lg bg-slate-100 px-2.5 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-200 dark:bg-neutral-800 dark:text-neutral-200 dark:hover:bg-neutral-700"
+                  onClick={closeUploadConflictDialog}
+                >
+                  {t("common.close")}
+                </button>
+                <button
+                  type="button"
+                  className="inline-flex h-8 items-center rounded-lg bg-slate-900 px-2.5 text-xs font-semibold text-white transition-colors hover:bg-slate-800 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-white"
+                  onClick={() => applyUploadConflictStrategy("keep_both")}
+                >
+                  {t("screen.transfer_strategy_keep_both")}
+                </button>
+                <button
+                  type="button"
+                  className="inline-flex h-8 items-center rounded-lg bg-amber-100 px-2.5 text-xs font-semibold text-amber-800 transition-colors hover:bg-amber-200 dark:bg-amber-900/40 dark:text-amber-300 dark:hover:bg-amber-900/60"
+                  onClick={() => applyUploadConflictStrategy("overwrite")}
+                >
+                  {t("screen.transfer_strategy_overwrite")}
+                </button>
+                <button
+                  type="button"
+                  className="inline-flex h-8 items-center rounded-lg bg-slate-100 px-2.5 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-200 dark:bg-neutral-800 dark:text-neutral-200 dark:hover:bg-neutral-700"
+                  onClick={() => applyUploadConflictStrategy("skip")}
+                >
+                  {t("screen.transfer_strategy_skip")}
+                </button>
+              </div>
             </div>
           </div>
         ) : null}
@@ -2836,6 +2986,8 @@ export default function ScreenPage({ session }: Props) {
                         <div className="flex items-center gap-1.5">
                           {task.status === "done" ? (
                             <FiCheckCircle className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
+                          ) : task.status === "skipped" ? (
+                            <FiX className="h-3.5 w-3.5 shrink-0 text-amber-500" />
                           ) : task.status === "uploading" ? (
                             <FiLoader className="h-3.5 w-3.5 shrink-0 animate-spin text-sky-500" />
                           ) : task.status === "error" ? (
@@ -2857,6 +3009,21 @@ export default function ScreenPage({ session }: Props) {
                             {task.destination}
                           </div>
                         ) : null}
+                        {task.status === "done" && task.renamedByConflict ? (
+                          <div className="mt-0.5 truncate text-[10px] font-semibold text-amber-600 dark:text-amber-300">
+                            {t("screen.transfer_conflict_renamed", { name: task.savedName || task.name })}
+                          </div>
+                        ) : null}
+                        {task.status === "done" && task.overwrittenByConflict ? (
+                          <div className="mt-0.5 truncate text-[10px] font-semibold text-amber-600 dark:text-amber-300">
+                            {t("screen.transfer_conflict_overwritten", { name: task.savedName || task.name })}
+                          </div>
+                        ) : null}
+                        {task.status === "skipped" && task.skippedByConflict ? (
+                          <div className="mt-0.5 truncate text-[10px] font-semibold text-amber-600 dark:text-amber-300">
+                            {t("screen.transfer_conflict_skipped", { name: task.savedName || task.name })}
+                          </div>
+                        ) : null}
                       </div>
                       {canCancel ? (
                         <button
@@ -2876,6 +3043,8 @@ export default function ScreenPage({ session }: Props) {
                           "h-full rounded-full transition-all duration-200",
                           task.status === "error"
                             ? "bg-rose-500"
+                            : task.status === "skipped"
+                              ? "bg-amber-500"
                             : task.status === "canceled"
                               ? "bg-amber-500"
                               : task.status === "done"

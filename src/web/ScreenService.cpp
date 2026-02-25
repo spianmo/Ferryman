@@ -210,7 +210,6 @@ int PayloadClickCount(const json& payload, int fallback = 1) {
   return std::clamp(it->get<int>(), 1, 3);
 }
 
-#if defined(__APPLE__)
 int PayloadButtonsMask(const json& payload) {
   const auto it = payload.find("buttons");
   if (it == payload.end() || !it->is_number_integer()) {
@@ -222,7 +221,6 @@ int PayloadButtonsMask(const json& payload) {
   }
   return buttons;
 }
-#endif
 
 #if FERRYMAN_WITH_FFMPEG
 std::string AvErrorToString(int code) {
