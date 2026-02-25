@@ -195,12 +195,19 @@ Default config file: `~/.ferryman/config.ini`
 access_key=<generated>
 http_host=0.0.0.0
 http_port=18080
+https_enabled=false
+https_port=18443
+tls_cert_file=
+tls_key_file=
 ws_port=18080
 ```
 
 Note:
 
 - HTTP and WebSocket share the same listener port at runtime.
+- Set `https_enabled=true` to enable HTTPS/WSS. HTTP/WS stay available on `http_port`.
+- If `tls_cert_file`/`tls_key_file` are empty, Ferryman auto-generates `~/.ferryman/cert/server.crt` and `~/.ferryman/cert/server.key` on first HTTPS startup.
+- Auto-generated certificate paths are written back into `~/.ferryman/config.ini` (`tls_cert_file` / `tls_key_file`).
 - Ferryman also initializes `~/.ferryman/logs/` and reserves `audit.log` path for audit output.
 
 ## HTTP API

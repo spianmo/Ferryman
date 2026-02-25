@@ -193,12 +193,19 @@ npm run dev -- --host
 access_key=<generated>
 http_host=0.0.0.0
 http_port=18080
+https_enabled=false
+https_port=18443
+tls_cert_file=
+tls_key_file=
 ws_port=18080
 ```
 
 说明：
 
 - 运行时 HTTP 与 WebSocket 共享同一监听端口。
+- 设置 `https_enabled=true` 可开启 HTTPS/WSS，HTTP/WS 会继续在 `http_port` 上可用。
+- 当 `tls_cert_file`/`tls_key_file` 为空时，首次启用 HTTPS 会自动生成 `~/.ferryman/cert/server.crt` 与 `~/.ferryman/cert/server.key`。
+- 自动生成后的证书路径会回写到 `~/.ferryman/config.ini` 的 `tls_cert_file` / `tls_key_file`。
 - 启动时会初始化 `~/.ferryman/logs/`，并预留 `audit.log` 路径。
 
 ## HTTP API

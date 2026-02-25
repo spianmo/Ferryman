@@ -147,6 +147,41 @@ jobs:
         run: |
           & "$env:VCPKG_ROOT\vcpkg.exe" install --triplet "${{ matrix.triplet }}"
 
+      - name: Verify libhv OpenSSL backend
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          HCONFIG="vcpkg_installed/${{ matrix.triplet }}/include/hv/hconfig.h"
+          if [[ ! -f "$HCONFIG" ]]; then
+            echo "hconfig.h not found: $HCONFIG"
+            exit 1
+          fi
+          if ! grep -Eq '^[[:space:]]*#define[[:space:]]+WITH_OPENSSL[[:space:]]+1([[:space:]]|$)' "$HCONFIG"; then
+            echo "WITH_OPENSSL is not enabled in $HCONFIG"
+            echo "---- $HCONFIG ----"
+            sed -n '1,200p' "$HCONFIG"
+            exit 1
+          fi
+          echo "Verified WITH_OPENSSL=1 in $HCONFIG"
+
+      - name: Verify libhv OpenSSL backend (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $hconfig = "vcpkg_installed/${{ matrix.triplet }}/include/hv/hconfig.h"
+          if (-not (Test-Path $hconfig)) {
+            throw "hconfig.h not found: $hconfig"
+          }
+          $content = Get-Content $hconfig -Raw
+          if ($content -notmatch "(?m)^\s*#define\s+WITH_OPENSSL\s+1(\s|$)") {
+            Write-Host "WITH_OPENSSL is not enabled in $hconfig"
+            Write-Host "---- $hconfig ----"
+            Get-Content $hconfig
+            throw "libhv OpenSSL backend verification failed"
+          }
+          Write-Host "Verified WITH_OPENSSL=1 in $hconfig"
+
       - name: Dump x265 build logs on macOS failure
         if: ${{ failure() && runner.os == 'macOS' }}
         shell: bash

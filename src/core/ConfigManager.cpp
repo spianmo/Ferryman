@@ -2,6 +2,8 @@
 
 #include "ferryman/util/Random.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -28,6 +30,50 @@ std::string Trim(std::string line) {
     ++pos;
   }
   return line.substr(pos);
+}
+
+std::string ToLower(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  return value;
+}
+
+bool ParseBool(std::string value, bool default_value = false) {
+  value = ToLower(Trim(value));
+  if (value.empty()) {
+    return default_value;
+  }
+  if (value == "1" || value == "true" || value == "yes" || value == "on") {
+    return true;
+  }
+  if (value == "0" || value == "false" || value == "no" || value == "off") {
+    return false;
+  }
+  return default_value;
+}
+
+int ParseInt(const std::string& value, int default_value) {
+  if (value.empty()) {
+    return default_value;
+  }
+  try {
+    return std::stoi(value);
+  } catch (...) {
+    return default_value;
+  }
+}
+
+std::filesystem::path ResolveConfiguredPath(const std::filesystem::path& config_path, const std::string& raw_value) {
+  const std::string trimmed = Trim(raw_value);
+  if (trimmed.empty()) {
+    return {};
+  }
+  std::filesystem::path path(trimmed);
+  if (path.is_relative() && !config_path.empty()) {
+    path = config_path.parent_path() / path;
+  }
+  return path;
 }
 
 }  // namespace
@@ -76,6 +122,7 @@ bool ConfigManager::LoadFromDisk(const std::filesystem::path& path) {
     return false;
   }
 
+  bool has_https_port = false;
   std::string line;
   while (std::getline(file, line)) {
     line = Trim(line);
@@ -93,13 +140,27 @@ bool ConfigManager::LoadFromDisk(const std::filesystem::path& path) {
     } else if (key == "http_host") {
       config_.http_host = value;
     } else if (key == "http_port") {
-      config_.http_port = std::stoi(value);
+      config_.http_port = ParseInt(value, config_.http_port);
+    } else if (key == "https_enabled") {
+      config_.https_enabled = ParseBool(value, config_.https_enabled);
+    } else if (key == "https_port") {
+      config_.https_port = ParseInt(value, config_.https_port);
+      has_https_port = true;
+    } else if (key == "tls_cert_file") {
+      config_.tls_cert_file = ResolveConfiguredPath(path, value);
+    } else if (key == "tls_key_file") {
+      config_.tls_key_file = ResolveConfiguredPath(path, value);
     } else if (key == "ws_port") {
-      config_.ws_port = std::stoi(value);
+      config_.ws_port = ParseInt(value, config_.ws_port);
     }
   }
   if (config_.http_port <= 0) {
     config_.http_port = 18080;
+  }
+  if (!has_https_port) {
+    config_.https_port = config_.http_port + 1;
+  } else if (config_.https_port <= 0) {
+    config_.https_port = config_.http_port + 1;
   }
   // WebSocket and HTTP now share one listener/port.
   config_.ws_port = config_.http_port;
@@ -116,6 +177,10 @@ bool ConfigManager::WriteDefaultConfig(const std::filesystem::path& path, const 
   file << "access_key=" << access_key << '\n';
   file << "http_host=0.0.0.0\n";
   file << "http_port=18080\n";
+  file << "https_enabled=false\n";
+  file << "https_port=18443\n";
+  file << "tls_cert_file=\n";
+  file << "tls_key_file=\n";
   file << "ws_port=18080\n";
   return true;
 }

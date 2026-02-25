@@ -186,6 +186,9 @@ class ServerApp {
   HttpService http_service_;
   http_server_t http_server_{};
   hv::WebSocketService ws_service_;
+  hssl_ctx_opt_t tls_ctx_opt_{};
+  std::string tls_cert_file_storage_;
+  std::string tls_key_file_storage_;
 
   std::thread http_thread_;
   std::thread native_screen_thread_;

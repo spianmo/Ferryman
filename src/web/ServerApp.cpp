@@ -19,6 +19,10 @@
 #include <thread>
 #include <vector>
 
+#if FERRYMAN_WITH_LIBHV
+#include "hv/hlog.h"
+#endif
+
 namespace ferryman::web {
 
 namespace {
@@ -265,6 +269,303 @@ std::string JoinStrings(const std::vector<std::string>& items, const std::string
     out << items[i];
   }
   return out.str();
+}
+
+std::string ExtractIniKey(const std::string& line) {
+  const std::string trimmed = util::Trim(line);
+  if (trimmed.empty() || trimmed.front() == '#' || trimmed.front() == ';') {
+    return "";
+  }
+  const size_t eq = trimmed.find('=');
+  if (eq == std::string::npos) {
+    return "";
+  }
+  return util::Trim(trimmed.substr(0, eq));
+}
+
+std::string NormalizePathForIni(const std::filesystem::path& path) {
+  std::error_code ec;
+  const std::filesystem::path absolute = std::filesystem::absolute(path, ec);
+  if (!ec) {
+    return absolute.lexically_normal().string();
+  }
+  return path.lexically_normal().string();
+}
+
+bool PathsEqualNormalized(const std::filesystem::path& lhs, const std::filesystem::path& rhs) {
+  return NormalizePathForIni(lhs) == NormalizePathForIni(rhs);
+}
+
+bool UpsertConfigValues(const std::filesystem::path& config_path,
+                        const std::vector<std::pair<std::string, std::string>>& key_values, std::string* error) {
+  if (config_path.empty()) {
+    if (error != nullptr) {
+      *error = "empty config path";
+    }
+    return false;
+  }
+
+  std::ifstream input(config_path);
+  if (!input.is_open()) {
+    if (error != nullptr) {
+      *error = "failed to open config file: " + config_path.string();
+    }
+    return false;
+  }
+
+  std::vector<std::string> lines;
+  std::string line;
+  while (std::getline(input, line)) {
+    lines.push_back(line);
+  }
+  input.close();
+
+  for (const auto& [key, value] : key_values) {
+    bool replaced = false;
+    for (auto& existing_line : lines) {
+      if (ExtractIniKey(existing_line) == key) {
+        existing_line = key + "=" + value;
+        replaced = true;
+        break;
+      }
+    }
+    if (!replaced) {
+      lines.push_back(key + "=" + value);
+    }
+  }
+
+  std::filesystem::path temp_path = config_path;
+  temp_path += ".tmp";
+  std::ofstream output(temp_path, std::ios::trunc);
+  if (!output.is_open()) {
+    if (error != nullptr) {
+      *error = "failed to write temp config file: " + temp_path.string();
+    }
+    return false;
+  }
+  for (const auto& content_line : lines) {
+    output << content_line << '\n';
+  }
+  output.close();
+
+  std::error_code ec;
+  std::filesystem::rename(temp_path, config_path, ec);
+  if (!ec) {
+    return true;
+  }
+
+  ec.clear();
+  std::filesystem::copy_file(temp_path, config_path, std::filesystem::copy_options::overwrite_existing, ec);
+  if (ec) {
+    if (error != nullptr) {
+      *error = "failed to replace config file: " + ec.message();
+    }
+    std::error_code remove_error;
+    std::filesystem::remove(temp_path, remove_error);
+    return false;
+  }
+  std::filesystem::remove(temp_path, ec);
+  return true;
+}
+
+bool PersistTlsPathsToConfig(const core::AppConfig& config, const std::filesystem::path& crt_path,
+                             const std::filesystem::path& key_path, std::string* error) {
+  return UpsertConfigValues(config.config_path,
+                            {
+                                {"tls_cert_file", NormalizePathForIni(crt_path)},
+                                {"tls_key_file", NormalizePathForIni(key_path)},
+                            },
+                            error);
+}
+
+std::string ShellEscapeSingleQuoted(const std::string& value) {
+  std::string escaped;
+  escaped.reserve(value.size() + 8);
+  escaped.push_back('\'');
+  for (char ch : value) {
+    if (ch == '\'') {
+      escaped += "'\\''";
+      continue;
+    }
+    escaped.push_back(ch);
+  }
+  escaped.push_back('\'');
+  return escaped;
+}
+
+std::string ShellEscapeForCommand(const std::string& value) {
+#if defined(_WIN32)
+  std::string escaped;
+  escaped.reserve(value.size() + 8);
+  escaped.push_back('"');
+  for (char ch : value) {
+    if (ch == '"') {
+      escaped += "\\\"";
+      continue;
+    }
+    escaped.push_back(ch);
+  }
+  escaped.push_back('"');
+  return escaped;
+#else
+  return ShellEscapeSingleQuoted(value);
+#endif
+}
+
+int RunShellCommand(const std::string& command) {
+  return std::system(command.c_str());
+}
+
+std::filesystem::path ResolveTlsDirectory(const core::AppConfig& config) {
+  if (!config.config_path.empty()) {
+    return config.config_path.parent_path() / "cert";
+  }
+  return HomeDirectoryPath() / ".ferryman" / "cert";
+}
+
+std::filesystem::path ResolveTlsFilePath(const core::AppConfig& config, const std::filesystem::path& configured_path,
+                                         const std::filesystem::path& fallback_name) {
+  if (!configured_path.empty()) {
+    if (configured_path.is_absolute() || config.config_path.empty()) {
+      return configured_path;
+    }
+    return config.config_path.parent_path() / configured_path;
+  }
+  return ResolveTlsDirectory(config) / fallback_name;
+}
+
+bool FileExistsAndNonEmpty(const std::filesystem::path& path) {
+  std::error_code ec;
+  if (!std::filesystem::exists(path, ec) || ec) {
+    return false;
+  }
+  const auto file_size = std::filesystem::file_size(path, ec);
+  return !ec && file_size > 0;
+}
+
+bool CertificateHasLocalhostSubjectAltName(const std::filesystem::path& crt_path) {
+  const std::string escaped_crt = ShellEscapeForCommand(crt_path.string());
+#if defined(_WIN32)
+  const std::string command = "openssl x509 -noout -ext subjectAltName -in " + escaped_crt + " 2>nul";
+#else
+  const std::string command = "openssl x509 -noout -ext subjectAltName -in " + escaped_crt + " 2>/dev/null";
+#endif
+  const std::string output = ToLower(TrimAsciiWhitespace(RunCommandCapture(command)));
+  if (output.empty()) {
+    return false;
+  }
+  return output.find("dns:localhost") != std::string::npos || output.find("ip address:127.0.0.1") != std::string::npos ||
+         output.find("ip address:0:0:0:0:0:0:0:1") != std::string::npos || output.find("ip:::1") != std::string::npos;
+}
+
+bool EnsureTlsCertificateFiles(const core::AppConfig& config, std::filesystem::path* crt_file,
+                               std::filesystem::path* key_file, std::string* error) {
+  if (crt_file == nullptr || key_file == nullptr) {
+    if (error != nullptr) {
+      *error = "invalid tls output path";
+    }
+    return false;
+  }
+
+  const bool has_custom_crt = !config.tls_cert_file.empty();
+  const bool has_custom_key = !config.tls_key_file.empty();
+  if (has_custom_crt != has_custom_key) {
+    if (error != nullptr) {
+      *error = "tls_cert_file and tls_key_file must be configured together";
+    }
+    return false;
+  }
+
+  const std::filesystem::path default_crt_path = ResolveTlsDirectory(config) / "server.crt";
+  const std::filesystem::path default_key_path = ResolveTlsDirectory(config) / "server.key";
+  const std::filesystem::path crt_path = ResolveTlsFilePath(config, config.tls_cert_file, "server.crt");
+  const std::filesystem::path key_path = ResolveTlsFilePath(config, config.tls_key_file, "server.key");
+  const bool uses_default_paths =
+      PathsEqualNormalized(crt_path, default_crt_path) && PathsEqualNormalized(key_path, default_key_path);
+  const bool use_user_managed_paths = has_custom_crt && !uses_default_paths;
+
+  std::error_code ec;
+  if (crt_path.has_parent_path()) {
+    std::filesystem::create_directories(crt_path.parent_path(), ec);
+    if (ec) {
+      if (error != nullptr) {
+        *error = "failed to create cert directory: " + ec.message();
+      }
+      return false;
+    }
+  }
+  ec.clear();
+  if (key_path.has_parent_path()) {
+    std::filesystem::create_directories(key_path.parent_path(), ec);
+    if (ec) {
+      if (error != nullptr) {
+        *error = "failed to create key directory: " + ec.message();
+      }
+      return false;
+    }
+  }
+
+  const bool crt_exists = FileExistsAndNonEmpty(crt_path);
+  const bool key_exists = FileExistsAndNonEmpty(key_path);
+  bool should_regenerate = false;
+  if (crt_exists && key_exists) {
+    if (uses_default_paths && !CertificateHasLocalhostSubjectAltName(crt_path)) {
+      should_regenerate = true;
+    } else {
+      *crt_file = crt_path;
+      *key_file = key_path;
+      return true;
+    }
+  }
+
+  if (!should_regenerate && crt_exists != key_exists && use_user_managed_paths) {
+    if (error != nullptr) {
+      *error = "configured tls cert/key must both exist or both be absent";
+    }
+    return false;
+  }
+
+  std::filesystem::remove(crt_path, ec);
+  ec.clear();
+  std::filesystem::remove(key_path, ec);
+
+  const std::string escaped_crt = ShellEscapeForCommand(crt_path.string());
+  const std::string escaped_key = ShellEscapeForCommand(key_path.string());
+#if defined(_WIN32)
+  const std::string command =
+      "openssl genrsa -out " + escaped_key + " 2048 >nul 2>nul && "
+      "openssl req -new -x509 -key " +
+      escaped_key + " -out " + escaped_crt +
+      " -days 3650 -sha256 -subj \"/CN=Ferryman\" "
+      "-addext \"subjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1\" >nul 2>nul";
+#else
+  const std::string command =
+      "openssl genrsa -out " + escaped_key + " 2048 >/dev/null 2>&1 && "
+      "openssl req -new -x509 -key " +
+      escaped_key + " -out " + escaped_crt +
+      " -days 3650 -sha256 -subj '/CN=Ferryman' "
+      "-addext 'subjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1' >/dev/null 2>&1";
+#endif
+
+  const int rc = RunShellCommand(command);
+  if (rc != 0 || !FileExistsAndNonEmpty(crt_path) || !FileExistsAndNonEmpty(key_path) ||
+      !CertificateHasLocalhostSubjectAltName(crt_path)) {
+    if (error != nullptr) {
+      *error = "failed to generate tls certificate/key via openssl (crt=" + crt_path.string() +
+               ", key=" + key_path.string() + ")";
+    }
+    return false;
+  }
+
+#if !defined(_WIN32)
+  std::filesystem::permissions(key_path, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+                               std::filesystem::perm_options::replace, ec);
+  (void)ec;
+#endif
+
+  *crt_file = crt_path;
+  *key_file = key_path;
+  return true;
 }
 
 std::optional<json> ParseJsonOrNull(const std::string& body) {
@@ -566,6 +867,9 @@ bool ServerApp::Start() {
   // WebSocket and HTTP share one listener.
   config_.ws_port = config_.http_port;
 
+  // Disable libhv file logger to avoid generating libhv.yyyymmdd.log files.
+  hlog_set_handler(stderr_logger);
+
   if (!RegisterHttpRoutes() || !RegisterWsHandlers()) {
     audit_logger_.AppendSystem("error", "server.start", "failed to register HTTP/WS routes");
     running_ = false;
@@ -581,6 +885,75 @@ bool ServerApp::Start() {
   http_server_.ws = &ws_service_;
   std::snprintf(http_server_.host, sizeof(http_server_.host), "%s", config_.http_host.c_str());
   http_server_.port = config_.http_port;
+  http_server_.https_port = 0;
+  http_server_.ssl_ctx = nullptr;
+  http_server_.alloced_ssl_ctx = 0;
+
+  bool https_active = false;
+  if (config_.https_enabled) {
+    const std::string ssl_backend = hssl_backend();
+    audit_logger_.AppendSystem("info", "server.tls", "libhv ssl backend: " + ssl_backend);
+    if (!HV_WITH_SSL) {
+      audit_logger_.AppendSystem("warn", "server.tls",
+                                 "https_enabled=true but libhv was built without SSL/TLS; fallback to http/ws only");
+    } else if (ssl_backend == "appletls") {
+      // libhv 1.3.3 appletls backend does not load cert/key from hssl_ctx_opt_t for server mode.
+      // This causes browser TLS handshakes to fail immediately.
+      audit_logger_.AppendSystem(
+          "warn", "server.tls",
+          "https_enabled=true but libhv ssl backend is appletls; server-side TLS handshake is unstable on this "
+          "backend. Rebuild dependencies with libhv[ssl] (OpenSSL) and restart.");
+    } else {
+      std::filesystem::path tls_crt_file;
+      std::filesystem::path tls_key_file;
+      std::string tls_error;
+      if (!EnsureTlsCertificateFiles(config_, &tls_crt_file, &tls_key_file, &tls_error)) {
+        audit_logger_.AppendSystem("warn", "server.tls",
+                                   "failed to prepare tls certificate; fallback to http/ws only: " +
+                                       (tls_error.empty() ? std::string("unknown error") : tls_error));
+      } else {
+        const bool should_persist_tls_paths = config_.tls_cert_file.empty() && config_.tls_key_file.empty();
+        config_.tls_cert_file = tls_crt_file;
+        config_.tls_key_file = tls_key_file;
+        if (should_persist_tls_paths) {
+          std::string persist_error;
+          if (!PersistTlsPathsToConfig(config_, tls_crt_file, tls_key_file, &persist_error)) {
+            audit_logger_.AppendSystem("warn", "server.tls",
+                                       "failed to persist tls cert/key paths to config: " +
+                                           (persist_error.empty() ? std::string("unknown error") : persist_error));
+          } else {
+            audit_logger_.AppendSystem("info", "server.tls",
+                                       "persisted tls cert/key paths to config (crt=" + tls_crt_file.string() +
+                                           ", key=" + tls_key_file.string() + ")");
+          }
+        }
+
+        // libhv backends (e.g. appletls) keep a pointer to hssl_ctx_opt_t instead of deep-copying it.
+        // Keep TLS option payload alive for the whole ServerApp lifetime.
+        tls_cert_file_storage_ = tls_crt_file.string();
+        tls_key_file_storage_ = tls_key_file.string();
+        tls_ctx_opt_ = {};
+        tls_ctx_opt_.crt_file = tls_cert_file_storage_.c_str();
+        tls_ctx_opt_.key_file = tls_key_file_storage_.c_str();
+        tls_ctx_opt_.verify_peer = 0;
+        tls_ctx_opt_.endpoint = HSSL_SERVER;
+        hssl_ctx_t tls_ctx = hssl_ctx_new(&tls_ctx_opt_);
+        if (tls_ctx == nullptr) {
+          audit_logger_.AppendSystem("warn", "server.tls", "failed to initialize ssl context; fallback to http/ws only");
+        } else {
+          http_server_.ssl_ctx = tls_ctx;
+          http_server_.alloced_ssl_ctx = 1;
+          http_server_.https_port = config_.https_port;
+          https_active = true;
+          audit_logger_.AppendSystem("info", "server.tls",
+                                     "enabled tls (crt=" + tls_crt_file.string() + ", key=" + tls_key_file.string() +
+                                         ", https_port=" + std::to_string(config_.https_port) +
+                                         ", backend=" + ssl_backend + ")");
+        }
+      }
+    }
+  }
+  config_.https_enabled = https_active;
 
   http_thread_ = std::thread([this]() {
     http_server_run(&http_server_);
@@ -598,9 +971,23 @@ bool ServerApp::Start() {
 
   std::cout << "[ferryman] http: http://" << config_.http_host << ':' << config_.http_port << '\n';
   std::cout << "[ferryman] ws:   ws://" << config_.http_host << ':' << config_.ws_port << '\n';
-  audit_logger_.AppendSystem("info", "server.start",
-                             "http=" + config_.http_host + ":" + std::to_string(config_.http_port) +
-                                 ", ws=" + config_.http_host + ":" + std::to_string(config_.ws_port));
+  if (https_active) {
+    std::cout << "[ferryman] https: https://" << config_.http_host << ':' << config_.https_port << '\n';
+    std::cout << "[ferryman] wss:  wss://" << config_.http_host << ':' << config_.https_port << '\n';
+  } else {
+    std::cout << "[ferryman] https: disabled\n";
+    std::cout << "[ferryman] wss:  disabled\n";
+  }
+
+  std::string server_start_message = "http=" + config_.http_host + ":" + std::to_string(config_.http_port) +
+                                     ", ws=" + config_.http_host + ":" + std::to_string(config_.ws_port);
+  if (https_active) {
+    server_start_message += ", https=" + config_.http_host + ":" + std::to_string(config_.https_port) +
+                            ", wss=" + config_.http_host + ":" + std::to_string(config_.https_port);
+  } else {
+    server_start_message += ", https=disabled, wss=disabled";
+  }
+  audit_logger_.AppendSystem("info", "server.start", server_start_message);
   return true;
 #endif
 }
@@ -918,6 +1305,8 @@ int ServerApp::HandleLogin(HttpRequest* req, HttpResponse* resp) {
                              {"session_token", token, false},
                              {"ws_port", std::to_string(config_.ws_port), true},
                              {"http_port", std::to_string(config_.http_port), true},
+                             {"https_enabled", config_.https_enabled ? "true" : "false", true},
+                             {"https_port", std::to_string(config_.https_port), true},
                              {"host", config_.http_host, false},
                          }));
 }
@@ -2081,6 +2470,8 @@ int ServerApp::HandleHealth(HttpRequest* req, HttpResponse* resp) {
                              {"service", "ferryman", false},
                              {"running", running_ ? "true" : "false", true},
                              {"http_port", std::to_string(config_.http_port), true},
+                             {"https_enabled", config_.https_enabled ? "true" : "false", true},
+                             {"https_port", std::to_string(config_.https_port), true},
                              {"ws_port", std::to_string(config_.ws_port), true},
                          }));
 }
