@@ -1356,7 +1356,9 @@ export default function ScreenPage({ session }: Props) {
     closeNativeDecoder();
     setNativeCodec("jpeg");
     revokeNativeFrameObjectUrl();
-    const blob = new Blob([frame.payload], { type: "image/jpeg" });
+    const jpegBytes = new Uint8Array(frame.payload.byteLength);
+    jpegBytes.set(frame.payload);
+    const blob = new Blob([jpegBytes], { type: "image/jpeg" });
     const objectUrl = URL.createObjectURL(blob);
     nativeFrameObjectUrlRef.current = objectUrl;
     setNativeFrameUrl(objectUrl);
