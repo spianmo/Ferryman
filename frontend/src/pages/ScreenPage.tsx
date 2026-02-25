@@ -2287,7 +2287,8 @@ export default function ScreenPage({ session }: Props) {
 
   useEffect(() => {
     if (screenIsFullscreen) {
-      setSoftKeyPanelOpen(true);
+      setSoftKeyPanelOpen(false);
+      setClipboardPanelOpen(false);
       return;
     }
     setClipboardPanelOpen(false);
@@ -2295,10 +2296,9 @@ export default function ScreenPage({ session }: Props) {
     releasePinnedModifierKeys();
   }, [screenIsFullscreen]);
 
-  const softKeyButtonClass = (active = false, wide = false) => {
+  const softKeyButtonClass = (active = false) => {
     return cn(
-      "inline-flex min-w-0 items-center justify-center gap-1.5 rounded-xl border px-2 py-2 text-[11px] font-semibold transition-colors",
-      wide ? "col-span-2 h-9 w-full" : "h-9 w-full",
+      "inline-flex min-h-10 w-full min-w-0 items-center justify-start gap-2 rounded-xl border px-3 py-2.5 text-left text-[11px] font-semibold leading-tight transition-colors",
       active
         ? "border-emerald-300 bg-emerald-500/25 text-emerald-100"
         : "border-white/20 bg-white/8 text-white hover:bg-white/15"
@@ -2425,7 +2425,7 @@ export default function ScreenPage({ session }: Props) {
           </div>
         ) : null}
         {screenIsFullscreen ? (
-          <div className="absolute left-2 top-1/2 z-50 flex -translate-y-1/2 items-center gap-2">
+          <div className="absolute left-2 top-1/2 z-50 -translate-y-1/2">
               <button
                 type="button"
                 className="inline-flex h-12 w-7 items-center justify-center rounded-xl bg-black/55 text-white ring-1 ring-white/20 backdrop-blur-sm transition-colors hover:bg-black/70"
@@ -2434,13 +2434,18 @@ export default function ScreenPage({ session }: Props) {
               >
                 {softKeyPanelOpen ? <FiChevronLeft /> : <FiChevronRight />}
               </button>
-              {softKeyPanelOpen ? (
-                <div className="w-[min(15rem,calc(100vw-4rem))] max-h-[calc(100dvh-2rem)] overflow-y-auto rounded-2xl bg-black/60 p-2.5 shadow-2xl ring-1 ring-white/20 backdrop-blur-md">
+              <div
+                className={cn(
+                  "absolute left-full top-1/2 ml-2 w-[min(17rem,calc(100vw-4rem))] -translate-y-1/2 transition-all duration-300 ease-out",
+                  softKeyPanelOpen ? "pointer-events-auto translate-x-0 opacity-100" : "pointer-events-none -translate-x-3 opacity-0"
+                )}
+              >
+                <div className="max-h-[calc(100dvh-2rem)] overflow-y-auto rounded-2xl bg-black/60 p-2.5 shadow-2xl ring-1 ring-white/20 backdrop-blur-md">
                   <div className="mb-2 flex items-center gap-2 rounded-xl border border-white/15 bg-white/8 px-2 py-1.5 text-[11px] font-semibold text-white/90">
                     {targetPlatformBadge.icon}
-                    <span className="truncate">{targetPlatformBadge.label}</span>
+                    <span className="leading-tight">{targetPlatformBadge.label}</span>
                   </div>
-                  <div className="grid grid-cols-3 gap-2">
+                  <div className="space-y-2">
                     <button
                       type="button"
                       className={softKeyButtonClass(pinnedKeys.ctrl)}
@@ -2448,7 +2453,7 @@ export default function ScreenPage({ session }: Props) {
                       aria-pressed={pinnedKeys.ctrl}
                     >
                       <FiChevronsUp className="h-3.5 w-3.5 shrink-0" />
-                      <span className="truncate">{softKeyModifierLabels.ctrlLabel}</span>
+                      <span className="min-w-0 whitespace-normal break-words">{softKeyModifierLabels.ctrlLabel}</span>
                     </button>
                     <button
                       type="button"
@@ -2457,7 +2462,7 @@ export default function ScreenPage({ session }: Props) {
                       aria-pressed={pinnedKeys.alt}
                     >
                       <FiKey className="h-3.5 w-3.5 shrink-0" />
-                      <span className="truncate">{softKeyModifierLabels.altLabel}</span>
+                      <span className="min-w-0 whitespace-normal break-words">{softKeyModifierLabels.altLabel}</span>
                     </button>
                     <button
                       type="button"
@@ -2466,17 +2471,17 @@ export default function ScreenPage({ session }: Props) {
                       aria-pressed={pinnedKeys.meta}
                     >
                       {metaModifierIcon}
-                      <span className="truncate">{softKeyModifierLabels.metaLabel}</span>
+                      <span className="min-w-0 whitespace-normal break-words">{softKeyModifierLabels.metaLabel}</span>
                     </button>
                   </div>
-                  <div className="mt-2 grid grid-cols-2 gap-2">
+                  <div className="mt-2 space-y-2 border-t border-white/15 pt-2">
                     <button
                       type="button"
                       className={softKeyButtonClass(false)}
                       onClick={() => sendSoftKeyTap("Tab", "Tab")}
                     >
                       <FiChevronsUp className="h-3.5 w-3.5 shrink-0 rotate-90" />
-                      <span className="truncate">{t("screen.softkey_tab")}</span>
+                      <span className="min-w-0 whitespace-normal break-words">{t("screen.softkey_tab")}</span>
                     </button>
                     <button
                       type="button"
@@ -2484,28 +2489,28 @@ export default function ScreenPage({ session }: Props) {
                       onClick={() => sendSoftKeyTap("Escape", "Escape")}
                     >
                       <FiXCircle className="h-3.5 w-3.5 shrink-0" />
-                      <span className="truncate">{t("screen.softkey_esc")}</span>
+                      <span className="min-w-0 whitespace-normal break-words">{t("screen.softkey_esc")}</span>
                     </button>
                     <button
                       type="button"
-                      className={softKeyButtonClass(false, true)}
+                      className={softKeyButtonClass(false)}
                       onClick={sendSystemAttention}
                     >
                       <FiDelete className="h-3.5 w-3.5 shrink-0" />
-                      <span className="truncate">{systemAttentionLabel}</span>
+                      <span className="min-w-0 whitespace-normal break-words">{systemAttentionLabel}</span>
                     </button>
                     <button
                       type="button"
-                      className={softKeyButtonClass(false, true)}
+                      className={softKeyButtonClass(false)}
                       onClick={() => setClipboardPanelOpen(true)}
                       aria-label={t("screen.clipboard")}
                     >
                       <FiClipboard className="h-3.5 w-3.5 shrink-0" />
-                      <span className="truncate">{t("screen.clipboard")}</span>
+                      <span className="min-w-0 whitespace-normal break-words">{t("screen.clipboard")}</span>
                     </button>
                   </div>
                 </div>
-              ) : null}
+              </div>
           </div>
         ) : null}
         {screenIsFullscreen && clipboardPanelOpen ? (
