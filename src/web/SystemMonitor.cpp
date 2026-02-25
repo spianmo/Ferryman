@@ -18,6 +18,7 @@
 #include <sstream>
 #include <string_view>
 #include <thread>
+#include <unordered_set>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -678,6 +679,132 @@ bool SystemMonitor::ReadMemoryStats(uint64_t* total_bytes, uint64_t* used_bytes,
 #endif
 }
 
+bool SystemMonitor::ReadDiskVolumes(std::vector<DiskVolume>* volumes) const {
+  if (volumes == nullptr) {
+    return false;
+  }
+  volumes->clear();
+
+#if defined(_WIN32)
+  const DWORD drive_mask = ::GetLogicalDrives();
+  if (drive_mask != 0) {
+    for (int idx = 0; idx < 26; ++idx) {
+      if ((drive_mask & (1u << idx)) == 0) {
+        continue;
+      }
+
+      wchar_t root[] = L"A:\\";
+      root[0] = static_cast<wchar_t>(L'A' + idx);
+      const UINT drive_type = ::GetDriveTypeW(root);
+      if (drive_type != DRIVE_FIXED) {
+        continue;
+      }
+
+      ULARGE_INTEGER available = {};
+      ULARGE_INTEGER total = {};
+      ULARGE_INTEGER free = {};
+      if (::GetDiskFreeSpaceExW(root, &available, &total, &free) == 0 || total.QuadPart == 0) {
+        continue;
+      }
+
+      DiskVolume volume;
+      const char drive_letter = static_cast<char>('A' + idx);
+      volume.id = std::string(1, drive_letter) + ":\\";
+      volume.name = volume.id;
+      volume.mount = volume.id;
+      volume.total_bytes = static_cast<uint64_t>(total.QuadPart);
+      volume.free_bytes = (std::min)(static_cast<uint64_t>(free.QuadPart), volume.total_bytes);
+      volume.used_bytes = volume.total_bytes - volume.free_bytes;
+      volume.used_percent = volume.total_bytes > 0
+          ? ClampPercent(static_cast<double>(volume.used_bytes) * 100.0 / static_cast<double>(volume.total_bytes))
+          : 0.0;
+      volumes->push_back(std::move(volume));
+    }
+    if (!volumes->empty()) {
+      return true;
+    }
+  }
+#endif
+
+  const std::string df_output = RunCommandCapture("df -kP 2>/dev/null");
+  if (!df_output.empty()) {
+    std::istringstream lines(df_output);
+    std::string line;
+    (void)std::getline(lines, line);  // header
+
+    std::unordered_set<std::string> seen_mounts;
+    while (std::getline(lines, line)) {
+      std::istringstream row(line);
+      std::string filesystem;
+      uint64_t blocks_kb = 0;
+      uint64_t used_kb = 0;
+      uint64_t available_kb = 0;
+      std::string used_percent;
+      std::string mountpoint;
+      if (!(row >> filesystem >> blocks_kb >> used_kb >> available_kb >> used_percent >> mountpoint)) {
+        continue;
+      }
+      (void)used_kb;
+      (void)used_percent;
+      if (filesystem.empty() || mountpoint.empty()) {
+        continue;
+      }
+#if defined(__linux__) || defined(__APPLE__)
+      if (!StartsWith(filesystem, "/dev/")) {
+        continue;
+      }
+#endif
+      if (!seen_mounts.insert(mountpoint).second) {
+        continue;
+      }
+
+      DiskVolume volume;
+      volume.id = mountpoint;
+      volume.name = filesystem;
+      volume.mount = mountpoint;
+      volume.total_bytes = blocks_kb * 1024ULL;
+      volume.free_bytes = (std::min)(available_kb * 1024ULL, volume.total_bytes);
+      volume.used_bytes = volume.total_bytes - volume.free_bytes;
+      volume.used_percent = volume.total_bytes > 0
+          ? ClampPercent(static_cast<double>(volume.used_bytes) * 100.0 / static_cast<double>(volume.total_bytes))
+          : 0.0;
+      volumes->push_back(std::move(volume));
+    }
+
+    if (!volumes->empty()) {
+      return true;
+    }
+  }
+
+#if defined(_WIN32)
+  std::filesystem::path fallback_root = std::filesystem::current_path().root_path();
+  if (fallback_root.empty()) {
+    fallback_root = "C:\\";
+  }
+#else
+  const std::filesystem::path fallback_root = "/";
+#endif
+
+  std::error_code ec;
+  const auto space = std::filesystem::space(fallback_root, ec);
+  if (ec || space.capacity == 0) {
+    return false;
+  }
+
+  DiskVolume fallback;
+  fallback.id = fallback_root.string();
+  fallback.name = fallback_root.string();
+  fallback.mount = fallback_root.string();
+  fallback.total_bytes = static_cast<uint64_t>(space.capacity);
+  fallback.free_bytes = (std::min)(static_cast<uint64_t>(space.available), fallback.total_bytes);
+  fallback.used_bytes = fallback.total_bytes - fallback.free_bytes;
+  fallback.used_percent = fallback.total_bytes > 0
+      ? ClampPercent(static_cast<double>(fallback.used_bytes) * 100.0 / static_cast<double>(fallback.total_bytes))
+      : 0.0;
+  volumes->push_back(std::move(fallback));
+  return true;
+}
+
 bool SystemMonitor::ReadDiskStats(uint64_t* total_bytes, uint64_t* used_bytes, uint64_t* free_bytes) const {
   if (total_bytes == nullptr || used_bytes == nullptr || free_bytes == nullptr) {
     return false;
@@ -686,24 +813,24 @@ bool SystemMonitor::ReadDiskStats(uint64_t* total_bytes, uint64_t* used_bytes, u
   *used_bytes = 0;
   *free_bytes = 0;
 
-#if defined(_WIN32)
-  std::filesystem::path root = std::filesystem::current_path().root_path();
-  if (root.empty()) {
-    root = "C:\\";
-  }
-#else
-  const std::filesystem::path root = "/";
-#endif
-
-  std::error_code ec;
-  const auto space = std::filesystem::space(root, ec);
-  if (ec || space.capacity == 0) {
+  std::vector<DiskVolume> volumes;
+  if (!ReadDiskVolumes(&volumes) || volumes.empty()) {
     return false;
   }
 
-  *total_bytes = static_cast<uint64_t>(space.capacity);
-  *free_bytes = static_cast<uint64_t>(space.available);
-  *used_bytes = *total_bytes > *free_bytes ? (*total_bytes - *free_bytes) : 0;
+  uint64_t total = 0;
+  uint64_t free = 0;
+  for (const auto& volume : volumes) {
+    total += volume.total_bytes;
+    free += volume.free_bytes;
+  }
+  if (total == 0) {
+    return false;
+  }
+
+  *total_bytes = total;
+  *free_bytes = (std::min)(free, total);
+  *used_bytes = *total_bytes - *free_bytes;
   return true;
 }
 
@@ -865,14 +992,24 @@ std::string SystemMonitor::SnapshotJson() {
     memory_total_bytes = total_memory_static;
   }
 
+  std::vector<DiskVolume> disk_volumes;
   uint64_t disk_total_bytes = 0;
   uint64_t disk_used_bytes = 0;
   uint64_t disk_free_bytes = 0;
-  if (!ReadDiskStats(&disk_total_bytes, &disk_used_bytes, &disk_free_bytes)) {
-    disk_total_bytes = total_disk_static;
-  }
-  if (disk_total_bytes == 0) {
-    disk_total_bytes = total_disk_static;
+  if (ReadDiskVolumes(&disk_volumes) && !disk_volumes.empty()) {
+    for (const auto& volume : disk_volumes) {
+      disk_total_bytes += volume.total_bytes;
+      disk_free_bytes += volume.free_bytes;
+    }
+    disk_free_bytes = (std::min)(disk_free_bytes, disk_total_bytes);
+    disk_used_bytes = disk_total_bytes - disk_free_bytes;
+  } else {
+    if (!ReadDiskStats(&disk_total_bytes, &disk_used_bytes, &disk_free_bytes)) {
+      disk_total_bytes = total_disk_static;
+    }
+    if (disk_total_bytes == 0) {
+      disk_total_bytes = total_disk_static;
+    }
   }
 
   const uint64_t uptime_seconds = ReadUptimeSeconds();
@@ -948,11 +1085,24 @@ std::string SystemMonitor::SnapshotJson() {
       {"free_bytes", memory_free_bytes},
       {"used_percent", memory_used_percent},
   };
+  json disk_volume_payload = json::array();
+  for (const auto& volume : disk_volumes) {
+    disk_volume_payload.push_back({
+        {"id", volume.id},
+        {"name", volume.name},
+        {"mount", volume.mount},
+        {"total_bytes", volume.total_bytes},
+        {"used_bytes", volume.used_bytes},
+        {"free_bytes", volume.free_bytes},
+        {"used_percent", volume.used_percent},
+    });
+  }
   snapshot["disk"] = {
       {"total_bytes", disk_total_bytes},
       {"used_bytes", disk_used_bytes},
       {"free_bytes", disk_free_bytes},
       {"used_percent", disk_used_percent},
+      {"volumes", disk_volume_payload},
   };
   return snapshot.dump();
 }

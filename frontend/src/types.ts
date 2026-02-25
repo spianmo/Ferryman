@@ -120,5 +120,14 @@ export type MonitorSnapshot = {
     used_bytes: number;
     free_bytes: number;
     used_percent: number;
+    volumes: Array<{
+      id: string;
+      name: string;
+      mount: string;
+      total_bytes: number;
+      used_bytes: number;
+      free_bytes: number;
+      used_percent: number;
+    }>;
   };
 };

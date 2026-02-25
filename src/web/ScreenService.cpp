@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cctype>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -198,6 +199,28 @@ std::string PayloadKey(const json& payload) {
   }
   return "";
 }
+
+int PayloadClickCount(const json& payload, int fallback = 1) {
+  const auto it = payload.find("click_count");
+  if (it == payload.end() || !it->is_number_integer()) {
+    return std::clamp(fallback, 1, 3);
+  }
+  return std::clamp(it->get<int>(), 1, 3);
+}
+
+#if defined(__APPLE__)
+int PayloadButtonsMask(const json& payload) {
+  const auto it = payload.find("buttons");
+  if (it == payload.end() || !it->is_number_integer()) {
+    return 0;
+  }
+  const int buttons = it->get<int>();
+  if (buttons < 0 || buttons > 0xff) {
+    return 0;
+  }
+  return buttons;
+}
+#endif
 
 #if FERRYMAN_WITH_FFMPEG
 std::string AvErrorToString(int code) {
@@ -418,6 +441,40 @@ bool ParseDisplayId(const std::string& raw_display_id, CGDirectDisplayID* out_di
   }
 }
 
+std::vector<ScreenService::CaptureSource> ListDisplaysViaCoreGraphics(std::string* error) {
+  std::vector<ScreenService::CaptureSource> sources;
+  constexpr uint32_t kMaxDisplays = 32;
+  std::array<CGDirectDisplayID, kMaxDisplays> display_ids{};
+  uint32_t display_count = 0;
+  const CGError list_error = CGGetOnlineDisplayList(kMaxDisplays, display_ids.data(), &display_count);
+  if (list_error != kCGErrorSuccess || display_count == 0) {
+    if (error != nullptr) {
+      *error = "no capture display available";
+    }
+    return sources;
+  }
+
+  const CGDirectDisplayID main_display = CGMainDisplayID();
+  sources.reserve(static_cast<size_t>(display_count));
+  for (uint32_t idx = 0; idx < display_count; ++idx) {
+    const CGDirectDisplayID display_id = display_ids[idx];
+    const CGRect bounds = CGDisplayBounds(display_id);
+    ScreenService::CaptureSource source;
+    source.id = std::to_string(static_cast<uint64_t>(display_id));
+    source.width = std::max(0, static_cast<int>(bounds.size.width + 0.5));
+    source.height = std::max(0, static_cast<int>(bounds.size.height + 0.5));
+    source.is_default = display_id == main_display || (idx == 0 && sources.empty());
+    source.name = "Display " + std::to_string(static_cast<unsigned long long>(idx + 1)) +
+                  " (" + std::to_string(source.width) + "x" + std::to_string(source.height) + ")";
+    sources.push_back(std::move(source));
+  }
+
+  if (sources.empty() && error != nullptr) {
+    *error = "no capture display available";
+  }
+  return sources;
+}
+
 CGRect DisplayBoundsForSourceId(const std::string& source_id) {
   CGDirectDisplayID display_id = CGMainDisplayID();
   CGDirectDisplayID parsed_display_id = 0;
@@ -456,10 +513,10 @@ CGPoint NormalizePointToDisplay(const json& payload, const CGRect& bounds, doubl
 }
 
 CGMouseButton ParseMouseButtonMac(int button) {
-  if (button == 1) {
+  if (button == 2) {
     return kCGMouseButtonRight;
   }
-  if (button == 2) {
+  if (button == 1) {
     return kCGMouseButtonCenter;
   }
   return kCGMouseButtonLeft;
@@ -473,6 +530,31 @@ std::pair<CGEventType, CGEventType> MouseDownUpTypeMac(CGMouseButton button) {
     return {kCGEventOtherMouseDown, kCGEventOtherMouseUp};
   }
   return {kCGEventLeftMouseDown, kCGEventLeftMouseUp};
+}
+
+CGEventType MouseMoveTypeMac(int buttons_mask, CGMouseButton* out_button) {
+  if ((buttons_mask & 1) != 0) {
+    if (out_button != nullptr) {
+      *out_button = kCGMouseButtonLeft;
+    }
+    return kCGEventLeftMouseDragged;
+  }
+  if ((buttons_mask & 2) != 0) {
+    if (out_button != nullptr) {
+      *out_button = kCGMouseButtonRight;
+    }
+    return kCGEventRightMouseDragged;
+  }
+  if ((buttons_mask & 4) != 0) {
+    if (out_button != nullptr) {
+      *out_button = kCGMouseButtonCenter;
+    }
+    return kCGEventOtherMouseDragged;
+  }
+  if (out_button != nullptr) {
+    *out_button = kCGMouseButtonLeft;
+  }
+  return kCGEventMouseMoved;
 }
 
 const std::unordered_map<std::string, int>& BrowserCodeToMacKeycode() {
@@ -645,13 +727,54 @@ uint8_t NormalizeMaskValue(unsigned long pixel, unsigned long mask) {
 }
 
 int LinuxButtonFromBrowserButton(int browser_button) {
-  if (browser_button == 1) {
+  if (browser_button == 2) {
     return 3;
   }
-  if (browser_button == 2) {
+  if (browser_button == 1) {
     return 2;
   }
   return 1;
+}
+
+std::string LinuxDisplayOpenErrorMessage() {
+  std::string message = "failed to open X11 display";
+  const char* display = std::getenv("DISPLAY");
+  if (display != nullptr && display[0] != '\0') {
+    message += " (DISPLAY=" + std::string(display) + ")";
+  }
+  const char* wayland = std::getenv("WAYLAND_DISPLAY");
+  if (wayland != nullptr && wayland[0] != '\0') {
+    message += "; Wayland session detected (" + std::string(wayland) + ")";
+  }
+  return message;
+}
+
+Display* OpenLinuxDisplay(std::string* error) {
+  if (Display* display = XOpenDisplay(nullptr); display != nullptr) {
+    return display;
+  }
+
+  std::vector<std::string> candidates;
+  const char* env_display = std::getenv("DISPLAY");
+  if (env_display != nullptr && env_display[0] != '\0') {
+    candidates.emplace_back(env_display);
+  }
+  for (const char* candidate : {":0", ":0.0", ":1", ":1.0"}) {
+    if (std::find(candidates.begin(), candidates.end(), candidate) == candidates.end()) {
+      candidates.emplace_back(candidate);
+    }
+  }
+
+  for (const auto& candidate : candidates) {
+    if (Display* display = XOpenDisplay(candidate.c_str()); display != nullptr) {
+      return display;
+    }
+  }
+
+  if (error != nullptr) {
+    *error = LinuxDisplayOpenErrorMessage();
+  }
+  return nullptr;
 }
 
 std::optional<KeySym> BrowserCodeToLinuxKeySym(const std::string& code) {
@@ -774,20 +897,20 @@ void EmitLinuxPayloadModifiers(Display* display, const json& payload, bool down)
 
 #if defined(_WIN32)
 int WindowsButtonDownFlag(int button) {
-  if (button == 1) {
+  if (button == 2) {
     return MOUSEEVENTF_RIGHTDOWN;
   }
-  if (button == 2) {
+  if (button == 1) {
     return MOUSEEVENTF_MIDDLEDOWN;
   }
   return MOUSEEVENTF_LEFTDOWN;
 }
 
 int WindowsButtonUpFlag(int button) {
-  if (button == 1) {
+  if (button == 2) {
     return MOUSEEVENTF_RIGHTUP;
   }
-  if (button == 2) {
+  if (button == 1) {
     return MOUSEEVENTF_MIDDLEUP;
   }
   return MOUSEEVENTF_LEFTUP;
@@ -967,8 +1090,19 @@ std::vector<ScreenService::CaptureSource> ScreenService::ListCaptureSources(std:
   std::string list_error;
   auto displays = capture_bridge_->ListDisplays(&list_error);
   if (displays.empty()) {
+    std::string fallback_error;
+    sources = ListDisplaysViaCoreGraphics(&fallback_error);
+    if (!sources.empty()) {
+      return sources;
+    }
     if (error != nullptr) {
-      *error = list_error.empty() ? "no capture display available" : list_error;
+      if (!list_error.empty()) {
+        *error = list_error;
+      } else if (!fallback_error.empty()) {
+        *error = fallback_error;
+      } else {
+        *error = "no capture display available";
+      }
     }
     return sources;
   }
@@ -985,10 +1119,11 @@ std::vector<ScreenService::CaptureSource> ScreenService::ListCaptureSources(std:
   }
   return sources;
 #elif defined(__linux__)
-  Display* display = XOpenDisplay(nullptr);
+  std::string open_error;
+  Display* display = OpenLinuxDisplay(&open_error);
   if (display == nullptr) {
     if (error != nullptr) {
-      *error = "failed to open X11 display";
+      *error = open_error.empty() ? "failed to open X11 display" : open_error;
     }
     return sources;
   }
@@ -1437,10 +1572,11 @@ bool ScreenService::CaptureFrame(EncodedFrame* frame, std::string* error) {
   }
   return false;
 #else
-  Display* display = XOpenDisplay(nullptr);
+  std::string open_error;
+  Display* display = OpenLinuxDisplay(&open_error);
   if (display == nullptr) {
     if (error != nullptr) {
-      *error = "failed to open X11 display";
+      *error = open_error.empty() ? "failed to open X11 display" : open_error;
     }
     return false;
   }
@@ -1794,24 +1930,28 @@ bool ScreenService::InjectInputEventNative(const InputEvent& event, std::string*
     current_y = last_pointer_y_;
   }
   const CGRect input_bounds = DisplayBoundsForSourceId(ActiveCaptureSourceId());
+  const auto persist_pointer = [&]() {
+    std::lock_guard<std::mutex> lock(pointer_mu_);
+    last_pointer_x_ = current_x;
+    last_pointer_y_ = current_y;
+  };
 
   if (event.type == "mouse_move") {
+    CGMouseButton move_button = kCGMouseButtonLeft;
+    const CGEventType move_type = MouseMoveTypeMac(PayloadButtonsMask(payload), &move_button);
     const CGPoint point = NormalizePointToDisplay(payload, input_bounds, current_x, current_y, &current_x, &current_y);
-    CGEventRef move = CGEventCreateMouseEvent(nullptr, kCGEventMouseMoved, point, kCGMouseButtonLeft);
+    CGEventRef move = CGEventCreateMouseEvent(nullptr, move_type, point, move_button);
     if (move == nullptr) {
       if (error != nullptr) {
         *error = "failed to create mouse move event";
       }
       return false;
     }
+    CGEventSetFlags(move, ModifierFlagsFromPayloadMac(payload));
     CGEventPost(kCGHIDEventTap, move);
     CFRelease(move);
 
-    {
-      std::lock_guard<std::mutex> lock(pointer_mu_);
-      last_pointer_x_ = current_x;
-      last_pointer_y_ = current_y;
-    }
+    persist_pointer();
 
     if (error != nullptr) {
       *error = "mouse move injected";
@@ -1819,41 +1959,73 @@ bool ScreenService::InjectInputEventNative(const InputEvent& event, std::string*
     return true;
   }
 
-  if (event.type == "mouse_click") {
+  if (event.type == "mouse_down" || event.type == "mouse_up" || event.type == "mouse_click" ||
+      event.type == "mouse_double_click") {
     const int button_code = payload.value("button", 0);
     const CGMouseButton button = ParseMouseButtonMac(button_code);
     const auto [down_type, up_type] = MouseDownUpTypeMac(button);
-    const CGPoint point = CGPointMake(current_x, current_y);
+    const CGPoint point = NormalizePointToDisplay(payload, input_bounds, current_x, current_y, &current_x, &current_y);
+    const CGEventFlags flags = ModifierFlagsFromPayloadMac(payload);
+    const int click_count = event.type == "mouse_double_click" ? 2 : PayloadClickCount(payload);
 
-    CGEventRef down = CGEventCreateMouseEvent(nullptr, down_type, point, button);
-    CGEventRef up = CGEventCreateMouseEvent(nullptr, up_type, point, button);
-    if (down == nullptr || up == nullptr) {
-      if (down != nullptr) {
-        CFRelease(down);
+    const auto post_mouse_event = [&](CGEventType type, const char* create_error, int click_state) -> bool {
+      CGEventRef mouse = CGEventCreateMouseEvent(nullptr, type, point, button);
+      if (mouse == nullptr) {
+        if (error != nullptr) {
+          *error = create_error;
+        }
+        return false;
       }
-      if (up != nullptr) {
-        CFRelease(up);
+      CGEventSetFlags(mouse, flags);
+      CGEventSetIntegerValueField(mouse, kCGMouseEventClickState, click_state);
+      CGEventPost(kCGHIDEventTap, mouse);
+      CFRelease(mouse);
+      return true;
+    };
+
+    if (event.type == "mouse_down") {
+      if (!post_mouse_event(down_type, "failed to create mouse down event", click_count)) {
+        return false;
       }
+      persist_pointer();
       if (error != nullptr) {
-        *error = "failed to create mouse click event";
+        *error = "mouse down injected";
       }
-      return false;
+      return true;
     }
 
-    CGEventPost(kCGHIDEventTap, down);
-    CGEventPost(kCGHIDEventTap, up);
-    CFRelease(down);
-    CFRelease(up);
+    if (event.type == "mouse_up") {
+      if (!post_mouse_event(up_type, "failed to create mouse up event", click_count)) {
+        return false;
+      }
+      persist_pointer();
+      if (error != nullptr) {
+        *error = "mouse up injected";
+      }
+      return true;
+    }
+
+    for (int click_state = 1; click_state <= click_count; ++click_state) {
+      if (!post_mouse_event(down_type, "failed to create mouse click event", click_state)) {
+        return false;
+      }
+      if (!post_mouse_event(up_type, "failed to create mouse click event", click_state)) {
+        return false;
+      }
+    }
+    persist_pointer();
 
     if (error != nullptr) {
-      *error = "mouse click injected";
+      *error = click_count > 1 ? "mouse double click injected" : "mouse click injected";
     }
     return true;
   }
 
   if (event.type == "mouse_wheel") {
+    (void)NormalizePointToDisplay(payload, input_bounds, current_x, current_y, &current_x, &current_y);
     const int delta_y = payload.value("delta_y", 0);
-    CGEventRef wheel = CGEventCreateScrollWheelEvent(nullptr, kCGScrollEventUnitPixel, 1, delta_y);
+    const int delta_x = payload.value("delta_x", 0);
+    CGEventRef wheel = CGEventCreateScrollWheelEvent(nullptr, kCGScrollEventUnitPixel, 2, delta_y, delta_x);
     if (wheel == nullptr) {
       if (error != nullptr) {
         *error = "failed to create wheel event";
@@ -1861,8 +2033,10 @@ bool ScreenService::InjectInputEventNative(const InputEvent& event, std::string*
       return false;
     }
 
+    CGEventSetFlags(wheel, ModifierFlagsFromPayloadMac(payload));
     CGEventPost(kCGHIDEventTap, wheel);
     CFRelease(wheel);
+    persist_pointer();
 
     if (error != nullptr) {
       *error = "mouse wheel injected";
@@ -1928,10 +2102,11 @@ bool ScreenService::InjectInputEventNative(const InputEvent& event, std::string*
   }
   return false;
 #elif defined(__linux__)
-  Display* display = XOpenDisplay(nullptr);
+  std::string open_error;
+  Display* display = OpenLinuxDisplay(&open_error);
   if (display == nullptr) {
     if (error != nullptr) {
-      *error = "failed to open X11 display for input injection";
+      *error = open_error.empty() ? "failed to open X11 display for input injection" : open_error;
     }
     return false;
   }
@@ -1960,7 +2135,7 @@ bool ScreenService::InjectInputEventNative(const InputEvent& event, std::string*
     current_y = last_pointer_y_;
   }
 
-  if (event.type == "mouse_move") {
+  const auto map_pointer = [&]() {
     const double input_x = payload.value("x", current_x);
     const double input_y = payload.value("y", current_y);
     const double view_w = payload.value("width", screen_w);
@@ -1973,15 +2148,18 @@ bool ScreenService::InjectInputEventNative(const InputEvent& event, std::string*
       current_x = input_x;
       current_y = input_y;
     }
+  };
+  const auto persist_pointer = [&]() {
+    std::lock_guard<std::mutex> lock(pointer_mu_);
+    last_pointer_x_ = current_x;
+    last_pointer_y_ = current_y;
+  };
 
+  if (event.type == "mouse_move") {
+    map_pointer();
     XTestFakeMotionEvent(display, -1, static_cast<int>(current_x), static_cast<int>(current_y), CurrentTime);
     XFlush(display);
-
-    {
-      std::lock_guard<std::mutex> lock(pointer_mu_);
-      last_pointer_x_ = current_x;
-      last_pointer_y_ = current_y;
-    }
+    persist_pointer();
 
     XCloseDisplay(display);
     if (error != nullptr) {
@@ -1990,28 +2168,71 @@ bool ScreenService::InjectInputEventNative(const InputEvent& event, std::string*
     return true;
   }
 
-  if (event.type == "mouse_click") {
+  if (event.type == "mouse_down" || event.type == "mouse_up" || event.type == "mouse_click" ||
+      event.type == "mouse_double_click") {
+    map_pointer();
+    XTestFakeMotionEvent(display, -1, static_cast<int>(current_x), static_cast<int>(current_y), CurrentTime);
     const int button = LinuxButtonFromBrowserButton(payload.value("button", 0));
-    XTestFakeButtonEvent(display, button, True, CurrentTime);
-    XTestFakeButtonEvent(display, button, False, CurrentTime);
-    XFlush(display);
-    XCloseDisplay(display);
+    const int click_count = event.type == "mouse_double_click" ? 2 : PayloadClickCount(payload);
 
+    if (event.type == "mouse_down") {
+      XTestFakeButtonEvent(display, button, True, CurrentTime);
+      XFlush(display);
+      persist_pointer();
+      XCloseDisplay(display);
+      if (error != nullptr) {
+        *error = "mouse down injected";
+      }
+      return true;
+    }
+
+    if (event.type == "mouse_up") {
+      XTestFakeButtonEvent(display, button, False, CurrentTime);
+      XFlush(display);
+      persist_pointer();
+      XCloseDisplay(display);
+      if (error != nullptr) {
+        *error = "mouse up injected";
+      }
+      return true;
+    }
+
+    for (int click = 0; click < click_count; ++click) {
+      XTestFakeButtonEvent(display, button, True, CurrentTime);
+      XTestFakeButtonEvent(display, button, False, CurrentTime);
+    }
+    XFlush(display);
+    persist_pointer();
+    XCloseDisplay(display);
     if (error != nullptr) {
-      *error = "mouse click injected";
+      *error = click_count > 1 ? "mouse double click injected" : "mouse click injected";
     }
     return true;
   }
 
   if (event.type == "mouse_wheel") {
+    map_pointer();
+    XTestFakeMotionEvent(display, -1, static_cast<int>(current_x), static_cast<int>(current_y), CurrentTime);
+
     const int delta_y = payload.value("delta_y", 0);
-    const int button = delta_y > 0 ? 5 : 4;
-    const int steps = std::max(1, std::abs(delta_y) / 120 + 1);
-    for (int i = 0; i < steps; ++i) {
-      XTestFakeButtonEvent(display, button, True, CurrentTime);
-      XTestFakeButtonEvent(display, button, False, CurrentTime);
-    }
+    const int delta_x = payload.value("delta_x", 0);
+
+    const auto emit_wheel_steps = [&](int delta, int positive_button, int negative_button) {
+      if (delta == 0) {
+        return;
+      }
+      const int button = delta > 0 ? positive_button : negative_button;
+      const int steps = std::max(1, std::abs(delta) / 120 + 1);
+      for (int i = 0; i < steps; ++i) {
+        XTestFakeButtonEvent(display, button, True, CurrentTime);
+        XTestFakeButtonEvent(display, button, False, CurrentTime);
+      }
+    };
+
+    emit_wheel_steps(delta_y, 5, 4);
+    emit_wheel_steps(delta_x, 7, 6);
     XFlush(display);
+    persist_pointer();
     XCloseDisplay(display);
 
     if (error != nullptr) {
@@ -2085,8 +2306,7 @@ bool ScreenService::InjectInputEventNative(const InputEvent& event, std::string*
   const int top = GetSystemMetrics(SM_YVIRTUALSCREEN);
   const double screen_w = static_cast<double>(GetSystemMetrics(SM_CXVIRTUALSCREEN));
   const double screen_h = static_cast<double>(GetSystemMetrics(SM_CYVIRTUALSCREEN));
-
-  if (event.type == "mouse_move") {
+  const auto map_pointer = [&]() {
     const double input_x = payload.value("x", current_x);
     const double input_y = payload.value("y", current_y);
     const double view_w = payload.value("width", screen_w);
@@ -2099,6 +2319,15 @@ bool ScreenService::InjectInputEventNative(const InputEvent& event, std::string*
       current_x = input_x;
       current_y = input_y;
     }
+  };
+  const auto persist_pointer = [&]() {
+    std::lock_guard<std::mutex> lock(pointer_mu_);
+    last_pointer_x_ = current_x;
+    last_pointer_y_ = current_y;
+  };
+
+  if (event.type == "mouse_move") {
+    map_pointer();
 
     if (!SetCursorPos(static_cast<int>(current_x), static_cast<int>(current_y))) {
       if (error != nullptr) {
@@ -2107,11 +2336,7 @@ bool ScreenService::InjectInputEventNative(const InputEvent& event, std::string*
       return false;
     }
 
-    {
-      std::lock_guard<std::mutex> lock(pointer_mu_);
-      last_pointer_x_ = current_x;
-      last_pointer_y_ = current_y;
-    }
+    persist_pointer();
 
     if (error != nullptr) {
       *error = "mouse move injected";
@@ -2119,8 +2344,19 @@ bool ScreenService::InjectInputEventNative(const InputEvent& event, std::string*
     return true;
   }
 
-  if (event.type == "mouse_click") {
+  if (event.type == "mouse_down" || event.type == "mouse_up" || event.type == "mouse_click" ||
+      event.type == "mouse_double_click") {
+    map_pointer();
+    if (!SetCursorPos(static_cast<int>(current_x), static_cast<int>(current_y))) {
+      if (error != nullptr) {
+        *error = "SetCursorPos failed";
+      }
+      return false;
+    }
+    persist_pointer();
+
     const int browser_button = payload.value("button", 0);
+    const int click_count = event.type == "mouse_double_click" ? 2 : PayloadClickCount(payload);
 
     INPUT down = {};
     down.type = INPUT_MOUSE;
@@ -2130,8 +2366,40 @@ bool ScreenService::InjectInputEventNative(const InputEvent& event, std::string*
     up.type = INPUT_MOUSE;
     up.mi.dwFlags = WindowsButtonUpFlag(browser_button);
 
-    INPUT inputs[2] = {down, up};
-    if (SendInput(2, inputs, sizeof(INPUT)) != 2) {
+    if (event.type == "mouse_down") {
+      if (SendInput(1, &down, sizeof(INPUT)) != 1) {
+        if (error != nullptr) {
+          *error = "SendInput mouse down failed";
+        }
+        return false;
+      }
+      if (error != nullptr) {
+        *error = "mouse down injected";
+      }
+      return true;
+    }
+
+    if (event.type == "mouse_up") {
+      if (SendInput(1, &up, sizeof(INPUT)) != 1) {
+        if (error != nullptr) {
+          *error = "SendInput mouse up failed";
+        }
+        return false;
+      }
+      if (error != nullptr) {
+        *error = "mouse up injected";
+      }
+      return true;
+    }
+
+    std::vector<INPUT> click_inputs;
+    click_inputs.reserve(static_cast<size_t>(click_count) * 2);
+    for (int click = 0; click < click_count; ++click) {
+      click_inputs.push_back(down);
+      click_inputs.push_back(up);
+    }
+    if (SendInput(static_cast<UINT>(click_inputs.size()), click_inputs.data(), sizeof(INPUT)) !=
+        static_cast<UINT>(click_inputs.size())) {
       if (error != nullptr) {
         *error = "SendInput mouse click failed";
       }
@@ -2139,20 +2407,49 @@ bool ScreenService::InjectInputEventNative(const InputEvent& event, std::string*
     }
 
     if (error != nullptr) {
-      *error = "mouse click injected";
+      *error = click_count > 1 ? "mouse double click injected" : "mouse click injected";
     }
     return true;
   }
 
   if (event.type == "mouse_wheel") {
+    map_pointer();
+    if (!SetCursorPos(static_cast<int>(current_x), static_cast<int>(current_y))) {
+      if (error != nullptr) {
+        *error = "SetCursorPos failed";
+      }
+      return false;
+    }
+    persist_pointer();
+
     const int delta_y = payload.value("delta_y", 0);
+    const int delta_x = payload.value("delta_x", 0);
 
-    INPUT wheel = {};
-    wheel.type = INPUT_MOUSE;
-    wheel.mi.dwFlags = MOUSEEVENTF_WHEEL;
-    wheel.mi.mouseData = static_cast<DWORD>(-delta_y);
+    std::vector<INPUT> wheel_inputs;
+    if (delta_y != 0) {
+      INPUT wheel = {};
+      wheel.type = INPUT_MOUSE;
+      wheel.mi.dwFlags = MOUSEEVENTF_WHEEL;
+      wheel.mi.mouseData = static_cast<DWORD>(-delta_y);
+      wheel_inputs.push_back(wheel);
+    }
+    if (delta_x != 0) {
+      INPUT wheel = {};
+      wheel.type = INPUT_MOUSE;
+      wheel.mi.dwFlags = MOUSEEVENTF_HWHEEL;
+      wheel.mi.mouseData = static_cast<DWORD>(delta_x);
+      wheel_inputs.push_back(wheel);
+    }
 
-    if (SendInput(1, &wheel, sizeof(INPUT)) != 1) {
+    if (wheel_inputs.empty()) {
+      if (error != nullptr) {
+        *error = "mouse wheel injected";
+      }
+      return true;
+    }
+
+    if (SendInput(static_cast<UINT>(wheel_inputs.size()), wheel_inputs.data(), sizeof(INPUT)) !=
+        static_cast<UINT>(wheel_inputs.size())) {
       if (error != nullptr) {
         *error = "SendInput mouse wheel failed";
       }

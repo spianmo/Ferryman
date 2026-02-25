@@ -1,11 +1,28 @@
 import { useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import type {
   ChangeEvent as ReactChangeEvent,
   KeyboardEvent as ReactKeyboardEvent,
   MouseEvent as ReactMouseEvent,
   WheelEvent as ReactWheelEvent,
 } from "react";
-import { FiMaximize, FiMinimize, FiMonitor, FiPause, FiPlay } from "react-icons/fi";
+import {
+  FiChevronsUp,
+  FiChevronLeft,
+  FiChevronRight,
+  FiClipboard,
+  FiCommand,
+  FiDelete,
+  FiKey,
+  FiMaximize,
+  FiMinimize,
+  FiMonitor,
+  FiPause,
+  FiPlay,
+  FiXCircle,
+  FiX,
+} from "react-icons/fi";
+import { FaLinux, FaWindows } from "react-icons/fa";
 import { createPortal } from "react-dom";
 
 import { emitUnauthorized, getScreenCapabilities, getScreenSources, wsUrl } from "../api/client";
@@ -21,6 +38,7 @@ type Props = {
 type NativeCodec = "jpeg" | "h264" | "h265" | "vp8" | "vp9" | "av1";
 type ResolutionTier = "full" | "balanced" | "performance";
 type BitrateTier = "sd" | "hd" | "uhd";
+type RemotePlatform = "windows" | "macos" | "linux" | "unknown";
 
 const NATIVE_CODEC_STORAGE_KEY = "ferryman.screen.native_codec";
 const NATIVE_FPS_STORAGE_KEY = "ferryman.screen.native_fps";
@@ -52,6 +70,7 @@ const AV1_WEBCODECS_CODEC_CANDIDATES = [
   "av01.0.04M.08",
 ] as const;
 const MAX_DECODE_QUEUE_SIZE = 3;
+const CLIPBOARD_MAX_LENGTH = 4000;
 
 const DEFAULT_RESOLUTION_OPTIONS: Array<{ id: ResolutionTier; scalePercent: number }> = [
   { id: "full", scalePercent: 100 },
@@ -104,6 +123,27 @@ function isResolutionTier(value: string): value is ResolutionTier {
 
 function isBitrateTier(value: string): value is BitrateTier {
   return value === "sd" || value === "hd" || value === "uhd";
+}
+
+function inferRemotePlatform(caps: Record<string, unknown>): RemotePlatform {
+  const backend = String(caps.screen_backend ?? "").toLowerCase();
+  const platform = String(caps.platform ?? caps.os ?? "").toLowerCase();
+  const lookup = `${backend} ${platform}`;
+  if (lookup.includes("gdi") || lookup.includes("windows") || lookup.includes("win32")) {
+    return "windows";
+  }
+  if (
+    lookup.includes("screencapturekit") ||
+    lookup.includes("mac") ||
+    lookup.includes("darwin") ||
+    lookup.includes("osx")
+  ) {
+    return "macos";
+  }
+  if (lookup.includes("x11") || lookup.includes("linux") || lookup.includes("wayland")) {
+    return "linux";
+  }
+  return "unknown";
 }
 
 function parseScreenSource(value: unknown): ScreenSource | null {
@@ -414,6 +454,10 @@ export default function ScreenPage({ session }: Props) {
     latencyEmaMs: 0,
   });
   const lastMouseMoveAtRef = useRef(0);
+  const pressedMouseButtonsRef = useRef(0);
+  const pressedKeysRef = useRef(new Map<string, { key: string; code: string; location: number }>());
+  const tappedShortcutKeysRef = useRef(new Set<string>());
+  const pinnedKeysRef = useRef({ ctrl: false, alt: false, meta: false });
   const nativeWantedRef = useRef(false);
   const [dotState, setDotState] = useState<"idle" | "connecting" | "active" | "error">("idle");
 
@@ -485,9 +529,15 @@ export default function ScreenPage({ session }: Props) {
   const [nativeInputFocused, setNativeInputFocused] = useState(false);
   const [nativeFullscreen, setNativeFullscreen] = useState(false);
   const [nativePseudoFullscreen, setNativePseudoFullscreen] = useState(false);
+  const [softKeyPanelOpen, setSoftKeyPanelOpen] = useState(false);
+  const [clipboardPanelOpen, setClipboardPanelOpen] = useState(false);
+  const [clipboardText, setClipboardText] = useState("");
+  const [pinnedKeys, setPinnedKeys] = useState({ ctrl: false, alt: false, meta: false });
+  const [remotePlatform, setRemotePlatform] = useState<RemotePlatform>("unknown");
 
   useEffect(() => {
     return () => {
+      releasePinnedModifierKeys();
       wsRef.current?.close();
       wsRef.current = null;
       revokeNativeFrameObjectUrl();
@@ -749,6 +799,7 @@ export default function ScreenPage({ session }: Props) {
         }
 
         const caps = capabilities as Record<string, unknown>;
+        setRemotePlatform(inferRemotePlatform(caps));
         const resolutionRaw = caps.native_resolution_tiers;
         if (Array.isArray(resolutionRaw)) {
           const nextResolution = resolutionRaw
@@ -890,6 +941,181 @@ export default function ScreenPage({ session }: Props) {
     }, 500);
     return () => window.clearInterval(timer);
   }, [nativeStreaming]);
+
+  useEffect(() => {
+    if (nativeStreaming) {
+      return;
+    }
+    pressedMouseButtonsRef.current = 0;
+    setSoftKeyPanelOpen(false);
+    setClipboardPanelOpen(false);
+    releasePinnedModifierKeys();
+  }, [nativeStreaming]);
+
+  useEffect(() => {
+    if (!nativeStreaming) {
+      pressedKeysRef.current.clear();
+      tappedShortcutKeysRef.current.clear();
+      return;
+    }
+
+    const suppressKeyboardEvent = (event: KeyboardEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (typeof event.stopImmediatePropagation === "function") {
+        event.stopImmediatePropagation();
+      }
+    };
+
+    const keyIdForEvent = (event: KeyboardEvent) => {
+      const code = event.code || "";
+      const key = event.key || "";
+      const location = Number.isFinite(event.location) ? event.location : 0;
+      return `${code}:${key}:${location}`;
+    };
+
+    const releasePressedKeys = () => {
+      if (pressedKeysRef.current.size <= 0) {
+        tappedShortcutKeysRef.current.clear();
+        return;
+      }
+      const pending = Array.from(pressedKeysRef.current.values());
+      pressedKeysRef.current.clear();
+      tappedShortcutKeysRef.current.clear();
+      for (const keyState of pending) {
+        const mods = mergedModifierFlags();
+        sendInput("key_up", {
+          key: keyState.key,
+          code: keyState.code,
+          location: keyState.location,
+          repeat: false,
+          shiftKey: mods.shiftKey,
+          ctrlKey: mods.ctrlKey,
+          altKey: mods.altKey,
+          metaKey: mods.metaKey,
+        });
+      }
+    };
+
+    const isModifierKey = (event: KeyboardEvent) => {
+      if (event.key === "Shift" || event.key === "Control" || event.key === "Alt" || event.key === "Meta") {
+        return true;
+      }
+      return (
+        event.code === "ShiftLeft" ||
+        event.code === "ShiftRight" ||
+        event.code === "ControlLeft" ||
+        event.code === "ControlRight" ||
+        event.code === "AltLeft" ||
+        event.code === "AltRight" ||
+        event.code === "MetaLeft" ||
+        event.code === "MetaRight"
+      );
+    };
+
+    const onKeyDownCapture = (event: KeyboardEvent) => {
+      if (
+        clipboardPanelOpen &&
+        event.target instanceof HTMLElement &&
+        event.target.closest("[data-screen-clipboard-panel='true']")
+      ) {
+        return;
+      }
+      suppressKeyboardEvent(event);
+      const mods = mergedModifierFlags({
+        shiftKey: event.shiftKey,
+        ctrlKey: event.ctrlKey,
+        altKey: event.altKey,
+        metaKey: event.metaKey,
+      });
+      const payload = {
+        key: event.key,
+        code: event.code,
+        location: event.location,
+        repeat: event.repeat,
+        shiftKey: mods.shiftKey,
+        ctrlKey: mods.ctrlKey,
+        altKey: mods.altKey,
+        metaKey: mods.metaKey,
+      };
+      const keyId = keyIdForEvent(event);
+      const isShortcutCombo = !isModifierKey(event) && (mods.ctrlKey || mods.metaKey || mods.altKey);
+      if (isShortcutCombo && !event.repeat) {
+        tappedShortcutKeysRef.current.add(keyId);
+        sendInput("key_tap", payload);
+        return;
+      }
+
+      pressedKeysRef.current.set(keyId, {
+        key: payload.key,
+        code: payload.code,
+        location: payload.location,
+      });
+      sendInput("key_down", payload);
+    };
+
+    const onKeyUpCapture = (event: KeyboardEvent) => {
+      if (
+        clipboardPanelOpen &&
+        event.target instanceof HTMLElement &&
+        event.target.closest("[data-screen-clipboard-panel='true']")
+      ) {
+        return;
+      }
+      suppressKeyboardEvent(event);
+      const mods = mergedModifierFlags({
+        shiftKey: event.shiftKey,
+        ctrlKey: event.ctrlKey,
+        altKey: event.altKey,
+        metaKey: event.metaKey,
+      });
+      const payload = {
+        key: event.key,
+        code: event.code,
+        location: event.location,
+        repeat: event.repeat,
+        shiftKey: mods.shiftKey,
+        ctrlKey: mods.ctrlKey,
+        altKey: mods.altKey,
+        metaKey: mods.metaKey,
+      };
+      const keyId = keyIdForEvent(event);
+      if (tappedShortcutKeysRef.current.has(keyId)) {
+        tappedShortcutKeysRef.current.delete(keyId);
+        return;
+      }
+      pressedKeysRef.current.delete(keyId);
+      sendInput("key_up", payload);
+    };
+
+    const onKeyPressCapture = (event: KeyboardEvent) => {
+      if (
+        clipboardPanelOpen &&
+        event.target instanceof HTMLElement &&
+        event.target.closest("[data-screen-clipboard-panel='true']")
+      ) {
+        return;
+      }
+      suppressKeyboardEvent(event);
+    };
+
+    const onWindowBlur = () => {
+      releasePressedKeys();
+    };
+
+    window.addEventListener("keydown", onKeyDownCapture, true);
+    window.addEventListener("keyup", onKeyUpCapture, true);
+    window.addEventListener("keypress", onKeyPressCapture, true);
+    window.addEventListener("blur", onWindowBlur);
+
+    return () => {
+      window.removeEventListener("keydown", onKeyDownCapture, true);
+      window.removeEventListener("keyup", onKeyUpCapture, true);
+      window.removeEventListener("keypress", onKeyPressCapture, true);
+      window.removeEventListener("blur", onWindowBlur);
+      releasePressedKeys();
+    };
+  }, [nativeStreaming, clipboardPanelOpen]);
 
   useEffect(() => {
     if (!resolutionOptions.some((item) => item.id === preferredResolutionTier)) {
@@ -1650,6 +1876,190 @@ export default function ScreenPage({ session }: Props) {
     send({ action: "input_event", type, payload });
   };
 
+  const mergedModifierFlags = (flags?: Partial<{
+    shiftKey: boolean;
+    ctrlKey: boolean;
+    altKey: boolean;
+    metaKey: boolean;
+  }>) => {
+    const pinned = pinnedKeysRef.current;
+    return {
+      shiftKey: flags?.shiftKey ?? false,
+      ctrlKey: Boolean(flags?.ctrlKey) || pinned.ctrl,
+      altKey: Boolean(flags?.altKey) || pinned.alt,
+      metaKey: Boolean(flags?.metaKey) || pinned.meta,
+    };
+  };
+
+  const keyPayload = (
+    key: string,
+    code: string,
+    location = 0,
+    flags?: Partial<{ shiftKey: boolean; ctrlKey: boolean; altKey: boolean; metaKey: boolean }>
+  ) => {
+    return {
+      key,
+      code,
+      location,
+      repeat: false,
+      ...mergedModifierFlags(flags),
+    };
+  };
+
+  const keyPayloadExactFlags = (
+    key: string,
+    code: string,
+    location = 0,
+    flags?: Partial<{ shiftKey: boolean; ctrlKey: boolean; altKey: boolean; metaKey: boolean }>
+  ) => {
+    return {
+      key,
+      code,
+      location,
+      repeat: false,
+      shiftKey: Boolean(flags?.shiftKey),
+      ctrlKey: Boolean(flags?.ctrlKey),
+      altKey: Boolean(flags?.altKey),
+      metaKey: Boolean(flags?.metaKey),
+    };
+  };
+
+  const setPinnedKeysState = (next: { ctrl: boolean; alt: boolean; meta: boolean }) => {
+    pinnedKeysRef.current = next;
+    setPinnedKeys(next);
+  };
+
+  const modifierKeyMeta = (modifier: "ctrl" | "alt" | "meta") => {
+    if (modifier === "ctrl") {
+      return { key: "Control", code: "ControlLeft", location: 1 };
+    }
+    if (modifier === "alt") {
+      return { key: "Alt", code: "AltLeft", location: 1 };
+    }
+    return { key: "Meta", code: "MetaLeft", location: 1 };
+  };
+
+  const releasePinnedModifierKeys = () => {
+    const current = pinnedKeysRef.current;
+    if (!current.ctrl && !current.alt && !current.meta) {
+      return;
+    }
+    const order: Array<"meta" | "alt" | "ctrl"> = ["meta", "alt", "ctrl"];
+    const next = { ...current };
+    for (const modifier of order) {
+      if (!next[modifier]) {
+        continue;
+      }
+      const meta = modifierKeyMeta(modifier);
+      next[modifier] = false;
+      sendInput("key_up", {
+        key: meta.key,
+        code: meta.code,
+        location: meta.location,
+        repeat: false,
+        shiftKey: false,
+        ctrlKey: next.ctrl,
+        altKey: next.alt,
+        metaKey: next.meta,
+      });
+    }
+    setPinnedKeysState({ ctrl: false, alt: false, meta: false });
+  };
+
+  const togglePinnedModifier = (modifier: "ctrl" | "alt" | "meta") => {
+    if (!nativeStreaming) {
+      return;
+    }
+    nativeSurfaceRef.current?.focus();
+    const prev = pinnedKeysRef.current;
+    const next = { ...prev, [modifier]: !prev[modifier] };
+    const meta = modifierKeyMeta(modifier);
+    const eventType = next[modifier] ? "key_down" : "key_up";
+    sendInput(eventType, {
+      key: meta.key,
+      code: meta.code,
+      location: meta.location,
+      repeat: false,
+      shiftKey: false,
+      ctrlKey: next.ctrl,
+      altKey: next.alt,
+      metaKey: next.meta,
+    });
+    setPinnedKeysState(next);
+  };
+
+  const sendSoftKeyTap = (
+    key: string,
+    code: string,
+    location = 0,
+    flags?: Partial<{ shiftKey: boolean; ctrlKey: boolean; altKey: boolean; metaKey: boolean }>
+  ) => {
+    if (!nativeStreaming) {
+      return;
+    }
+    nativeSurfaceRef.current?.focus();
+    sendInput("key_tap", keyPayload(key, code, location, flags));
+  };
+
+  const sendCtrlAltDel = () => {
+    if (!nativeStreaming) {
+      return;
+    }
+    nativeSurfaceRef.current?.focus();
+    sendInput("key_tap", {
+      key: "Delete",
+      code: "Delete",
+      location: 0,
+      repeat: false,
+      shiftKey: false,
+      ctrlKey: true,
+      altKey: true,
+      metaKey: false,
+    });
+  };
+
+  const sendCommandOptionEsc = () => {
+    if (!nativeStreaming) {
+      return;
+    }
+    nativeSurfaceRef.current?.focus();
+    sendInput("key_tap", keyPayloadExactFlags("Escape", "Escape", 0, { altKey: true, metaKey: true }));
+  };
+
+  const sendSystemAttention = () => {
+    if (remotePlatform === "macos") {
+      sendCommandOptionEsc();
+      return;
+    }
+    sendCtrlAltDel();
+  };
+
+  const sendClipboardToRemote = () => {
+    if (!nativeStreaming) {
+      return;
+    }
+    const text = clipboardText.replace(/\r\n/g, "\n");
+    if (!text) {
+      return;
+    }
+    const clipped = text.length > CLIPBOARD_MAX_LENGTH ? text.slice(0, CLIPBOARD_MAX_LENGTH) : text;
+    if (text.length > CLIPBOARD_MAX_LENGTH) {
+      toast.info(t("screen.clipboard_truncated"));
+    }
+    nativeSurfaceRef.current?.focus();
+    for (const ch of clipped) {
+      if (ch === "\n") {
+        sendInput("key_tap", keyPayloadExactFlags("Enter", "Enter"));
+        continue;
+      }
+      if (ch === "\t") {
+        sendInput("key_tap", keyPayloadExactFlags("Tab", "Tab"));
+        continue;
+      }
+      sendInput("key_tap", keyPayloadExactFlags(ch, ""));
+    }
+  };
+
   const pointerPayloadForEvent = (element: HTMLElement, clientX: number, clientY: number) => {
     const rect = element.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) {
@@ -1689,11 +2099,58 @@ export default function ScreenPage({ session }: Props) {
     return { x, y, width: viewWidth, height: viewHeight };
   };
 
+  const mouseButtonMask = (button: number) => {
+    if (button === 0) {
+      return 1;
+    }
+    if (button === 1) {
+      return 4;
+    }
+    if (button === 2) {
+      return 2;
+    }
+    return 0;
+  };
+
+  const mouseButtonsFromMask = (mask: number) => {
+    const buttons: number[] = [];
+    if ((mask & 1) !== 0) {
+      buttons.push(0);
+    }
+    if ((mask & 2) !== 0) {
+      buttons.push(2);
+    }
+    if ((mask & 4) !== 0) {
+      buttons.push(1);
+    }
+    return buttons;
+  };
+
+  const releasePressedMouseButtons = () => {
+    if (!nativeStreaming) {
+      pressedMouseButtonsRef.current = 0;
+      return;
+    }
+    const pressedMask = pressedMouseButtonsRef.current;
+    if (pressedMask === 0) {
+      return;
+    }
+    pressedMouseButtonsRef.current = 0;
+    for (const button of mouseButtonsFromMask(pressedMask)) {
+      sendInput("mouse_up", {
+        button,
+        buttons: 0,
+      });
+    }
+  };
+
   const onNativeMouseMove = (event: ReactMouseEvent<HTMLElement>) => {
     if (!nativeStreaming) return;
 
+    const buttons = event.buttons || pressedMouseButtonsRef.current;
     const now = Date.now();
-    if (now - lastMouseMoveAtRef.current < 20) {
+    const throttleMs = buttons !== 0 ? 8 : 20;
+    if (now - lastMouseMoveAtRef.current < throttleMs) {
       return;
     }
     lastMouseMoveAtRef.current = now;
@@ -1702,31 +2159,86 @@ export default function ScreenPage({ session }: Props) {
     if (!payload) {
       return;
     }
-    sendInput("mouse_move", payload);
+    sendInput("mouse_move", {
+      ...payload,
+      buttons,
+      shiftKey: event.shiftKey,
+      ctrlKey: event.ctrlKey,
+      altKey: event.altKey,
+      metaKey: event.metaKey,
+    });
   };
 
-  const onNativeClick = (event: ReactMouseEvent<HTMLElement>) => {
+  const onNativeMouseDown = (event: ReactMouseEvent<HTMLElement>) => {
     if (!nativeStreaming) return;
     nativeSurfaceRef.current?.focus();
     const payload = pointerPayloadForEvent(event.currentTarget, event.clientX, event.clientY);
-    if (payload) {
-      sendInput("mouse_move", payload);
+    if (!payload) {
+      return;
     }
-    sendInput("mouse_click", {
+
+    const fallbackMask = pressedMouseButtonsRef.current | mouseButtonMask(event.button);
+    const buttons = event.buttons || fallbackMask;
+    pressedMouseButtonsRef.current = buttons;
+    sendInput("mouse_down", {
+      ...payload,
       button: event.button,
+      buttons,
+      click_count: Math.max(1, Math.round(event.detail || 1)),
+      shiftKey: event.shiftKey,
+      ctrlKey: event.ctrlKey,
+      altKey: event.altKey,
+      metaKey: event.metaKey,
     });
+    event.preventDefault();
+  };
+
+  const onNativeMouseUp = (event: ReactMouseEvent<HTMLElement>) => {
+    if (!nativeStreaming) return;
+    const payload = pointerPayloadForEvent(event.currentTarget, event.clientX, event.clientY);
+    if (!payload) {
+      return;
+    }
+
+    const nextButtons = event.buttons;
+    pressedMouseButtonsRef.current = nextButtons;
+    sendInput("mouse_up", {
+      ...payload,
+      button: event.button,
+      buttons: nextButtons,
+      click_count: Math.max(1, Math.round(event.detail || 1)),
+      shiftKey: event.shiftKey,
+      ctrlKey: event.ctrlKey,
+      altKey: event.altKey,
+      metaKey: event.metaKey,
+    });
+    event.preventDefault();
   };
 
   const onNativeWheel = (event: ReactWheelEvent<HTMLElement>) => {
     if (!nativeStreaming) return;
     event.preventDefault();
     const payload = pointerPayloadForEvent(event.currentTarget, event.clientX, event.clientY);
-    if (payload) {
-      sendInput("mouse_move", payload);
+    if (!payload) {
+      return;
     }
     sendInput("mouse_wheel", {
+      ...payload,
+      delta_x: Math.round(event.deltaX),
       delta_y: Math.round(event.deltaY),
+      buttons: event.buttons || pressedMouseButtonsRef.current,
+      shiftKey: event.shiftKey,
+      ctrlKey: event.ctrlKey,
+      altKey: event.altKey,
+      metaKey: event.metaKey,
     });
+  };
+
+  const onNativeMouseLeave = () => {
+    if (!nativeStreaming || screenIsFullscreen) {
+      return;
+    }
+    releasePressedMouseButtons();
   };
 
   const sendKeyEvent = (type: "key_down" | "key_up", event: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -1742,6 +2254,7 @@ export default function ScreenPage({ session }: Props) {
       metaKey: event.metaKey,
     });
     event.preventDefault();
+    event.stopPropagation();
   };
 
   const onNativeKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -1757,6 +2270,84 @@ export default function ScreenPage({ session }: Props) {
   const hasScreenSources = screenSources.length > 0;
   const disableNativeStart = !nativeStreaming && (!hasScreenSources || screenSourcesLoading);
 
+  useEffect(() => {
+    if (!nativeStreaming || screenIsFullscreen) {
+      return;
+    }
+    const onWindowMouseUp = () => {
+      releasePressedMouseButtons();
+    };
+    window.addEventListener("mouseup", onWindowMouseUp);
+    return () => {
+      window.removeEventListener("mouseup", onWindowMouseUp);
+    };
+  }, [nativeStreaming, screenIsFullscreen]);
+
+  useEffect(() => {
+    if (screenIsFullscreen) {
+      setSoftKeyPanelOpen(true);
+      return;
+    }
+    setClipboardPanelOpen(false);
+    setSoftKeyPanelOpen(false);
+    releasePinnedModifierKeys();
+  }, [screenIsFullscreen]);
+
+  const softKeyButtonClass = (active = false, wide = false) => {
+    return cn(
+      "inline-flex min-w-0 items-center justify-center gap-1.5 rounded-xl border px-2 py-2 text-[11px] font-semibold transition-colors",
+      wide ? "col-span-2 h-9 w-full" : "h-9 w-full",
+      active
+        ? "border-emerald-300 bg-emerald-500/25 text-emerald-100"
+        : "border-white/20 bg-white/8 text-white hover:bg-white/15"
+    );
+  };
+
+  const softKeyModifierLabels = (() => {
+    const ctrlLabel = remotePlatform === "macos" ? t("screen.softkey_control") : t("screen.softkey_ctrl");
+    const altLabel = remotePlatform === "macos" ? t("screen.softkey_option") : t("screen.softkey_alt");
+    if (remotePlatform === "windows") {
+      return {
+        ctrlLabel,
+        altLabel,
+        metaLabel: t("screen.softkey_win"),
+      };
+    }
+    if (remotePlatform === "macos") {
+      return {
+        ctrlLabel,
+        altLabel,
+        metaLabel: t("screen.softkey_command"),
+      };
+    }
+    return {
+      ctrlLabel,
+      altLabel,
+      metaLabel: t("screen.softkey_super"),
+    };
+  })();
+
+  const systemAttentionLabel =
+    remotePlatform === "macos" ? t("screen.softkey_cmd_opt_esc") : t("screen.softkey_ctrl_alt_del");
+
+  const metaModifierIcon: ReactNode =
+    remotePlatform === "windows" ? (
+      <FaWindows className="h-3.5 w-3.5 shrink-0" />
+    ) : remotePlatform === "linux" ? (
+      <FaLinux className="h-3.5 w-3.5 shrink-0" />
+    ) : (
+      <FiCommand className="h-3.5 w-3.5 shrink-0" />
+    );
+
+  const targetPlatformBadge: { label: string; icon: ReactNode } =
+    remotePlatform === "windows"
+      ? { label: "Windows", icon: <FaWindows className="h-3.5 w-3.5 shrink-0" /> }
+      : remotePlatform === "macos"
+        ? { label: "macOS", icon: <FiCommand className="h-3.5 w-3.5 shrink-0" /> }
+        : remotePlatform === "linux"
+          ? { label: "Linux", icon: <FaLinux className="h-3.5 w-3.5 shrink-0" /> }
+          : { label: "Remote", icon: <FiMonitor className="h-3.5 w-3.5 shrink-0" /> };
+
   const renderNativeSurface = () => (
     <div
       ref={nativeSurfaceRef}
@@ -1771,7 +2362,10 @@ export default function ScreenPage({ session }: Props) {
       tabIndex={0}
       onMouseDown={() => nativeSurfaceRef.current?.focus()}
       onFocus={() => setNativeInputFocused(true)}
-      onBlur={() => setNativeInputFocused(false)}
+      onBlur={() => {
+        setNativeInputFocused(false);
+        releasePressedMouseButtons();
+      }}
       onKeyDown={onNativeKeyDown}
       onKeyUp={onNativeKeyUp}
     >
@@ -1783,10 +2377,13 @@ export default function ScreenPage({ session }: Props) {
               "block h-full w-full select-none object-contain",
               nativePseudoFullscreen ? "rounded-none" : "rounded-2xl"
             )}
+            onMouseDown={onNativeMouseDown}
+            onMouseUp={onNativeMouseUp}
             onMouseMove={onNativeMouseMove}
-            onClick={onNativeClick}
             onWheel={onNativeWheel}
+            onMouseLeave={onNativeMouseLeave}
             onContextMenu={(event) => event.preventDefault()}
+            onDragStart={(event) => event.preventDefault()}
           />
         ) : nativeFrameUrl ? (
           <img
@@ -1796,10 +2393,13 @@ export default function ScreenPage({ session }: Props) {
               nativePseudoFullscreen ? "rounded-none" : "rounded-2xl"
             )}
             alt="native screen frame"
+            onMouseDown={onNativeMouseDown}
+            onMouseUp={onNativeMouseUp}
             onMouseMove={onNativeMouseMove}
-            onClick={onNativeClick}
             onWheel={onNativeWheel}
+            onMouseLeave={onNativeMouseLeave}
             onContextMenu={(event) => event.preventDefault()}
+            onDragStart={(event) => event.preventDefault()}
             draggable={false}
           />
         ) : (
@@ -1820,6 +2420,131 @@ export default function ScreenPage({ session }: Props) {
             )}
           >
             {t("screen.native_wait")}
+          </div>
+        ) : null}
+        {screenIsFullscreen ? (
+          <div className="absolute left-2 top-1/2 z-50 flex -translate-y-1/2 items-center gap-2">
+              <button
+                type="button"
+                className="inline-flex h-12 w-7 items-center justify-center rounded-xl bg-black/55 text-white ring-1 ring-white/20 backdrop-blur-sm transition-colors hover:bg-black/70"
+                onClick={() => setSoftKeyPanelOpen((prev) => !prev)}
+                aria-label={softKeyPanelOpen ? t("screen.softkeys_hide") : t("screen.softkeys_show")}
+              >
+                {softKeyPanelOpen ? <FiChevronLeft /> : <FiChevronRight />}
+              </button>
+              {softKeyPanelOpen ? (
+                <div className="w-[min(15rem,calc(100vw-4rem))] max-h-[calc(100dvh-2rem)] overflow-y-auto rounded-2xl bg-black/60 p-2.5 shadow-2xl ring-1 ring-white/20 backdrop-blur-md">
+                  <div className="mb-2 flex items-center gap-2 rounded-xl border border-white/15 bg-white/8 px-2 py-1.5 text-[11px] font-semibold text-white/90">
+                    {targetPlatformBadge.icon}
+                    <span className="truncate">{targetPlatformBadge.label}</span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    <button
+                      type="button"
+                      className={softKeyButtonClass(pinnedKeys.ctrl)}
+                      onClick={() => togglePinnedModifier("ctrl")}
+                      aria-pressed={pinnedKeys.ctrl}
+                    >
+                      <FiChevronsUp className="h-3.5 w-3.5 shrink-0" />
+                      <span className="truncate">{softKeyModifierLabels.ctrlLabel}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className={softKeyButtonClass(pinnedKeys.alt)}
+                      onClick={() => togglePinnedModifier("alt")}
+                      aria-pressed={pinnedKeys.alt}
+                    >
+                      <FiKey className="h-3.5 w-3.5 shrink-0" />
+                      <span className="truncate">{softKeyModifierLabels.altLabel}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className={softKeyButtonClass(pinnedKeys.meta)}
+                      onClick={() => togglePinnedModifier("meta")}
+                      aria-pressed={pinnedKeys.meta}
+                    >
+                      {metaModifierIcon}
+                      <span className="truncate">{softKeyModifierLabels.metaLabel}</span>
+                    </button>
+                  </div>
+                  <div className="mt-2 grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      className={softKeyButtonClass(false)}
+                      onClick={() => sendSoftKeyTap("Tab", "Tab")}
+                    >
+                      <FiChevronsUp className="h-3.5 w-3.5 shrink-0 rotate-90" />
+                      <span className="truncate">{t("screen.softkey_tab")}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className={softKeyButtonClass(false)}
+                      onClick={() => sendSoftKeyTap("Escape", "Escape")}
+                    >
+                      <FiXCircle className="h-3.5 w-3.5 shrink-0" />
+                      <span className="truncate">{t("screen.softkey_esc")}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className={softKeyButtonClass(false, true)}
+                      onClick={sendSystemAttention}
+                    >
+                      <FiDelete className="h-3.5 w-3.5 shrink-0" />
+                      <span className="truncate">{systemAttentionLabel}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className={softKeyButtonClass(false, true)}
+                      onClick={() => setClipboardPanelOpen(true)}
+                      aria-label={t("screen.clipboard")}
+                    >
+                      <FiClipboard className="h-3.5 w-3.5 shrink-0" />
+                      <span className="truncate">{t("screen.clipboard")}</span>
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+          </div>
+        ) : null}
+        {screenIsFullscreen && clipboardPanelOpen ? (
+          <div className="pointer-events-auto absolute inset-0 z-50 grid place-items-center bg-black/35 p-4 backdrop-blur-[1px]">
+            <div
+              className="w-[min(42rem,100%)] rounded-3xl bg-slate-100/95 p-4 shadow-2xl ring-1 ring-slate-300 dark:bg-neutral-900/92 dark:ring-neutral-700"
+              data-screen-clipboard-panel="true"
+            >
+              <div className="flex items-center justify-between gap-2 rounded-2xl bg-slate-700 px-3 py-2 text-white dark:bg-neutral-800">
+                <div className="inline-flex items-center gap-2 text-sm font-semibold">
+                  <FiClipboard />
+                  <span>{t("screen.clipboard")}</span>
+                </div>
+                <button
+                  type="button"
+                  className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-white/10 text-white transition-colors hover:bg-white/20"
+                  onClick={() => setClipboardPanelOpen(false)}
+                  aria-label={t("screen.clipboard_close")}
+                >
+                  <FiX />
+                </button>
+              </div>
+              <div className="mt-3 text-sm text-slate-700 dark:text-neutral-300">
+                {t("screen.clipboard_hint")}
+              </div>
+              <textarea
+                className="mt-3 h-56 w-full resize-none rounded-2xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-slate-500 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100 dark:focus:border-neutral-500"
+                value={clipboardText}
+                onChange={(event) => setClipboardText(event.target.value)}
+                placeholder={t("screen.clipboard_placeholder")}
+              />
+              <div className="mt-3 flex flex-wrap justify-end gap-2">
+                <button
+                  type="button"
+                  className="inline-flex h-9 items-center gap-1 rounded-xl bg-slate-900 px-3 text-xs font-semibold text-white transition-colors hover:bg-slate-800 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-white"
+                  onClick={sendClipboardToRemote}
+                >
+                  {t("screen.clipboard_send_remote")}
+                </button>
+              </div>
+            </div>
           </div>
         ) : null}
       </div>

@@ -94,6 +94,82 @@ function parseSnapshot(raw: unknown): MonitorSnapshot | null {
     return null;
   }
 
+  const diskVolumesRaw = Array.isArray(disk.volumes) ? disk.volumes : [];
+  const diskVolumes = diskVolumesRaw
+    .map((item, index) => {
+      const volume = asRecord(item);
+      if (!volume) {
+        return null;
+      }
+
+      const totalBytes = Math.max(0, Math.round(asNumber(volume.total_bytes, 0)));
+      let usedBytes = Math.max(0, Math.round(asNumber(volume.used_bytes, 0)));
+      let freeBytes = Math.max(0, Math.round(asNumber(volume.free_bytes, 0)));
+      if (totalBytes > 0) {
+        if (usedBytes <= 0 && freeBytes > 0) {
+          usedBytes = Math.max(0, totalBytes - freeBytes);
+        } else if (freeBytes <= 0 && usedBytes > 0) {
+          freeBytes = Math.max(0, totalBytes - usedBytes);
+        }
+      }
+      usedBytes = Math.min(usedBytes, totalBytes);
+      freeBytes = Math.min(freeBytes, totalBytes);
+
+      const rawUsedPercent = asNumber(volume.used_percent, Number.NaN);
+      const usedPercent = Number.isFinite(rawUsedPercent)
+        ? clampPercent(rawUsedPercent)
+        : totalBytes > 0
+          ? clampPercent((usedBytes * 100) / totalBytes)
+          : 0;
+
+      const mount = asString(volume.mount || volume.mount_path);
+      const name = asString(volume.name) || asString(volume.id) || mount || `disk-${index + 1}`;
+      const id = asString(volume.id) || mount || name || `disk-${index + 1}`;
+      return {
+        id,
+        name,
+        mount,
+        total_bytes: totalBytes,
+        used_bytes: usedBytes,
+        free_bytes: freeBytes,
+        used_percent: usedPercent,
+      };
+    })
+    .filter((item): item is MonitorSnapshot["disk"]["volumes"][number] => item !== null);
+
+  const aggregateFromVolumes = diskVolumes.reduce(
+    (acc, volume) => {
+      acc.total += volume.total_bytes;
+      acc.used += volume.used_bytes;
+      acc.free += volume.free_bytes;
+      return acc;
+    },
+    { total: 0, used: 0, free: 0 }
+  );
+
+  const diskTotalRaw = Math.max(0, Math.round(asNumber(disk.total_bytes, 0)));
+  let diskUsedRaw = Math.max(0, Math.round(asNumber(disk.used_bytes, 0)));
+  let diskFreeRaw = Math.max(0, Math.round(asNumber(disk.free_bytes, 0)));
+  const diskTotal = diskTotalRaw > 0 ? diskTotalRaw : aggregateFromVolumes.total;
+  if (diskUsedRaw <= 0 && diskFreeRaw <= 0 && aggregateFromVolumes.total > 0) {
+    diskUsedRaw = aggregateFromVolumes.used;
+    diskFreeRaw = aggregateFromVolumes.free;
+  } else if (diskTotal > 0) {
+    if (diskUsedRaw <= 0 && diskFreeRaw > 0) {
+      diskUsedRaw = Math.max(0, diskTotal - diskFreeRaw);
+    } else if (diskFreeRaw <= 0 && diskUsedRaw > 0) {
+      diskFreeRaw = Math.max(0, diskTotal - diskUsedRaw);
+    }
+  }
+  const diskUsed = Math.min(diskUsedRaw, diskTotal);
+  const diskFree = Math.min(diskFreeRaw, diskTotal);
+  const diskUsedPercentRaw = asNumber(disk.used_percent, Number.NaN);
+  const diskUsedPercent = Number.isFinite(diskUsedPercentRaw)
+    ? clampPercent(diskUsedPercentRaw)
+    : diskTotal > 0
+      ? clampPercent((diskUsed * 100) / diskTotal)
+      : 0;
+
   return {
     ts_ms: Math.round(asNumber(root.ts_ms, Date.now())),
     device: {
@@ -128,10 +204,11 @@ function parseSnapshot(raw: unknown): MonitorSnapshot | null {
       used_percent: clampPercent(asNumber(memory.used_percent, 0)),
     },
     disk: {
-      total_bytes: Math.max(0, Math.round(asNumber(disk.total_bytes, 0))),
-      used_bytes: Math.max(0, Math.round(asNumber(disk.used_bytes, 0))),
-      free_bytes: Math.max(0, Math.round(asNumber(disk.free_bytes, 0))),
-      used_percent: clampPercent(asNumber(disk.used_percent, 0)),
+      total_bytes: diskTotal,
+      used_bytes: diskUsed,
+      free_bytes: diskFree,
+      used_percent: diskUsedPercent,
+      volumes: diskVolumes,
     },
   };
 }
@@ -353,14 +430,18 @@ type UsageBarProps = {
   label: string;
   value: number;
   barClass: string;
+  labelClassName?: string;
+  labelTitle?: string;
 };
 
-function UsageBar({ label, value, barClass }: UsageBarProps) {
+function UsageBar({ label, value, barClass, labelClassName, labelTitle }: UsageBarProps) {
   return (
     <div className="space-y-1.5">
-      <div className="flex items-center justify-between text-xs text-slate-500 dark:text-neutral-400">
-        <span>{label}</span>
-        <span>{formatPercent(value)}</span>
+      <div className="flex items-start justify-between gap-2 text-xs text-slate-500 dark:text-neutral-400">
+        <span className={cn("min-w-0 flex-1", labelClassName ?? "truncate")} title={labelTitle ?? label}>
+          {label}
+        </span>
+        <span className="shrink-0">{formatPercent(value)}</span>
       </div>
       <div className="h-2 rounded-full bg-slate-200 dark:bg-neutral-800">
         <div
@@ -462,7 +543,37 @@ export default function MonitorPage({ session }: Props) {
   const cpuStyle = styleForLoad(snapshot?.cpu.total_load_percent);
   const gpuStyle = styleForLoad(snapshot?.gpu.load_percent);
   const memoryStyle = styleForLoad(snapshot?.memory.used_percent);
-  const diskStyle = styleForLoad(snapshot?.disk.used_percent);
+  const diskVolumes = snapshot?.disk.volumes ?? [];
+  const diskDisplayVolumes = diskVolumes.length > 0
+    ? diskVolumes
+    : snapshot
+      ? [{
+        id: "default",
+        name: t("monitor.disk"),
+        mount: "",
+        total_bytes: snapshot.disk.total_bytes,
+        used_bytes: snapshot.disk.used_bytes,
+        free_bytes: snapshot.disk.free_bytes,
+        used_percent: snapshot.disk.used_percent,
+      }]
+      : [];
+  const diskOverview = diskVolumes.length > 0
+    ? diskVolumes.reduce(
+      (acc, volume) => {
+        acc.total_bytes += volume.total_bytes;
+        acc.used_bytes += volume.used_bytes;
+        return acc;
+      },
+      { total_bytes: 0, used_bytes: 0 }
+    )
+    : {
+      total_bytes: snapshot?.disk.total_bytes ?? 0,
+      used_bytes: snapshot?.disk.used_bytes ?? 0,
+    };
+  const diskOverviewUsedPercent = diskOverview.total_bytes > 0
+    ? clampPercent((diskOverview.used_bytes * 100) / diskOverview.total_bytes)
+    : 0;
+  const diskOverviewStyle = styleForLoad(diskOverviewUsedPercent);
 
   return (
     <div className="h-full min-h-0 overflow-visible">
@@ -621,6 +732,9 @@ export default function MonitorPage({ session }: Props) {
             </div>
           </div>
 
+        </section>
+
+        <section className="grid gap-4 xl:grid-cols-2">
           <div className="rounded-3xl bg-white/75 p-4 shadow-soft ring-1 ring-slate-200/70 backdrop-blur dark:bg-neutral-900/60 dark:ring-neutral-800/80">
             <div className="flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-neutral-50">
               <FiActivity />
@@ -645,22 +759,53 @@ export default function MonitorPage({ session }: Props) {
           <div className="rounded-3xl bg-white/75 p-4 shadow-soft ring-1 ring-slate-200/70 backdrop-blur dark:bg-neutral-900/60 dark:ring-neutral-800/80">
             <div className="flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-neutral-50">
               <FiHardDrive />
-              <span>{t("monitor.disk")}</span>
+              <span>{t("monitor.disk_overview")}</span>
             </div>
             <div className="mt-3 space-y-2">
               <UsageBar
                 label={t("monitor.disk_used")}
-                value={snapshot?.disk.used_percent ?? 0}
-                barClass={diskStyle.barClass}
+                value={diskOverviewUsedPercent}
+                barClass={diskOverviewStyle.barClass}
               />
               <div className="text-xs text-slate-500 dark:text-neutral-400">
-                {formatBytes(snapshot?.disk.used_bytes ?? 0)} / {formatBytes(snapshot?.disk.total_bytes ?? 0)}
+                {formatBytes(diskOverview.used_bytes)} / {formatBytes(diskOverview.total_bytes)}
               </div>
             </div>
             <div className="mt-3">
               <div className="mb-1 text-xs text-slate-500 dark:text-neutral-400">{t("monitor.disk_history")}</div>
-              <TrendChart points={diskHistory} strokeColor={diskStyle.strokeColor} fillColor={diskStyle.fillColor} />
+              <TrendChart points={diskHistory} strokeColor={diskOverviewStyle.strokeColor} fillColor={diskOverviewStyle.fillColor} />
             </div>
+          </div>
+        </section>
+
+        <section className="rounded-3xl bg-white/75 p-4 shadow-soft ring-1 ring-slate-200/70 backdrop-blur dark:bg-neutral-900/60 dark:ring-neutral-800/80">
+          <div className="flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-neutral-50">
+            <FiHardDrive />
+            <span>{t("monitor.disk_details")}</span>
+          </div>
+          <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
+            {diskDisplayVolumes.length > 0 ? diskDisplayVolumes.map((volume) => {
+              const label = volume.mount
+                ? `${volume.name} (${volume.mount})`
+                : volume.name;
+              const volumeStyle = styleForLoad(volume.used_percent);
+              return (
+                <div key={volume.id} className="min-w-0 rounded-2xl bg-slate-100/80 p-3 dark:bg-neutral-900">
+                  <UsageBar
+                    label={label}
+                    value={volume.used_percent}
+                    barClass={volumeStyle.barClass}
+                    labelClassName="break-all leading-4"
+                    labelTitle={label}
+                  />
+                  <div className="mt-1 text-xs text-slate-500 dark:text-neutral-400">
+                    {formatBytes(volume.used_bytes)} / {formatBytes(volume.total_bytes)}
+                  </div>
+                </div>
+              );
+            }) : (
+              <div className="col-span-full text-xs text-slate-500 dark:text-neutral-400">{t("monitor.no_data")}</div>
+            )}
           </div>
         </section>
         </div>
