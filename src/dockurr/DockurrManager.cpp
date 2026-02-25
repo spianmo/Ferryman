@@ -42,6 +42,7 @@ struct PsRow {
   std::string name;
   std::string ports;
   std::string running_for;
+  std::string state;
 };
 
 FILE* OpenPipe(const std::string& command) {
@@ -209,7 +210,7 @@ bool ParsePsRow(const std::string& line, PsRow* row) {
     return false;
   }
   const auto fields = SplitByTab(line);
-  if (fields.size() < 5) {
+  if (fields.size() < 6) {
     return false;
   }
   row->id = fields[0];
@@ -217,6 +218,7 @@ bool ParsePsRow(const std::string& line, PsRow* row) {
   row->name = fields[2];
   row->ports = fields[3];
   row->running_for = fields[4];
+  row->state = fields[5];
   return !row->id.empty();
 }
 
@@ -435,7 +437,7 @@ std::vector<VmInfo> DockurrManager::ListVms(std::string* error) const {
           "ps",
           "-a",
           "--format",
-          "{{.ID}}\t{{.Image}}\t{{.Names}}\t{{.Ports}}\t{{.RunningFor}}",
+          "{{.ID}}\t{{.Image}}\t{{.Names}}\t{{.Ports}}\t{{.RunningFor}}\t{{.State}}",
       },
       &ps_result, error);
   if (!ok) {
@@ -492,6 +494,8 @@ std::vector<VmInfo> DockurrManager::ListVms(std::string* error) const {
     vm.name = row.name;
     vm.os = DetectOsFromImage(row.image);
     vm.image = row.image;
+    vm.state = row.state;
+    vm.running = ToLower(row.state) == "running";
     vm.ports = row.ports;
     vm.running_for = row.running_for;
     bool include = IsDockurrImage(vm.image);
@@ -508,6 +512,15 @@ std::vector<VmInfo> DockurrManager::ListVms(std::string* error) const {
           vm.image = config["Image"].get<std::string>();
           vm.os = DetectOsFromImage(vm.image);
           include = include || IsDockurrImage(vm.image);
+        }
+      }
+      if (inspect_item.contains("State") && inspect_item["State"].is_object()) {
+        const auto& state = inspect_item["State"];
+        if (state.contains("Status") && state["Status"].is_string()) {
+          vm.state = state["Status"].get<std::string>();
+        }
+        if (state.contains("Running") && state["Running"].is_boolean()) {
+          vm.running = state["Running"].get<bool>();
         }
       }
       vm.novnc_port = HostPortFromInspect(inspect_item, "8006/tcp");
@@ -609,6 +622,8 @@ bool DockurrManager::CreateVm(const CreateVmRequest& request, VmInfo* created_vm
   created_vm->name = name;
   created_vm->os = request.os;
   created_vm->image = image;
+  created_vm->state = "running";
+  created_vm->running = true;
   created_vm->persistent = request.persistent;
   return true;
 }
@@ -672,6 +687,24 @@ bool DockurrManager::CreateVmWithStartupLogs(const CreateVmRequest& request, int
 
   if (created_vm != nullptr) {
     *created_vm = vm;
+  }
+  return true;
+}
+
+bool DockurrManager::StartVm(const std::string& name, std::string* error) const {
+  const std::string trimmed = util::Trim(name);
+  if (!IsValidVmName(trimmed)) {
+    if (error != nullptr) {
+      *error = "invalid vm name";
+    }
+    return false;
+  }
+  CommandResult result;
+  if (!RunCommand({"docker", "start", trimmed}, &result, error)) {
+    if (error != nullptr) {
+      *error = ErrorFromCommandOutput(result.output, "failed to start vm");
+    }
+    return false;
   }
   return true;
 }

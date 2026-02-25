@@ -2,30 +2,43 @@ import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type {
   ChangeEvent as ReactChangeEvent,
+  DragEvent as ReactDragEvent,
   KeyboardEvent as ReactKeyboardEvent,
   MouseEvent as ReactMouseEvent,
   WheelEvent as ReactWheelEvent,
 } from "react";
 import {
   FiChevronsUp,
+  FiCheckCircle,
   FiChevronLeft,
   FiChevronRight,
-  FiClipboard,
   FiCommand,
   FiDelete,
+  FiFileText,
   FiKey,
+  FiLoader,
   FiMaximize,
   FiMinimize,
   FiMonitor,
   FiPause,
   FiPlay,
-  FiXCircle,
+  FiUpload,
   FiX,
+  FiXCircle,
 } from "react-icons/fi";
 import { FaLinux, FaWindows } from "react-icons/fa";
 import { createPortal } from "react-dom";
 
-import { emitUnauthorized, getScreenCapabilities, getScreenSources, wsUrl } from "../api/client";
+import {
+  appendScreenUploadTransferChunk,
+  beginScreenUploadTransfer,
+  cancelScreenUploadTransfer,
+  commitScreenUploadTransfer,
+  emitUnauthorized,
+  getScreenCapabilities,
+  getScreenSources,
+  wsUrl,
+} from "../api/client";
 import { useI18n } from "../i18n";
 import { toast } from "../toast";
 import type { ScreenSource, SessionInfo } from "../types";
@@ -70,7 +83,7 @@ const AV1_WEBCODECS_CODEC_CANDIDATES = [
   "av01.0.04M.08",
 ] as const;
 const MAX_DECODE_QUEUE_SIZE = 3;
-const CLIPBOARD_MAX_LENGTH = 4000;
+const SCREEN_UPLOAD_CHUNK_BYTES = 256 * 1024;
 
 const DEFAULT_RESOLUTION_OPTIONS: Array<{ id: ResolutionTier; scalePercent: number }> = [
   { id: "full", scalePercent: 100 },
@@ -110,6 +123,56 @@ function decodeBase64Bytes(value: string): Uint8Array {
   }
   return bytes;
 }
+
+function bytesToBase64(bytes: Uint8Array): string {
+  const chunkSize = 0x8000;
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    const chunk = bytes.subarray(offset, Math.min(bytes.length, offset + chunkSize));
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
+function sanitizeUploadName(name: string): string {
+  const trimmed = name.trim();
+  const normalized = trimmed.replace(/[\\/:"*?<>|]+/g, "_");
+  return normalized.length > 0 ? normalized : "upload.bin";
+}
+
+function formatBytes(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) {
+    return "0 B";
+  }
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = value;
+  let index = 0;
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024;
+    index += 1;
+  }
+  const rounded = size >= 100 || index === 0 ? size.toFixed(0) : size.toFixed(1);
+  return `${rounded} ${units[index]}`;
+}
+
+type ScreenDropHint = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+type ScreenUploadTaskStatus = "queued" | "uploading" | "done" | "error" | "canceled";
+
+type ScreenUploadTask = {
+  id: string;
+  name: string;
+  size: number;
+  uploadedBytes: number;
+  status: ScreenUploadTaskStatus;
+  destination: string;
+  error: string;
+};
 
 function readUint64LE(view: DataView, offset: number): number {
   const lo = view.getUint32(offset, true);
@@ -530,13 +593,21 @@ export default function ScreenPage({ session }: Props) {
   const [nativeFullscreen, setNativeFullscreen] = useState(false);
   const [nativePseudoFullscreen, setNativePseudoFullscreen] = useState(false);
   const [softKeyPanelOpen, setSoftKeyPanelOpen] = useState(false);
-  const [clipboardPanelOpen, setClipboardPanelOpen] = useState(false);
-  const [clipboardText, setClipboardText] = useState("");
+  const [dragUploadActive, setDragUploadActive] = useState(false);
+  const dragUploadCounterRef = useRef(0);
+  const [uploadTasks, setUploadTasks] = useState<ScreenUploadTask[]>([]);
+  const uploadAbortRef = useRef(new Map<string, AbortController>());
+  const uploadCancelledRef = useRef(new Set<string>());
   const [pinnedKeys, setPinnedKeys] = useState({ ctrl: false, alt: false, meta: false });
   const [remotePlatform, setRemotePlatform] = useState<RemotePlatform>("unknown");
 
   useEffect(() => {
     return () => {
+      for (const controller of uploadAbortRef.current.values()) {
+        controller.abort();
+      }
+      uploadAbortRef.current.clear();
+      uploadCancelledRef.current.clear();
       releasePinnedModifierKeys();
       wsRef.current?.close();
       wsRef.current = null;
@@ -948,7 +1019,8 @@ export default function ScreenPage({ session }: Props) {
     }
     pressedMouseButtonsRef.current = 0;
     setSoftKeyPanelOpen(false);
-    setClipboardPanelOpen(false);
+    setDragUploadActive(false);
+    dragUploadCounterRef.current = 0;
     releasePinnedModifierKeys();
   }, [nativeStreaming]);
 
@@ -978,9 +1050,6 @@ export default function ScreenPage({ session }: Props) {
       const target = event.target;
       if (!(target instanceof HTMLElement)) {
         return false;
-      }
-      if (target.closest("[data-screen-clipboard-panel='true']")) {
-        return true;
       }
       if (target.isContentEditable) {
         return true;
@@ -2028,30 +2097,187 @@ export default function ScreenPage({ session }: Props) {
     sendCtrlAltDel();
   };
 
-  const sendClipboardToRemote = () => {
-    if (!nativeStreaming) {
+  const patchUploadTask = (taskId: string, patch: Partial<ScreenUploadTask>) => {
+    setUploadTasks((prev) =>
+      prev.map((task) => (task.id === taskId ? { ...task, ...patch } : task))
+    );
+  };
+
+  const cancelUploadTask = (taskId: string) => {
+    uploadCancelledRef.current.add(taskId);
+    const controller = uploadAbortRef.current.get(taskId);
+    if (controller) {
+      controller.abort();
       return;
     }
-    const text = clipboardText.replace(/\r\n/g, "\n");
-    if (!text) {
+    patchUploadTask(taskId, { status: "canceled", error: "" });
+  };
+
+  const clearCompletedUploads = () => {
+    setUploadTasks((prev) =>
+      prev.filter((task) => task.status === "queued" || task.status === "uploading")
+    );
+  };
+
+  const uploadSingleFile = async (task: ScreenUploadTask, file: File, dropHint: ScreenDropHint | null) => {
+    if (uploadCancelledRef.current.has(task.id)) {
+      patchUploadTask(task.id, { status: "canceled", error: "" });
       return;
     }
-    const clipped = text.length > CLIPBOARD_MAX_LENGTH ? text.slice(0, CLIPBOARD_MAX_LENGTH) : text;
-    if (text.length > CLIPBOARD_MAX_LENGTH) {
-      toast.info(t("screen.clipboard_truncated"));
-    }
-    nativeSurfaceRef.current?.focus();
-    for (const ch of clipped) {
-      if (ch === "\n") {
-        sendInput("key_tap", keyPayloadExactFlags("Enter", "Enter"));
-        continue;
+    const controller = new AbortController();
+    uploadAbortRef.current.set(task.id, controller);
+    patchUploadTask(task.id, { status: "uploading", uploadedBytes: 0, error: "" });
+
+    try {
+      const beginResult = await beginScreenUploadTransfer(
+        session.token,
+        {
+          transfer_id: task.id,
+          name: sanitizeUploadName(file.name),
+          size: file.size,
+          drop_x: dropHint ? Math.round(dropHint.x) : undefined,
+          drop_y: dropHint ? Math.round(dropHint.y) : undefined,
+          view_width: dropHint ? Math.round(dropHint.width) : undefined,
+          view_height: dropHint ? Math.round(dropHint.height) : undefined,
+        },
+        controller.signal
+      );
+      if (!beginResult.ok) {
+        throw new Error(beginResult.error || t("screen.upload_failed", { name: file.name }));
       }
-      if (ch === "\t") {
-        sendInput("key_tap", keyPayloadExactFlags("Tab", "Tab"));
-        continue;
+      if (beginResult.target_dir) {
+        patchUploadTask(task.id, { destination: beginResult.target_dir });
       }
-      sendInput("key_tap", keyPayloadExactFlags(ch, ""));
+
+      let offset = 0;
+      while (offset < file.size) {
+        if (controller.signal.aborted) {
+          throw new DOMException("aborted", "AbortError");
+        }
+        const nextOffset = Math.min(file.size, offset + SCREEN_UPLOAD_CHUNK_BYTES);
+        const chunkBytes = new Uint8Array(await file.slice(offset, nextOffset).arrayBuffer());
+        const chunkResult = await appendScreenUploadTransferChunk(
+          session.token,
+          task.id,
+          bytesToBase64(chunkBytes),
+          controller.signal
+        );
+        if (!chunkResult.ok) {
+          throw new Error(chunkResult.error || t("screen.upload_failed", { name: file.name }));
+        }
+        offset = nextOffset;
+        patchUploadTask(task.id, { uploadedBytes: offset });
+      }
+
+      const commitResult = await commitScreenUploadTransfer(session.token, task.id, controller.signal);
+      if (!commitResult.ok) {
+        throw new Error(commitResult.error || t("screen.upload_failed", { name: file.name }));
+      }
+
+      const uploadedPath = commitResult.path || beginResult.target_dir || "";
+      patchUploadTask(task.id, {
+        status: "done",
+        uploadedBytes: file.size,
+        destination: uploadedPath,
+        error: "",
+      });
+    } catch (error) {
+      if (controller.signal.aborted) {
+        try {
+          await cancelScreenUploadTransfer(session.token, task.id);
+        } catch {
+          // Ignore cancellation transport errors.
+        }
+        patchUploadTask(task.id, { status: "canceled", error: "" });
+        toast.info(t("screen.transfer_canceled", { name: file.name }));
+      } else {
+        const message =
+          error instanceof Error
+            ? error.message
+            : t("screen.upload_failed", { name: file.name });
+        patchUploadTask(task.id, { status: "error", error: message });
+        toast.error(t("screen.upload_failed", { name: file.name }));
+      }
+    } finally {
+      uploadAbortRef.current.delete(task.id);
+      uploadCancelledRef.current.delete(task.id);
     }
+  };
+
+  const uploadDroppedFiles = (files: readonly File[], dropHint: ScreenDropHint | null) => {
+    if (files.length <= 0) {
+      return;
+    }
+
+    const createdTasks: Array<{ task: ScreenUploadTask; file: File }> = [];
+    for (let idx = 0; idx < files.length; idx += 1) {
+      const file = files[idx];
+      const task: ScreenUploadTask = {
+        id: `screen-upload-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 8)}`,
+        name: sanitizeUploadName(file.name),
+        size: Math.max(0, file.size),
+        uploadedBytes: 0,
+        status: "queued",
+        destination: "",
+        error: "",
+      };
+      createdTasks.push({ task, file });
+    }
+
+    setUploadTasks((prev) => [...createdTasks.map((item) => item.task), ...prev].slice(0, 200));
+    for (const item of createdTasks) {
+      void uploadSingleFile(item.task, item.file, dropHint);
+    }
+  };
+
+  const onNativeDragEnter = (event: ReactDragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer.types.includes("Files")) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    dragUploadCounterRef.current += 1;
+    setDragUploadActive(true);
+  };
+
+  const onNativeDragOver = (event: ReactDragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer.types.includes("Files")) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "copy";
+    if (!dragUploadActive) {
+      setDragUploadActive(true);
+    }
+  };
+
+  const onNativeDragLeave = (event: ReactDragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer.types.includes("Files")) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    dragUploadCounterRef.current = Math.max(0, dragUploadCounterRef.current - 1);
+    if (dragUploadCounterRef.current === 0) {
+      setDragUploadActive(false);
+    }
+  };
+
+  const onNativeDrop = (event: ReactDragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer.types.includes("Files")) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    dragUploadCounterRef.current = 0;
+    setDragUploadActive(false);
+    const files = Array.from(event.dataTransfer.files ?? []);
+    if (files.length <= 0) {
+      return;
+    }
+    const dropHint = pointerPayloadForEvent(event.currentTarget, event.clientX, event.clientY);
+    void uploadDroppedFiles(files, dropHint);
   };
 
   const pointerPayloadForEvent = (element: HTMLElement, clientX: number, clientY: number) => {
@@ -2263,6 +2489,13 @@ export default function ScreenPage({ session }: Props) {
   const requestedSourceId = requestedNativeSourceId();
   const hasScreenSources = screenSources.length > 0;
   const disableNativeStart = !nativeStreaming && (!hasScreenSources || screenSourcesLoading);
+  const activeUploadCount = uploadTasks.filter(
+    (task) => task.status === "queued" || task.status === "uploading"
+  ).length;
+  const hasUploadInFlight = activeUploadCount > 0;
+  const hasCompletedUploads = uploadTasks.some(
+    (task) => task.status === "done" || task.status === "error" || task.status === "canceled"
+  );
 
   useEffect(() => {
     if (!nativeStreaming) {
@@ -2290,10 +2523,8 @@ export default function ScreenPage({ session }: Props) {
   useEffect(() => {
     if (screenIsFullscreen) {
       setSoftKeyPanelOpen(false);
-      setClipboardPanelOpen(false);
       return;
     }
-    setClipboardPanelOpen(false);
     setSoftKeyPanelOpen(false);
     releasePinnedModifierKeys();
   }, [screenIsFullscreen]);
@@ -2349,8 +2580,29 @@ export default function ScreenPage({ session }: Props) {
       : remotePlatform === "macos"
         ? { label: "macOS", icon: <FiCommand className="h-3.5 w-3.5 shrink-0" /> }
         : remotePlatform === "linux"
-          ? { label: "Linux", icon: <FaLinux className="h-3.5 w-3.5 shrink-0" /> }
+        ? { label: "Linux", icon: <FaLinux className="h-3.5 w-3.5 shrink-0" /> }
           : { label: "Remote", icon: <FiMonitor className="h-3.5 w-3.5 shrink-0" /> };
+
+  const uploadStatusLabel = (status: ScreenUploadTaskStatus) => {
+    if (status === "queued") return t("screen.transfer_status_queued");
+    if (status === "uploading") return t("screen.transfer_status_uploading");
+    if (status === "done") return t("screen.transfer_status_done");
+    if (status === "canceled") return t("screen.transfer_status_canceled");
+    return t("screen.transfer_status_error");
+  };
+
+  const uploadStatusClass = (status: ScreenUploadTaskStatus) => {
+    if (status === "done") {
+      return "text-emerald-600 dark:text-emerald-300";
+    }
+    if (status === "error") {
+      return "text-rose-600 dark:text-rose-300";
+    }
+    if (status === "canceled") {
+      return "text-amber-600 dark:text-amber-300";
+    }
+    return "text-slate-500 dark:text-neutral-400";
+  };
 
   const renderNativeSurface = () => (
     <div
@@ -2370,7 +2622,6 @@ export default function ScreenPage({ session }: Props) {
           return;
         }
         if (
-          event.target.closest("[data-screen-clipboard-panel='true']") ||
           event.target.closest("[data-screen-softkey-panel='true']") ||
           event.target.closest("[data-screen-softkey-toggle='true']")
         ) {
@@ -2378,6 +2629,10 @@ export default function ScreenPage({ session }: Props) {
         }
         nativeSurfaceRef.current?.focus();
       }}
+      onDragEnter={onNativeDragEnter}
+      onDragOver={onNativeDragOver}
+      onDragLeave={onNativeDragLeave}
+      onDrop={onNativeDrop}
       onFocus={() => setNativeInputFocused(true)}
       onBlur={() => {
         setNativeInputFocused(false);
@@ -2437,6 +2692,14 @@ export default function ScreenPage({ session }: Props) {
             )}
           >
             {t("screen.native_wait")}
+          </div>
+        ) : null}
+        {(dragUploadActive || hasUploadInFlight) ? (
+          <div className="pointer-events-none absolute inset-0 z-40 grid place-items-center bg-slate-900/45 text-white backdrop-blur-sm">
+            <div className="inline-flex items-center gap-2 rounded-xl border border-white/25 bg-black/50 px-3 py-2 text-xs font-semibold">
+              <FiUpload className={cn("h-4 w-4", hasUploadInFlight && "animate-pulse")} />
+              <span>{hasUploadInFlight ? t("screen.uploading") : t("screen.upload_hint")}</span>
+            </div>
           </div>
         ) : null}
         {screenIsFullscreen ? (
@@ -2521,58 +2784,116 @@ export default function ScreenPage({ session }: Props) {
                       <FiDelete className="h-3.5 w-3.5 shrink-0" />
                       <span className="min-w-0 whitespace-normal break-words">{systemAttentionLabel}</span>
                     </button>
-                    <button
-                      type="button"
-                      className={softKeyButtonClass(false)}
-                      onClick={() => setClipboardPanelOpen(true)}
-                      aria-label={t("screen.clipboard")}
-                    >
-                      <FiClipboard className="h-3.5 w-3.5 shrink-0" />
-                      <span className="min-w-0 whitespace-normal break-words">{t("screen.clipboard")}</span>
-                    </button>
                   </div>
                 </div>
               </div>
           </div>
         ) : null}
-        {screenIsFullscreen && clipboardPanelOpen ? (
-          <div className="pointer-events-auto absolute inset-0 z-50 grid place-items-center bg-black/35 p-4 backdrop-blur-[1px]">
-            <div
-              className="w-[min(42rem,100%)] rounded-3xl bg-slate-100/95 p-4 shadow-2xl ring-1 ring-slate-300 dark:bg-neutral-900/92 dark:ring-neutral-700"
-              data-screen-clipboard-panel="true"
-            >
-              <div className="flex items-center justify-between gap-2 rounded-2xl bg-slate-700 px-3 py-2 text-white dark:bg-neutral-800">
-                <div className="inline-flex items-center gap-2 text-sm font-semibold">
-                  <FiClipboard />
-                  <span>{t("screen.clipboard")}</span>
+        {uploadTasks.length > 0 ? (
+          <div className="pointer-events-auto absolute bottom-3 right-3 z-[70] w-[min(26rem,calc(100vw-1.5rem))] rounded-2xl bg-white p-2 shadow-2xl ring-1 ring-slate-200 dark:bg-neutral-900 dark:ring-neutral-700">
+            <div className="flex items-center justify-between gap-2 px-1 pb-2">
+              <div className="min-w-0">
+                <div className="truncate text-xs font-semibold text-slate-900 dark:text-neutral-50">
+                  {t("screen.transfer_title")}
                 </div>
-                <button
-                  type="button"
-                  className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-white/10 text-white transition-colors hover:bg-white/20"
-                  onClick={() => setClipboardPanelOpen(false)}
-                  aria-label={t("screen.clipboard_close")}
-                >
-                  <FiX />
-                </button>
+                <div className="truncate text-[11px] text-slate-500 dark:text-neutral-400">
+                  {t("screen.transfer_active", { count: String(activeUploadCount) })}
+                </div>
               </div>
-              <div className="mt-3 text-sm text-slate-700 dark:text-neutral-300">
-                {t("screen.clipboard_hint")}
-              </div>
-              <textarea
-                className="mt-3 h-56 w-full resize-none rounded-2xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-slate-500 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100 dark:focus:border-neutral-500"
-                value={clipboardText}
-                onChange={(event) => setClipboardText(event.target.value)}
-                placeholder={t("screen.clipboard_placeholder")}
-              />
-              <div className="mt-3 flex flex-wrap justify-end gap-2">
-                <button
-                  type="button"
-                  className="inline-flex h-9 items-center gap-1 rounded-xl bg-slate-900 px-3 text-xs font-semibold text-white transition-colors hover:bg-slate-800 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-white"
-                  onClick={sendClipboardToRemote}
-                >
-                  {t("screen.clipboard_send_remote")}
-                </button>
-              </div>
+              <button
+                type="button"
+                className={cn(
+                  "inline-flex h-7 w-7 items-center justify-center rounded-lg transition-colors",
+                  hasCompletedUploads
+                    ? "bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-neutral-800 dark:text-neutral-200 dark:hover:bg-neutral-700"
+                    : "cursor-not-allowed bg-slate-100 text-slate-400 dark:bg-neutral-800 dark:text-neutral-500"
+                )}
+                onClick={clearCompletedUploads}
+                disabled={!hasCompletedUploads}
+                aria-label={t("screen.transfer_clear_done")}
+                title={t("screen.transfer_clear_done")}
+              >
+                <FiX className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            <div className="max-h-[16rem] space-y-1.5 overflow-auto p-1">
+              {uploadTasks.map((task) => {
+                const canCancel = task.status === "queued" || task.status === "uploading";
+                const totalBytes = Math.max(task.size, 1);
+                const percent =
+                  task.size <= 0
+                    ? task.status === "done"
+                      ? 100
+                      : 0
+                    : Math.min(100, (task.uploadedBytes / totalBytes) * 100);
+                return (
+                  <article
+                    key={task.id}
+                    className="rounded-xl bg-slate-50 px-2.5 py-2 ring-1 ring-slate-200 dark:bg-neutral-950 dark:ring-neutral-800"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          {task.status === "done" ? (
+                            <FiCheckCircle className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
+                          ) : task.status === "uploading" ? (
+                            <FiLoader className="h-3.5 w-3.5 shrink-0 animate-spin text-sky-500" />
+                          ) : task.status === "error" ? (
+                            <FiXCircle className="h-3.5 w-3.5 shrink-0 text-rose-500" />
+                          ) : task.status === "canceled" ? (
+                            <FiX className="h-3.5 w-3.5 shrink-0 text-amber-500" />
+                          ) : (
+                            <FiFileText className="h-3.5 w-3.5 shrink-0 text-slate-500 dark:text-neutral-400" />
+                          )}
+                          <div className="truncate text-[12px] font-semibold text-slate-800 dark:text-neutral-100">
+                            {task.name}
+                          </div>
+                        </div>
+                        <div className={cn("mt-0.5 truncate text-[11px] font-semibold", uploadStatusClass(task.status))}>
+                          {uploadStatusLabel(task.status)}
+                        </div>
+                        {task.destination ? (
+                          <div className="mt-0.5 truncate text-[10px] text-slate-500 dark:text-neutral-400">
+                            {task.destination}
+                          </div>
+                        ) : null}
+                      </div>
+                      {canCancel ? (
+                        <button
+                          type="button"
+                          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-rose-100 text-rose-700 transition-colors hover:bg-rose-200 dark:bg-rose-900/35 dark:text-rose-300 dark:hover:bg-rose-900/55"
+                          onClick={() => cancelUploadTask(task.id)}
+                          aria-label={t("screen.transfer_cancel")}
+                          title={t("screen.transfer_cancel")}
+                        >
+                          <FiX className="h-4 w-4" />
+                        </button>
+                      ) : null}
+                    </div>
+                    <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-slate-200 dark:bg-neutral-800">
+                      <div
+                        className={cn(
+                          "h-full rounded-full transition-all duration-200",
+                          task.status === "error"
+                            ? "bg-rose-500"
+                            : task.status === "canceled"
+                              ? "bg-amber-500"
+                              : task.status === "done"
+                                ? "bg-emerald-500"
+                                : "bg-sky-500"
+                        )}
+                        style={{ width: `${percent}%` }}
+                      />
+                    </div>
+                    <div className="mt-1 text-right text-[10px] text-slate-500 dark:text-neutral-400">
+                      {formatBytes(task.uploadedBytes)} / {formatBytes(task.size)}
+                    </div>
+                    {task.error ? (
+                      <div className="mt-1 truncate text-[10px] text-rose-600 dark:text-rose-300">{task.error}</div>
+                    ) : null}
+                  </article>
+                );
+              })}
             </div>
           </div>
         ) : null}

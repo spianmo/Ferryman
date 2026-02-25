@@ -12,6 +12,8 @@ struct VmInfo {
   std::string name;
   std::string os;
   std::string image;
+  std::string state;
+  bool running = false;
   std::string ports;
   std::string running_for;
   bool persistent = false;
@@ -39,6 +41,7 @@ class DockurrManager {
   bool CreateVmWithStartupLogs(const CreateVmRequest& request, int max_wait_seconds,
                                const LogCallback& log_callback, VmInfo* created_vm,
                                std::string* error) const;
+  bool StartVm(const std::string& name, std::string* error) const;
   bool StopVm(const std::string& name, std::string* error) const;
   bool RestartVm(const std::string& name, std::string* error) const;
   bool GetLogs(const std::string& name, int tail_lines, std::string* logs, std::string* error) const;

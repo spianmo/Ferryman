@@ -36,6 +36,8 @@ export type DockurrVmInfo = {
   name: string;
   os: "windows" | "macos" | string;
   image: string;
+  state: string;
+  running: boolean;
   ports: string;
   running_for: string;
   persistent: boolean;

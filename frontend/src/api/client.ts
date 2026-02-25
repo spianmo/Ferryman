@@ -370,6 +370,79 @@ export async function getScreenSources(token: string) {
   );
 }
 
+export type ScreenUploadBeginPayload = {
+  transfer_id: string;
+  name: string;
+  size: number;
+  drop_x?: number;
+  drop_y?: number;
+  view_width?: number;
+  view_height?: number;
+};
+
+export async function beginScreenUploadTransfer(
+  token: string,
+  payload: ScreenUploadBeginPayload,
+  signal?: AbortSignal
+) {
+  return request<{ transfer_id: string; target_dir: string; accepted: boolean }>(
+    "/api/screen/upload/begin",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+      signal,
+    },
+    token
+  );
+}
+
+export async function appendScreenUploadTransferChunk(
+  token: string,
+  transferId: string,
+  dataBase64: string,
+  signal?: AbortSignal
+) {
+  return request<{ transfer_id: string; received_bytes: number; expected_bytes: number }>(
+    "/api/screen/upload/chunk",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        transfer_id: transferId,
+        data_base64: dataBase64,
+      }),
+      signal,
+    },
+    token
+  );
+}
+
+export async function commitScreenUploadTransfer(
+  token: string,
+  transferId: string,
+  signal?: AbortSignal
+) {
+  return request<{ transfer_id: string; name: string; path: string; target_dir: string; bytes: number }>(
+    "/api/screen/upload/commit",
+    {
+      method: "POST",
+      body: JSON.stringify({ transfer_id: transferId }),
+      signal,
+    },
+    token
+  );
+}
+
+export async function cancelScreenUploadTransfer(token: string, transferId: string) {
+  return request<{ transfer_id: string; cancelled: boolean }>(
+    "/api/screen/upload/cancel",
+    {
+      method: "POST",
+      body: JSON.stringify({ transfer_id: transferId }),
+    },
+    token
+  );
+}
+
 export function wsUrl(
   session: SessionInfo,
   path: "/ws/terminal" | "/ws/webrtc" | "/ws/logs" | "/ws/dockurr" | "/ws/monitor"

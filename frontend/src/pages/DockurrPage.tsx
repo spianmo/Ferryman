@@ -18,7 +18,6 @@ import {
   FiFileText,
   FiFolder,
   FiHardDrive,
-  FiInfo,
   FiPlus,
   FiRefreshCw,
   FiRotateCw,
@@ -120,9 +119,6 @@ const LOG_TAIL = 600;
 const LOG_MAX_LINES = 5000;
 const PROCESS_LIMIT = 120;
 
-const actionButtonClass =
-  "inline-flex h-8 items-center gap-1 rounded-xl px-2.5 text-xs font-semibold transition-colors";
-
 const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "ico", "tif", "tiff"]);
 const MARKDOWN_EXTENSIONS = new Set(["md", "markdown"]);
 const PDF_EXTENSIONS = new Set(["pdf"]);
@@ -201,11 +197,15 @@ function parseVm(raw: unknown): DockurrVmInfo | null {
   const source = raw as Record<string, unknown>;
   const name = asString(source.name).trim();
   if (!name) return null;
+  const state = asString(source.state).trim();
+  const running = asBool(source.running) || state.toLowerCase() === "running";
   return {
     id: asString(source.id),
     name,
     os: asString(source.os),
     image: asString(source.image),
+    state,
+    running,
     ports: asString(source.ports),
     running_for: asString(source.running_for),
     persistent: asBool(source.persistent),
@@ -232,6 +232,14 @@ function osLabel(vm: DockurrVmInfo) {
   if (vm.os === "windows") return "Windows";
   if (vm.os === "macos") return "macOS";
   return vm.os || "unknown";
+}
+
+function vmIsRunning(vm: DockurrVmInfo) {
+  if (vm.running) {
+    return true;
+  }
+  const state = vm.state.toLowerCase();
+  return state === "running" || state === "up";
 }
 
 function makeRequestId(action: string) {
@@ -574,7 +582,7 @@ export default function DockurrPage({ session }: Props) {
   const [createLoading, setCreateLoading] = useState(false);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
 
-  const [actionLoading, setActionLoading] = useState<"" | "stop" | "restart">("");
+  const [actionLoading, setActionLoading] = useState<"" | "start" | "stop" | "restart">("");
   const [detailTab, setDetailTab] = useState<DetailTab>("load");
 
   const [statsLoading, setStatsLoading] = useState(false);
@@ -781,7 +789,7 @@ export default function DockurrPage({ session }: Props) {
         if (action === "create") {
           setCreateLoading(false);
         }
-        if (action === "stop" || action === "restart") {
+        if (action === "start" || action === "stop" || action === "restart") {
           setActionLoading("");
         }
         appendRuntimeLog("error", action || "dockurr", error, asString(payload.ts));
@@ -801,6 +809,13 @@ export default function DockurrPage({ session }: Props) {
           setSelectedName(createdName);
           setDetailTab("load");
         }
+        refreshVms();
+        return;
+      }
+
+      if (action === "start") {
+        setActionLoading("");
+        toast.success(t("toast.dockurr_started", { name: asString(payload.name) }));
         refreshVms();
         return;
       }
@@ -1143,6 +1158,15 @@ export default function DockurrPage({ session }: Props) {
     currentCreateRequestIdRef.current = requestId;
   };
 
+  const runStart = (vm: DockurrVmInfo) => {
+    if (actionLoading) return;
+    setActionLoading("start");
+    const requestId = sendAction("start", { name: vm.name });
+    if (!requestId) {
+      setActionLoading("");
+    }
+  };
+
   const runStop = (vm: DockurrVmInfo) => {
     if (actionLoading) return;
     setActionLoading("stop");
@@ -1184,6 +1208,7 @@ export default function DockurrPage({ session }: Props) {
 
   const cpuStyle = styleForLoad(stats?.cpu_percent);
   const memoryStyle = styleForLoad(stats?.memory_percent);
+  const selectedVmRunning = selectedVm ? vmIsRunning(selectedVm) : false;
 
   return (
     <>
@@ -1269,82 +1294,17 @@ export default function DockurrPage({ session }: Props) {
                         {t("dockurr.os")}: <span className="font-semibold">{osLabel(vm)}</span>
                       </div>
                       <div className="truncate">
+                        {t("terminal.status")}:{" "}
+                        <span className="font-semibold">
+                          {vmIsRunning(vm) ? t("dockurr.state_running") : t("dockurr.state_stopped")}
+                        </span>
+                      </div>
+                      <div className="truncate">
                         {t("dockurr.running_for")}: <span className="font-semibold">{vm.running_for || "-"}</span>
                       </div>
                       <div className="truncate sm:col-span-2">
                         {t("dockurr.ports")}: <span className="font-mono text-[11px]">{vm.ports || "-"}</span>
                       </div>
-                    </div>
-
-                    <div className="mt-3 flex flex-wrap gap-1.5">
-                      <button
-                        className={cn(
-                          actionButtonClass,
-                          "bg-emerald-100 text-emerald-800 hover:bg-emerald-200 dark:bg-emerald-900/40 dark:text-emerald-300 dark:hover:bg-emerald-900/60"
-                        )}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          openVm(vm);
-                        }}
-                      >
-                        <FiEye /> {t("dockurr.open")}
-                      </button>
-                      <button
-                        className={cn(
-                          actionButtonClass,
-                          actionLoading === "stop"
-                            ? "cursor-wait bg-slate-200 text-slate-500 dark:bg-neutral-800 dark:text-neutral-500"
-                            : "bg-rose-100 text-rose-800 hover:bg-rose-200 dark:bg-rose-900/40 dark:text-rose-300 dark:hover:bg-rose-900/60"
-                        )}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          runStop(vm);
-                        }}
-                        disabled={actionLoading.length > 0}
-                      >
-                        <FiSquare /> {t("dockurr.stop")}
-                      </button>
-                      <button
-                        className={cn(
-                          actionButtonClass,
-                          actionLoading === "restart"
-                            ? "cursor-wait bg-slate-200 text-slate-500 dark:bg-neutral-800 dark:text-neutral-500"
-                            : "bg-amber-100 text-amber-900 hover:bg-amber-200 dark:bg-amber-900/40 dark:text-amber-300 dark:hover:bg-amber-900/60"
-                        )}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          runRestart(vm);
-                        }}
-                        disabled={actionLoading.length > 0}
-                      >
-                        <FiRotateCw /> {t("dockurr.restart")}
-                      </button>
-                      <button
-                        className={cn(
-                          actionButtonClass,
-                          "bg-sky-100 text-sky-800 hover:bg-sky-200 dark:bg-sky-900/40 dark:text-sky-300 dark:hover:bg-sky-900/60"
-                        )}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          setSelectedName(vm.name);
-                          setDetailTab("logs");
-                        }}
-                      >
-                        <FiActivity /> {t("dockurr.logs")}
-                      </button>
-                      <button
-                        className={cn(
-                          actionButtonClass,
-                          "bg-slate-200 text-slate-800 hover:bg-slate-300 dark:bg-neutral-800 dark:text-neutral-100 dark:hover:bg-neutral-700"
-                        )}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          setSelectedName(vm.name);
-                          setDetailTab("inspect");
-                        }}
-                      >
-                        <FiInfo /> {t("dockurr.inspect")}
-                      </button>
                     </div>
                   </article>
                 );
@@ -1432,14 +1392,18 @@ export default function DockurrPage({ session }: Props) {
                 <button
                   className={cn(
                     "inline-flex h-8 items-center gap-1 rounded-xl px-2.5 text-xs font-semibold transition-colors",
-                    actionLoading === "stop"
+                    selectedVmRunning
+                      ? actionLoading === "stop"
+                        ? "cursor-wait bg-slate-200 text-slate-500 dark:bg-neutral-800 dark:text-neutral-500"
+                        : "bg-rose-100 text-rose-800 hover:bg-rose-200 dark:bg-rose-900/40 dark:text-rose-300 dark:hover:bg-rose-900/60"
+                      : actionLoading === "start"
                       ? "cursor-wait bg-slate-200 text-slate-500 dark:bg-neutral-800 dark:text-neutral-500"
-                      : "bg-rose-100 text-rose-800 hover:bg-rose-200 dark:bg-rose-900/40 dark:text-rose-300 dark:hover:bg-rose-900/60"
+                      : "bg-emerald-100 text-emerald-800 hover:bg-emerald-200 dark:bg-emerald-900/40 dark:text-emerald-300 dark:hover:bg-emerald-900/60"
                   )}
-                  onClick={() => runStop(selectedVm)}
+                  onClick={() => (selectedVmRunning ? runStop(selectedVm) : runStart(selectedVm))}
                   disabled={actionLoading.length > 0}
                 >
-                  <FiSquare /> {t("dockurr.stop")}
+                  <FiSquare /> {selectedVmRunning ? t("dockurr.stop") : t("dockurr.start")}
                 </button>
                 <button
                   className={cn(
@@ -1454,8 +1418,14 @@ export default function DockurrPage({ session }: Props) {
                   <FiRotateCw /> {t("dockurr.restart")}
                 </button>
                 <button
-                  className="inline-flex h-8 items-center gap-1 rounded-xl bg-emerald-100 px-2.5 text-xs font-semibold text-emerald-800 transition-colors hover:bg-emerald-200 dark:bg-emerald-900/40 dark:text-emerald-300 dark:hover:bg-emerald-900/60"
+                  className={cn(
+                    "inline-flex h-8 items-center gap-1 rounded-xl px-2.5 text-xs font-semibold transition-colors",
+                    selectedVmRunning
+                      ? "bg-emerald-100 text-emerald-800 hover:bg-emerald-200 dark:bg-emerald-900/40 dark:text-emerald-300 dark:hover:bg-emerald-900/60"
+                      : "bg-slate-200 text-slate-500 dark:bg-neutral-800 dark:text-neutral-500"
+                  )}
                   onClick={() => openVm(selectedVm)}
+                  disabled={!selectedVmRunning}
                 >
                   <FiEye /> {t("dockurr.open")}
                 </button>

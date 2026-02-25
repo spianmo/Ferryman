@@ -1,6 +1,7 @@
 #include "ferryman/web/ServerApp.hpp"
 
 #include "ferryman/api/ResponseUtil.hpp"
+#include "ferryman/util/Random.hpp"
 #include "ferryman/util/StringUtil.hpp"
 #include "ferryman/util/Time.hpp"
 #include "ferryman/web/EmbeddedAssets.hpp"
@@ -9,6 +10,9 @@
 #include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <nlohmann/json.hpp>
 #include <sstream>
@@ -65,6 +69,175 @@ int ParseInt(const std::string& value, int default_value) {
   } catch (...) {
     return default_value;
   }
+}
+
+std::uint64_t ParseUint64(const std::string& value, std::uint64_t default_value = 0) {
+  if (value.empty()) {
+    return default_value;
+  }
+  try {
+    return static_cast<std::uint64_t>(std::stoull(value));
+  } catch (...) {
+    return default_value;
+  }
+}
+
+std::string TrimAsciiWhitespace(std::string value) {
+  value = util::Trim(value);
+  while (!value.empty() && (value.back() == '\n' || value.back() == '\r' || value.back() == '\0')) {
+    value.pop_back();
+  }
+  return util::Trim(value);
+}
+
+std::string SanitizeUploadFilename(const std::string& name) {
+  std::string trimmed = util::Trim(name);
+  if (trimmed.empty()) {
+    return "upload.bin";
+  }
+  std::string cleaned;
+  cleaned.reserve(trimmed.size());
+  for (char c : trimmed) {
+    const unsigned char uc = static_cast<unsigned char>(c);
+    if (uc < 0x20 || c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' ||
+        c == '>' || c == '|') {
+      cleaned.push_back('_');
+      continue;
+    }
+    cleaned.push_back(c);
+  }
+  if (cleaned.empty()) {
+    return "upload.bin";
+  }
+  return cleaned;
+}
+
+std::filesystem::path HomeDirectoryPath() {
+#if defined(_WIN32)
+  const char* user_profile = std::getenv("USERPROFILE");
+  if (user_profile != nullptr && *user_profile != '\0') {
+    return std::filesystem::path(user_profile);
+  }
+  const char* home_drive = std::getenv("HOMEDRIVE");
+  const char* home_path = std::getenv("HOMEPATH");
+  if (home_drive != nullptr && home_path != nullptr) {
+    return std::filesystem::path(std::string(home_drive) + std::string(home_path));
+  }
+#else
+  const char* home = std::getenv("HOME");
+  if (home != nullptr && *home != '\0') {
+    return std::filesystem::path(home);
+  }
+#endif
+  return std::filesystem::current_path();
+}
+
+std::filesystem::path DesktopDirectoryPath() {
+#if defined(_WIN32)
+  const char* user_profile = std::getenv("USERPROFILE");
+  if (user_profile != nullptr && *user_profile != '\0') {
+    return std::filesystem::path(user_profile) / "Desktop";
+  }
+#else
+  const char* home = std::getenv("HOME");
+  if (home != nullptr && *home != '\0') {
+    return std::filesystem::path(home) / "Desktop";
+  }
+#endif
+  return HomeDirectoryPath();
+}
+
+std::string RunCommandCapture(const std::string& command) {
+#if defined(_WIN32)
+  FILE* pipe = ::_popen(command.c_str(), "r");
+#else
+  FILE* pipe = ::popen(command.c_str(), "r");
+#endif
+  if (pipe == nullptr) {
+    return "";
+  }
+
+  std::string output;
+  char buffer[2048];
+  while (std::fgets(buffer, static_cast<int>(sizeof(buffer)), pipe) != nullptr) {
+    output.append(buffer);
+  }
+
+#if defined(_WIN32)
+  ::_pclose(pipe);
+#else
+  ::pclose(pipe);
+#endif
+  return output;
+}
+
+std::filesystem::path ResolveDropTargetDirectory() {
+#if defined(_WIN32)
+  const std::string command =
+      "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "
+      "\"$ErrorActionPreference='SilentlyContinue';"
+      "Add-Type -Namespace Win32 -Name User32 -MemberDefinition "
+      "'[System.Runtime.InteropServices.DllImport(\\\"user32.dll\\\")] public static extern "
+      "System.IntPtr GetForegroundWindow();';"
+      "$fg=[Win32.User32]::GetForegroundWindow();"
+      "$shell=New-Object -ComObject Shell.Application;$path='';"
+      "foreach($w in $shell.Windows()){try{if([System.IntPtr]$w.HWND -eq $fg){"
+      "$path=$w.Document.Folder.Self.Path;break}}catch{}};"
+      "if(-not $path){$path=[Environment]::GetFolderPath('Desktop')};Write-Output $path\"";
+  const std::string resolved = TrimAsciiWhitespace(RunCommandCapture(command));
+  if (!resolved.empty()) {
+    const std::filesystem::path candidate(resolved);
+    if (std::filesystem::exists(candidate) && std::filesystem::is_directory(candidate)) {
+      return candidate;
+    }
+  }
+#elif defined(__APPLE__)
+  const std::string command =
+      "/usr/bin/osascript -e 'tell application \"Finder\" to if (count of Finder windows) > 0 then "
+      "POSIX path of (target of front window as alias) else POSIX path of (desktop as alias)' 2>/dev/null";
+  const std::string resolved = TrimAsciiWhitespace(RunCommandCapture(command));
+  if (!resolved.empty()) {
+    const std::filesystem::path candidate(resolved);
+    if (std::filesystem::exists(candidate) && std::filesystem::is_directory(candidate)) {
+      return candidate;
+    }
+  }
+#elif defined(__linux__)
+  const std::string resolved = TrimAsciiWhitespace(RunCommandCapture("xdg-user-dir DESKTOP 2>/dev/null"));
+  if (!resolved.empty()) {
+    const std::filesystem::path candidate(resolved);
+    if (std::filesystem::exists(candidate) && std::filesystem::is_directory(candidate)) {
+      return candidate;
+    }
+  }
+#endif
+
+  const std::filesystem::path desktop = DesktopDirectoryPath();
+  if (std::filesystem::exists(desktop) && std::filesystem::is_directory(desktop)) {
+    return desktop;
+  }
+  return HomeDirectoryPath();
+}
+
+std::filesystem::path ResolveUniqueTargetPath(const std::filesystem::path& directory,
+                                              const std::string& raw_file_name) {
+  const std::string safe_name = SanitizeUploadFilename(raw_file_name);
+  const std::filesystem::path name_path(safe_name);
+  const std::string stem = name_path.stem().string().empty() ? "upload" : name_path.stem().string();
+  const std::string ext = name_path.extension().string();
+
+  std::filesystem::path candidate = directory / safe_name;
+  if (!std::filesystem::exists(candidate)) {
+    return candidate;
+  }
+
+  for (int index = 1; index <= 9999; ++index) {
+    candidate = directory / (stem + " (" + std::to_string(index) + ")" + ext);
+    if (!std::filesystem::exists(candidate)) {
+      return candidate;
+    }
+  }
+  return directory / (stem + "-" + util::RandomHex(6) + ext);
 }
 
 std::string JsonArray(const std::vector<std::string>& items) {
@@ -165,6 +338,28 @@ int JsonInt(const std::optional<json>& payload, const char* key, int fallback = 
   return fallback;
 }
 
+std::uint64_t JsonUint64(const std::optional<json>& payload, const char* key, std::uint64_t fallback = 0) {
+  if (!payload.has_value() || !payload->contains(key)) {
+    return fallback;
+  }
+  const auto& value = (*payload)[key];
+  if (value.is_number_unsigned()) {
+    return value.get<std::uint64_t>();
+  }
+  if (value.is_number_integer()) {
+    const long long parsed = value.get<long long>();
+    return parsed < 0 ? fallback : static_cast<std::uint64_t>(parsed);
+  }
+  if (value.is_number_float()) {
+    const double parsed = value.get<double>();
+    return parsed < 0 ? fallback : static_cast<std::uint64_t>(parsed);
+  }
+  if (value.is_string()) {
+    return ParseUint64(value.get<std::string>(), fallback);
+  }
+  return fallback;
+}
+
 int ParseNativeScalePercent(const std::string& resolution_tier, int fallback) {
   const std::string tier = ToLower(resolution_tier);
   if (tier == "full") {
@@ -250,6 +445,8 @@ std::string SerializeDockurrVm(const dockurr::VmInfo& vm) {
       {"name", vm.name, false},
       {"os", vm.os, false},
       {"image", vm.image, false},
+      {"state", vm.state, false},
+      {"running", vm.running ? "true" : "false", true},
       {"ports", vm.ports, false},
       {"running_for", vm.running_for, false},
       {"persistent", vm.persistent ? "true" : "false", true},
@@ -429,6 +626,16 @@ void ServerApp::Stop() {
   if (monitor_thread_.joinable()) {
     monitor_thread_.join();
   }
+
+  {
+    std::lock_guard<std::mutex> lock(screen_upload_mu_);
+    for (auto& [_, transfer] : screen_uploads_) {
+      transfer.stream.close();
+      std::error_code remove_error;
+      std::filesystem::remove(transfer.temp_path, remove_error);
+    }
+    screen_uploads_.clear();
+  }
 #endif
   screen_service_.StopCapture();
 #if FERRYMAN_WITH_LIBHV
@@ -506,6 +713,10 @@ bool ServerApp::RegisterHttpRoutes() {
     return HandleDockurrCreate(req, resp);
   });
 
+  http_service_.POST("/api/dockurr/start", [this](HttpRequest* req, HttpResponse* resp) {
+    return HandleDockurrStart(req, resp);
+  });
+
   http_service_.POST("/api/dockurr/stop", [this](HttpRequest* req, HttpResponse* resp) {
     return HandleDockurrStop(req, resp);
   });
@@ -576,6 +787,22 @@ bool ServerApp::RegisterHttpRoutes() {
 
   http_service_.POST("/api/screen/input", [this](HttpRequest* req, HttpResponse* resp) {
     return HandleScreenInput(req, resp);
+  });
+
+  http_service_.POST("/api/screen/upload/begin", [this](HttpRequest* req, HttpResponse* resp) {
+    return HandleScreenUploadBegin(req, resp);
+  });
+
+  http_service_.POST("/api/screen/upload/chunk", [this](HttpRequest* req, HttpResponse* resp) {
+    return HandleScreenUploadChunk(req, resp);
+  });
+
+  http_service_.POST("/api/screen/upload/commit", [this](HttpRequest* req, HttpResponse* resp) {
+    return HandleScreenUploadCommit(req, resp);
+  });
+
+  http_service_.POST("/api/screen/upload/cancel", [this](HttpRequest* req, HttpResponse* resp) {
+    return HandleScreenUploadCancel(req, resp);
   });
 
   http_service_.GET("/", [this](HttpRequest* req, HttpResponse* resp) {
@@ -922,6 +1149,31 @@ int ServerApp::HandleDockurrCreate(HttpRequest* req, HttpResponse* resp) {
                        vm.name + " (" + create_request.os + " " + create_request.version + ")");
   return Json(resp, 200, api::Success({
                              {"vm", SerializeDockurrVm(vm), true},
+                         }));
+}
+
+int ServerApp::HandleDockurrStart(HttpRequest* req, HttpResponse* resp) {
+  auto session = RequireSession(req, resp);
+  if (!session.has_value()) {
+    return resp->status_code;
+  }
+
+  const auto payload = ParseJsonOrNull(req->body);
+  const std::string name = JsonString(payload, "name", QueryOf(req, "name"));
+  if (name.empty()) {
+    return Json(resp, 400, api::Error("name is required"));
+  }
+
+  std::string error;
+  if (!dockurr_manager_.StartVm(name, &error)) {
+    const std::string lowered = ToLower(error);
+    const bool bad_request = lowered.find("invalid") != std::string::npos;
+    return Json(resp, bad_request ? 400 : 500, api::Error(error, bad_request ? "bad_request" : "dockurr_failed"));
+  }
+
+  audit_logger_.Append(session->token, "dockurr.start", name);
+  return Json(resp, 200, api::Success({
+                             {"name", name, false},
                          }));
 }
 
@@ -1431,6 +1683,241 @@ int ServerApp::HandleScreenInput(HttpRequest* req, HttpResponse* resp) {
   return Json(resp, 200, api::Success({
                              {"accepted", "true", true},
                              {"message", error, false},
+                         }));
+}
+
+int ServerApp::HandleScreenUploadBegin(HttpRequest* req, HttpResponse* resp) {
+  auto session = RequireSession(req, resp);
+  if (!session.has_value()) {
+    return resp->status_code;
+  }
+
+  const auto payload = ParseJsonOrNull(req->body);
+  std::string transfer_id = util::Trim(JsonString(payload, "transfer_id"));
+  if (transfer_id.empty()) {
+    transfer_id = util::RandomHex(16);
+  }
+  const std::string file_name_raw = util::Trim(JsonString(payload, "name"));
+  if (file_name_raw.empty()) {
+    return Json(resp, 400, api::Error("name is required"));
+  }
+
+  const std::filesystem::path target_directory = ResolveDropTargetDirectory();
+  std::error_code fs_error;
+  if (!std::filesystem::exists(target_directory, fs_error)) {
+    std::filesystem::create_directories(target_directory, fs_error);
+  }
+  if (fs_error || !std::filesystem::is_directory(target_directory)) {
+    return Json(resp, 500, api::Error("failed to resolve upload target directory"));
+  }
+
+  std::filesystem::path temp_root = std::filesystem::temp_directory_path(fs_error) / "ferryman-screen-upload";
+  if (fs_error) {
+    temp_root = std::filesystem::current_path() / ".ferryman-screen-upload";
+    fs_error.clear();
+  }
+  std::filesystem::create_directories(temp_root, fs_error);
+  if (fs_error) {
+    return Json(resp, 500, api::Error("failed to prepare temporary upload directory"));
+  }
+
+  ScreenUploadTransfer transfer;
+  transfer.owner_session_token = session->token;
+  transfer.transfer_id = transfer_id;
+  transfer.file_name = file_name_raw;
+  transfer.target_directory = target_directory;
+  transfer.expected_bytes = JsonUint64(payload, "size", 0);
+  transfer.temp_path = temp_root / (util::RandomHex(16) + ".part");
+  transfer.stream.open(transfer.temp_path, std::ios::binary | std::ios::trunc);
+  if (!transfer.stream.is_open()) {
+    return Json(resp, 500, api::Error("failed to open temporary upload file"));
+  }
+
+  const std::string map_key = session->token + ":" + transfer_id;
+  {
+    std::lock_guard<std::mutex> lock(screen_upload_mu_);
+    if (screen_uploads_.find(map_key) != screen_uploads_.end()) {
+      transfer.stream.close();
+      std::filesystem::remove(transfer.temp_path, fs_error);
+      return Json(resp, 409, api::Error("transfer already exists", "conflict"));
+    }
+    screen_uploads_.emplace(map_key, std::move(transfer));
+  }
+
+  return Json(resp, 200, api::Success({
+                             {"transfer_id", transfer_id, false},
+                             {"target_dir", target_directory.string(), false},
+                             {"accepted", "true", true},
+                         }));
+}
+
+int ServerApp::HandleScreenUploadChunk(HttpRequest* req, HttpResponse* resp) {
+  auto session = RequireSession(req, resp);
+  if (!session.has_value()) {
+    return resp->status_code;
+  }
+
+  const auto payload = ParseJsonOrNull(req->body);
+  const std::string transfer_id = util::Trim(JsonString(payload, "transfer_id"));
+  if (transfer_id.empty()) {
+    return Json(resp, 400, api::Error("transfer_id is required"));
+  }
+  const std::string data_base64 = JsonString(payload, "data_base64");
+  if (data_base64.empty()) {
+    return Json(resp, 400, api::Error("data_base64 is required"));
+  }
+
+  const std::string chunk = util::Base64Decode(data_base64);
+  if (chunk.empty() && !data_base64.empty()) {
+    // Allow empty chunk payloads that decode to empty bytes.
+  }
+
+  const std::string map_key = session->token + ":" + transfer_id;
+  std::uint64_t received_bytes = 0;
+  std::uint64_t expected_bytes = 0;
+  std::filesystem::path temp_path;
+  bool overrun = false;
+
+  {
+    std::lock_guard<std::mutex> lock(screen_upload_mu_);
+    auto it = screen_uploads_.find(map_key);
+    if (it == screen_uploads_.end()) {
+      return Json(resp, 404, api::Error("transfer not found", "not_found"));
+    }
+    ScreenUploadTransfer& transfer = it->second;
+    if (transfer.owner_session_token != session->token) {
+      return Json(resp, 403, api::Error("forbidden", "forbidden"));
+    }
+    transfer.stream.write(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+    if (!transfer.stream.good()) {
+      temp_path = transfer.temp_path;
+      transfer.stream.close();
+      screen_uploads_.erase(it);
+      std::error_code remove_error;
+      std::filesystem::remove(temp_path, remove_error);
+      return Json(resp, 500, api::Error("failed to append upload chunk"));
+    }
+    transfer.received_bytes += static_cast<std::uint64_t>(chunk.size());
+    received_bytes = transfer.received_bytes;
+    expected_bytes = transfer.expected_bytes;
+    temp_path = transfer.temp_path;
+    if (expected_bytes > 0 && received_bytes > expected_bytes) {
+      transfer.stream.close();
+      screen_uploads_.erase(it);
+      overrun = true;
+    }
+  }
+
+  if (overrun) {
+    std::error_code remove_error;
+    std::filesystem::remove(temp_path, remove_error);
+    return Json(resp, 400, api::Error("received bytes exceed declared upload size"));
+  }
+
+  return Json(resp, 200, api::Success({
+                             {"transfer_id", transfer_id, false},
+                             {"received_bytes", std::to_string(received_bytes), true},
+                             {"expected_bytes", std::to_string(expected_bytes), true},
+                         }));
+}
+
+int ServerApp::HandleScreenUploadCommit(HttpRequest* req, HttpResponse* resp) {
+  auto session = RequireSession(req, resp);
+  if (!session.has_value()) {
+    return resp->status_code;
+  }
+
+  const auto payload = ParseJsonOrNull(req->body);
+  const std::string transfer_id = util::Trim(JsonString(payload, "transfer_id"));
+  if (transfer_id.empty()) {
+    return Json(resp, 400, api::Error("transfer_id is required"));
+  }
+
+  const std::string map_key = session->token + ":" + transfer_id;
+  ScreenUploadTransfer transfer;
+  {
+    std::lock_guard<std::mutex> lock(screen_upload_mu_);
+    auto it = screen_uploads_.find(map_key);
+    if (it == screen_uploads_.end()) {
+      return Json(resp, 404, api::Error("transfer not found", "not_found"));
+    }
+    transfer = std::move(it->second);
+    screen_uploads_.erase(it);
+  }
+
+  transfer.stream.flush();
+  transfer.stream.close();
+
+  if (transfer.expected_bytes > 0 && transfer.received_bytes != transfer.expected_bytes) {
+    std::error_code remove_error;
+    std::filesystem::remove(transfer.temp_path, remove_error);
+    return Json(resp, 400, api::Error("upload is incomplete"));
+  }
+
+  std::error_code fs_error;
+  if (!std::filesystem::exists(transfer.target_directory, fs_error)) {
+    std::filesystem::create_directories(transfer.target_directory, fs_error);
+  }
+  if (fs_error || !std::filesystem::is_directory(transfer.target_directory)) {
+    std::filesystem::remove(transfer.temp_path, fs_error);
+    return Json(resp, 500, api::Error("target directory is unavailable"));
+  }
+
+  const std::filesystem::path final_path = ResolveUniqueTargetPath(transfer.target_directory, transfer.file_name);
+  std::filesystem::rename(transfer.temp_path, final_path, fs_error);
+  if (fs_error) {
+    fs_error.clear();
+    std::filesystem::copy_file(transfer.temp_path, final_path, std::filesystem::copy_options::none, fs_error);
+    if (fs_error) {
+      std::filesystem::remove(transfer.temp_path, fs_error);
+      return Json(resp, 500, api::Error("failed to finalize uploaded file"));
+    }
+    std::filesystem::remove(transfer.temp_path, fs_error);
+  }
+
+  audit_logger_.Append(session->token, "screen.upload", final_path.string());
+  return Json(resp, 200, api::Success({
+                             {"transfer_id", transfer_id, false},
+                             {"name", SanitizeUploadFilename(transfer.file_name), false},
+                             {"path", final_path.string(), false},
+                             {"target_dir", transfer.target_directory.string(), false},
+                             {"bytes", std::to_string(transfer.received_bytes), true},
+                         }));
+}
+
+int ServerApp::HandleScreenUploadCancel(HttpRequest* req, HttpResponse* resp) {
+  auto session = RequireSession(req, resp);
+  if (!session.has_value()) {
+    return resp->status_code;
+  }
+
+  const auto payload = ParseJsonOrNull(req->body);
+  const std::string transfer_id = util::Trim(JsonString(payload, "transfer_id"));
+  if (transfer_id.empty()) {
+    return Json(resp, 400, api::Error("transfer_id is required"));
+  }
+
+  const std::string map_key = session->token + ":" + transfer_id;
+  std::filesystem::path temp_path;
+  bool found = false;
+  {
+    std::lock_guard<std::mutex> lock(screen_upload_mu_);
+    auto it = screen_uploads_.find(map_key);
+    if (it != screen_uploads_.end()) {
+      found = true;
+      temp_path = it->second.temp_path;
+      it->second.stream.close();
+      screen_uploads_.erase(it);
+    }
+  }
+  if (found) {
+    std::error_code remove_error;
+    std::filesystem::remove(temp_path, remove_error);
+  }
+
+  return Json(resp, 200, api::Success({
+                             {"transfer_id", transfer_id, false},
+                             {"cancelled", found ? "true" : "false", true},
                          }));
 }
 
@@ -2506,7 +2993,7 @@ void ServerApp::HandleDockurrWsMessage(std::uintptr_t channel_key, const std::st
     return;
   }
 
-  if (action == "stop" || action == "restart" || action == "logs" || action == "inspect") {
+  if (action == "start" || action == "stop" || action == "restart" || action == "logs" || action == "inspect") {
     const std::string name = JsonString(payload, "name");
     if (name.empty()) {
       send_runtime_log("error", action, "name is required");
@@ -2516,7 +3003,16 @@ void ServerApp::HandleDockurrWsMessage(std::uintptr_t channel_key, const std::st
 
     send_runtime_log("info", action, "executing for vm: " + name);
     std::string error;
-    if (action == "stop") {
+    if (action == "start") {
+      if (!dockurr_manager_.StartVm(name, &error)) {
+        send_runtime_log("error", action, error);
+        send_action_result(false, error);
+        return;
+      }
+      audit_logger_.Append(client.session_token, "dockurr.start", name);
+      send_runtime_log("info", action, "vm started: " + name);
+      send_action_result(true, "", {{"name", name, false}});
+    } else if (action == "stop") {
       if (!dockurr_manager_.StopVm(name, &error)) {
         send_runtime_log("error", action, error);
         send_action_result(false, error);

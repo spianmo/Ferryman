@@ -13,6 +13,9 @@
 #include "ferryman/web/WebRtcSignalingService.hpp"
 
 #include <atomic>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -81,6 +84,17 @@ class ServerApp {
     int video_bitrate_bps = 0;
     std::string source_id;
   };
+
+  struct ScreenUploadTransfer {
+    std::string owner_session_token;
+    std::string transfer_id;
+    std::string file_name;
+    std::filesystem::path temp_path;
+    std::filesystem::path target_directory;
+    std::uint64_t expected_bytes = 0;
+    std::uint64_t received_bytes = 0;
+    std::ofstream stream;
+  };
 #endif
 
   bool RegisterHttpRoutes();
@@ -98,6 +112,7 @@ class ServerApp {
   int HandleLogsTail(HttpRequest* req, HttpResponse* resp);
   int HandleDockurrList(HttpRequest* req, HttpResponse* resp);
   int HandleDockurrCreate(HttpRequest* req, HttpResponse* resp);
+  int HandleDockurrStart(HttpRequest* req, HttpResponse* resp);
   int HandleDockurrStop(HttpRequest* req, HttpResponse* resp);
   int HandleDockurrRestart(HttpRequest* req, HttpResponse* resp);
   int HandleDockurrLogs(HttpRequest* req, HttpResponse* resp);
@@ -116,6 +131,10 @@ class ServerApp {
   int HandleScreenCaps(HttpRequest* req, HttpResponse* resp);
   int HandleScreenSources(HttpRequest* req, HttpResponse* resp);
   int HandleScreenInput(HttpRequest* req, HttpResponse* resp);
+  int HandleScreenUploadBegin(HttpRequest* req, HttpResponse* resp);
+  int HandleScreenUploadChunk(HttpRequest* req, HttpResponse* resp);
+  int HandleScreenUploadCommit(HttpRequest* req, HttpResponse* resp);
+  int HandleScreenUploadCancel(HttpRequest* req, HttpResponse* resp);
   int HandleHealth(HttpRequest* req, HttpResponse* resp);
   int HandleStaticAsset(HttpRequest* req, HttpResponse* resp);
 
@@ -173,6 +192,8 @@ class ServerApp {
 
   std::mutex ws_mu_;
   std::unordered_map<std::uintptr_t, WsClient> ws_clients_;
+  std::mutex screen_upload_mu_;
+  std::unordered_map<std::string, ScreenUploadTransfer> screen_uploads_;
   std::atomic<int> active_capture_fps_{0};
   std::atomic<int> active_capture_scale_percent_{75};
   std::atomic<int> active_capture_video_bitrate_bps_{3'000'000};

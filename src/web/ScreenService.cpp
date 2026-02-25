@@ -2445,7 +2445,22 @@ bool ScreenService::InjectInputEventNative(const InputEvent& event, std::string*
     }
     persist_pointer();
 
-    const int browser_button = payload.value("button", 0);
+    int browser_button = payload.value("button", -1);
+    const int buttons_mask = PayloadButtonsMask(payload);
+    if (browser_button < 0 || browser_button > 2) {
+      if ((buttons_mask & 1) != 0) {
+        browser_button = 0;
+      } else if ((buttons_mask & 2) != 0) {
+        browser_button = 2;
+      } else if ((buttons_mask & 4) != 0) {
+        browser_button = 1;
+      } else {
+        browser_button = 0;
+      }
+    } else if (browser_button == 1 && (buttons_mask & 1) != 0 && (buttons_mask & 4) == 0) {
+      // Some browsers/devices may report primary click as button=1 with left-mask.
+      browser_button = 0;
+    }
     const int click_count = event.type == "mouse_double_click" ? 2 : PayloadClickCount(payload);
 
     INPUT down = {};
