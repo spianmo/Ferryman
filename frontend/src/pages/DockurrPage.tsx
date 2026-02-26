@@ -1470,9 +1470,28 @@ export default function DockurrPage({ session, hostOs, kvmInstalled }: Props) {
                           {vm.image}
                         </div>
                       </div>
-                      <div className="inline-flex shrink-0 items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-700 dark:bg-neutral-800 dark:text-neutral-200">
-                        <FiHardDrive className="text-[11px]" />
-                        {vm.persistent ? t("dockurr.persistent_yes") : t("dockurr.persistent_no")}
+                      <div className="flex shrink-0 items-center gap-1.5">
+                        <div className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-700 dark:bg-neutral-800 dark:text-neutral-200">
+                          <FiHardDrive className="text-[11px]" />
+                          {vm.persistent ? t("dockurr.persistent_yes") : t("dockurr.persistent_no")}
+                        </div>
+                        <button
+                          type="button"
+                          className={cn(
+                            "inline-flex h-6 items-center gap-1 rounded-lg px-2 text-[11px] font-semibold transition-colors",
+                            actionLoading === "delete"
+                              ? "cursor-wait bg-slate-200 text-slate-500 dark:bg-neutral-800 dark:text-neutral-500"
+                              : "bg-rose-100 text-rose-700 hover:bg-rose-200 dark:bg-rose-900/40 dark:text-rose-300 dark:hover:bg-rose-900/60"
+                          )}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            runDelete(vm);
+                          }}
+                          disabled={actionLoading.length > 0}
+                        >
+                          <FiTrash2 />
+                          {t("dockurr.delete")}
+                        </button>
                       </div>
                     </div>
 
@@ -1492,25 +1511,6 @@ export default function DockurrPage({ session, hostOs, kvmInstalled }: Props) {
                       <div className="truncate sm:col-span-2">
                         {t("dockurr.ports")}: <span className="font-mono text-[11px]">{vm.ports || "-"}</span>
                       </div>
-                    </div>
-                    <div className="mt-2 flex justify-end">
-                      <button
-                        type="button"
-                        className={cn(
-                          "inline-flex h-7 items-center gap-1 rounded-lg px-2 text-[11px] font-semibold transition-colors",
-                          actionLoading === "delete"
-                            ? "cursor-wait bg-slate-200 text-slate-500 dark:bg-neutral-800 dark:text-neutral-500"
-                            : "bg-rose-100 text-rose-700 hover:bg-rose-200 dark:bg-rose-900/40 dark:text-rose-300 dark:hover:bg-rose-900/60"
-                        )}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          runDelete(vm);
-                        }}
-                        disabled={actionLoading.length > 0}
-                      >
-                        <FiTrash2 />
-                        {t("dockurr.delete")}
-                      </button>
                     </div>
                   </article>
                 );
