@@ -579,20 +579,41 @@ std::vector<ContainerInfo> DockerManager::ListContainers(bool include_all, std::
 }
 
 bool DockerManager::StartService(std::string* error) const {
-#if defined(__linux__)
   CommandResult probe;
   std::string probe_error;
   if (RunCommand({"docker", "info", "--format", "{{.ServerVersion}}"}, &probe, &probe_error)) {
     return true;
   }
 
+#if defined(__linux__) || defined(_WIN32) || defined(__APPLE__)
   std::string last_error = ErrorFromCommandOutput(probe.output, probe_error);
   bool requested = false;
+
+#if defined(__linux__)
   const std::array<std::vector<std::string>, 3> commands = {
       std::vector<std::string>{"systemctl", "start", "docker"},
       std::vector<std::string>{"service", "docker", "start"},
       std::vector<std::string>{"rc-service", "docker", "start"},
   };
+#elif defined(_WIN32)
+  const std::array<std::vector<std::string>, 4> commands = {
+      std::vector<std::string>{"sc", "start", "com.docker.service"},
+      std::vector<std::string>{"net", "start", "com.docker.service"},
+      std::vector<std::string>{"powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                               "-Command", "Start-Service -Name 'com.docker.service' -ErrorAction Stop"},
+      std::vector<std::string>{"powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                               "-Command",
+                               "$exe = Join-Path $env:ProgramFiles 'Docker\\Docker\\Docker Desktop.exe'; "
+                               "if (Test-Path $exe) { Start-Process -FilePath $exe | Out-Null; exit 0 }; "
+                               "exit 1"},
+  };
+#elif defined(__APPLE__)
+  const std::array<std::vector<std::string>, 2> commands = {
+      std::vector<std::string>{"open", "-a", "Docker"},
+      std::vector<std::string>{"open", "/Applications/Docker.app"},
+  };
+#endif
+
   for (const auto& command : commands) {
     CommandResult result;
     std::string command_error;
@@ -603,6 +624,12 @@ bool DockerManager::StartService(std::string* error) const {
     const std::string candidate = ErrorFromCommandOutput(result.output, command_error);
     if (!candidate.empty()) {
       last_error = candidate;
+      const std::string lowered = ToLower(candidate);
+      if (lowered.find("already running") != std::string::npos ||
+          lowered.find("already been started") != std::string::npos) {
+        requested = true;
+        break;
+      }
     }
   }
 
@@ -613,7 +640,20 @@ bool DockerManager::StartService(std::string* error) const {
     return false;
   }
 
-  for (int attempt = 0; attempt < 24; ++attempt) {
+  constexpr int kVerifyAttempts =
+#if defined(_WIN32) || defined(__APPLE__)
+      120;
+#else
+      24;
+#endif
+  constexpr int kVerifySleepMs =
+#if defined(_WIN32) || defined(__APPLE__)
+      500;
+#else
+      250;
+#endif
+
+  for (int attempt = 0; attempt < kVerifyAttempts; ++attempt) {
     CommandResult verify;
     std::string verify_error;
     if (RunCommand({"docker", "info", "--format", "{{.ServerVersion}}"}, &verify, &verify_error)) {
@@ -623,7 +663,7 @@ bool DockerManager::StartService(std::string* error) const {
     if (!candidate.empty()) {
       last_error = candidate;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    std::this_thread::sleep_for(std::chrono::milliseconds(kVerifySleepMs));
   }
 
   if (error != nullptr) {
@@ -632,7 +672,7 @@ bool DockerManager::StartService(std::string* error) const {
   return false;
 #else
   if (error != nullptr) {
-    *error = "starting docker service is only supported on linux";
+    *error = "starting docker service is only supported on linux, windows and macos";
   }
   return false;
 #endif

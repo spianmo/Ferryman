@@ -1974,7 +1974,7 @@ int ServerApp::HandleDockerServiceStart(HttpRequest* req, HttpResponse* resp) {
   std::string error;
   if (!docker_manager_.StartService(&error)) {
     const std::string lowered = ToLower(error);
-    const bool bad_request = lowered.find("only supported on linux") != std::string::npos;
+    const bool bad_request = lowered.find("only supported") != std::string::npos;
     return Json(resp, bad_request ? 400 : 500, api::Error(error, bad_request ? "bad_request" : "docker_service_failed"));
   }
 

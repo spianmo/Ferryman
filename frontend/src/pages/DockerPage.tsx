@@ -275,8 +275,9 @@ function containerMimeType(fileName: string) {
   return IMAGE_MIME_TYPES[ext] ?? "application/octet-stream";
 }
 
-function buildInstallDockerCommand() {
-  return `
+function buildInstallDockerCommand(hostOs: string) {
+  if (hostOs === "linux") {
+    return `
 set -e
 echo "[docker] checking current status..."
 if command -v docker >/dev/null 2>&1; then
@@ -309,6 +310,56 @@ fi
 $SUDO systemctl enable --now docker || true
 docker --version
 `.trim();
+  }
+
+  if (hostOs === "macos") {
+    return `
+set -e
+echo "[docker] checking current status..."
+if command -v docker >/dev/null 2>&1; then
+  echo "[docker] docker already installed."
+  docker --version || true
+  exit 0
+fi
+
+if ! command -v brew >/dev/null 2>&1; then
+  echo "[docker] Homebrew not found. Please install Homebrew first: https://brew.sh"
+  exit 1
+fi
+
+brew update || true
+brew install --cask docker
+open -a Docker || true
+docker --version || true
+`.trim();
+  }
+
+  if (hostOs === "windows") {
+    return [
+      "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command",
+      `"`,
+      "$ErrorActionPreference='Stop';",
+      "Write-Host '[docker] checking current status...';",
+      "if (Get-Command docker -ErrorAction SilentlyContinue) { docker --version; exit 0 };",
+      "if (Get-Command winget -ErrorAction SilentlyContinue) {",
+      "  winget install -e --id Docker.DockerDesktop --accept-package-agreements --accept-source-agreements --silent",
+      "} elseif (Get-Command choco -ErrorAction SilentlyContinue) {",
+      "  choco install docker-desktop -y",
+      "} elseif (Get-Command scoop -ErrorAction SilentlyContinue) {",
+      "  try { scoop bucket add extras | Out-Null } catch {}",
+      "  scoop install docker-desktop",
+      "} else {",
+      "  Write-Host '[docker] no supported package manager found (winget/choco/scoop).';",
+      "  exit 1",
+      "};",
+      "$exe = Join-Path $Env:ProgramFiles 'Docker\\Docker\\Docker Desktop.exe';",
+      "if (Test-Path $exe) { Start-Process -FilePath $exe | Out-Null };",
+      "docker --version",
+      `"`,
+    ].join(" ");
+  }
+
+  return "";
 }
 
 type TrendProps = {
@@ -520,8 +571,13 @@ export default function DockerPage({ session, hostOs, dockerInstalled }: Props) 
     () => containers.find((container) => container.name === selectedName) ?? null,
     [containers, selectedName]
   );
-  const canInstallDocker = hostOs === "linux" && !dockerInstalledState;
-  const canStartDockerService = hostOs === "linux" && dockerInstalledState && dockerServiceInactive;
+  const canInstallDocker =
+    (hostOs === "linux" || hostOs === "macos" || hostOs === "windows") &&
+    !dockerInstalledState;
+  const canStartDockerService =
+    (hostOs === "linux" || hostOs === "windows" || hostOs === "macos") &&
+    dockerInstalledState &&
+    dockerServiceInactive;
 
   const replaceImageUrl = useCallback((next: string) => {
     setSelectedImageUrl((current) => {
@@ -605,6 +661,11 @@ export default function DockerPage({ session, hostOs, dockerInstalled }: Props) 
     if (installRunning) {
       return;
     }
+    const command = buildInstallDockerCommand(hostOs);
+    if (!command) {
+      toast.error(t("toast.request_failed"));
+      return;
+    }
     setInstallDialogOpen(true);
     setInstallTaskId("");
     setInstallStatus("queued");
@@ -612,7 +673,7 @@ export default function DockerPage({ session, hostOs, dockerInstalled }: Props) 
     setInstallRunning(true);
     installNotifiedRef.current = false;
 
-    const res = await startTask(session.token, buildInstallDockerCommand());
+    const res = await startTask(session.token, command);
     if (!res.ok || !res.task_id) {
       setInstallStatus("failed");
       setInstallRunning(false);
@@ -621,7 +682,7 @@ export default function DockerPage({ session, hostOs, dockerInstalled }: Props) 
       return;
     }
     setInstallTaskId(res.task_id);
-  }, [installRunning, session.token, t]);
+  }, [hostOs, installRunning, session.token, t]);
 
   useEffect(() => {
     if (!installDialogOpen || !installTaskId) {
