@@ -172,6 +172,17 @@ bool SetReuseAddr(int fd) {
   return ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) == 0;
 }
 
+bool SetNonBlocking(int fd) {
+  if (fd < 0) {
+    return false;
+  }
+  const int flags = ::fcntl(fd, F_GETFL, 0);
+  if (flags < 0) {
+    return false;
+  }
+  return ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
+}
+
 bool SendAll(int fd, const char* data, size_t size) {
   size_t sent = 0;
   while (sent < size) {
@@ -216,6 +227,10 @@ int CreateTcpListener(const std::string& host, int port, std::string* error) {
       CloseSocket(fd);
       continue;
     }
+    if (!SetNonBlocking(fd)) {
+      CloseSocket(fd);
+      continue;
+    }
     listener = fd;
     break;
   }
@@ -252,6 +267,10 @@ int CreateUdpListener(const std::string& host, int port, std::string* error) {
     }
     SetReuseAddr(fd);
     if (::bind(fd, it->ai_addr, static_cast<socklen_t>(it->ai_addrlen)) != 0) {
+      CloseSocket(fd);
+      continue;
+    }
+    if (!SetNonBlocking(fd)) {
       CloseSocket(fd);
       continue;
     }
@@ -480,11 +499,17 @@ struct ProxyServer::Impl {
       }
       mapping = it->second;
       mappings_by_key.erase(it);
-      port_owner.erase(PortKey(mapping->protocol, mapping->remote_port));
+      auto owner_it = port_owner.find(PortKey(mapping->protocol, mapping->remote_port));
+      if (owner_it != port_owner.end() && owner_it->second == mapping_key) {
+        port_owner.erase(owner_it);
+      }
     }
 
     if (mapping) {
       mapping->active.store(false);
+      if (mapping->listener_fd >= 0) {
+        ::shutdown(mapping->listener_fd, SHUT_RDWR);
+      }
       CloseSocket(mapping->listener_fd);
       mapping->listener_fd = -1;
       if (mapping->thread.joinable()) {
@@ -920,9 +945,18 @@ struct ProxyServer::Impl {
     if (!client) {
       return;
     }
+    bool is_current_session = false;
     {
       std::lock_guard<std::mutex> lock(state_mu);
-      clients_by_id.erase(client->id);
+      auto it = clients_by_id.find(client->id);
+      if (it != clients_by_id.end() && it->second.get() == client.get()) {
+        clients_by_id.erase(it);
+        is_current_session = true;
+      }
+    }
+    if (!is_current_session) {
+      Log("info", "client.disconnect", client->id + " (stale session)");
+      return;
     }
     // Keep disabled mappings in admin list after client disconnects; they carry
     // desired state but do not hold a listening socket.
