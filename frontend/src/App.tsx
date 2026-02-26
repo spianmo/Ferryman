@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "./toast";
 import {
   FiActivity,
@@ -31,7 +31,7 @@ import TasksPage from "./pages/TasksPage";
 import TerminalPage from "./pages/TerminalPage";
 import TunnelPage from "./pages/TunnelPage";
 import { useTheme } from "./theme";
-import type { SessionInfo } from "./types";
+import type { SessionEnvironment, SessionInfo } from "./types";
 import { cn } from "./util/cn";
 
 type TabKey = "files" | "terminal" | "tasks" | "dockurr" | "docker" | "screen" | "monitor" | "tunnel" | "logs";
@@ -59,6 +59,12 @@ const SIDEBAR_COLLAPSED_KEY = "ferryman.sidebar.collapsed";
 const DEFAULT_TAB: TabKey = "monitor";
 
 const VALID_TABS: TabKey[] = ["files", "terminal", "tasks", "dockurr", "docker", "screen", "monitor", "tunnel", "logs"];
+
+const DEFAULT_SESSION_ENV: SessionEnvironment = {
+  host_os: "unknown",
+  docker_installed: true,
+  kvm_installed: true,
+};
 
 function isTabKey(value: string): value is TabKey {
   return VALID_TABS.includes(value as TabKey);
@@ -111,18 +117,33 @@ export default function App() {
     return raw === "1" || raw === "true";
   });
   const [search, setSearch] = useState("");
+  const [sessionEnv, setSessionEnv] = useState<SessionEnvironment>(DEFAULT_SESSION_ENV);
+
+  const refreshSessionEnv = useCallback(async (token: string) => {
+    const res = await getSessionMe(token);
+    if (!res.ok) {
+      return;
+    }
+    setSessionEnv({
+      host_os: typeof res.host_os === "string" ? res.host_os.toLowerCase() : "unknown",
+      docker_installed: res.docker_installed !== false,
+      kvm_installed: res.kvm_installed !== false,
+    });
+  }, []);
 
   useEffect(() => {
     sessionRef.current = session;
     if (session) {
       unauthorizedNotifiedRef.current = false;
+    } else {
+      setSessionEnv(DEFAULT_SESSION_ENV);
     }
   }, [session]);
 
   useEffect(() => {
     if (!session) return;
-    void getSessionMe(session.token);
-  }, [session]);
+    void refreshSessionEnv(session.token);
+  }, [refreshSessionEnv, session]);
 
   useEffect(() => {
     const onUnauthorized = (event: Event) => {
@@ -140,6 +161,28 @@ export default function App() {
     window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized as EventListener);
     return () => window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized as EventListener);
   }, [t]);
+
+  const visibleNavItems = useMemo(() => {
+    return navItems.filter((item) => {
+      if (item.key === "dockurr") {
+        return sessionEnv.host_os === "linux";
+      }
+      return true;
+    });
+  }, [sessionEnv.host_os]);
+
+  useEffect(() => {
+    if (!session) return;
+    if (visibleNavItems.some((item) => item.key === activeTab)) {
+      return;
+    }
+    const fallback = visibleNavItems[0]?.key ?? DEFAULT_TAB;
+    setActiveTab(fallback);
+    const nextHash = hashForTab(fallback);
+    if (window.location.hash !== nextHash) {
+      window.history.replaceState(null, "", nextHash);
+    }
+  }, [activeTab, session, visibleNavItems]);
 
   useEffect(() => {
     const onHashChange = () => {
@@ -206,9 +249,21 @@ export default function App() {
       case "tasks":
         return <TasksPage token={session.token} />;
       case "dockurr":
-        return <DockurrPage session={session} />;
+        return (
+          <DockurrPage
+            session={session}
+            hostOs={sessionEnv.host_os}
+            kvmInstalled={sessionEnv.kvm_installed}
+          />
+        );
       case "docker":
-        return <DockerPage session={session} />;
+        return (
+          <DockerPage
+            session={session}
+            hostOs={sessionEnv.host_os}
+            dockerInstalled={sessionEnv.docker_installed}
+          />
+        );
       case "screen":
         return <ScreenPage session={session} />;
       case "monitor":
@@ -220,13 +275,13 @@ export default function App() {
       default:
         return null;
     }
-  }, [activeTab, search, session]);
+  }, [activeTab, search, session, sessionEnv.docker_installed, sessionEnv.host_os, sessionEnv.kvm_installed]);
 
   if (!session) {
     return <LoginPage loading={loadingLogin} onLogin={doLogin} />;
   }
 
-  const activeItem = navItems.find((item) => item.key === activeTab) ?? navItems[0];
+  const activeItem = visibleNavItems.find((item) => item.key === activeTab) ?? visibleNavItems[0] ?? navItems[0];
 
   return (
     <div className="min-h-screen">
@@ -247,7 +302,7 @@ export default function App() {
                 <FiMenu />
               </button>
               <div className="my-1 h-px w-10 bg-slate-200/70 dark:bg-neutral-800/70" />
-              {navItems.map((item) => (
+              {visibleNavItems.map((item) => (
                 <button
                   key={item.key}
                   className={cn(
@@ -284,7 +339,7 @@ export default function App() {
                 </div>
 
                 <div className="mt-5 space-y-1">
-                  {navItems.map((item) => (
+                  {visibleNavItems.map((item) => (
                     <button
                       key={item.key}
                       className={cn(
@@ -441,7 +496,7 @@ export default function App() {
               </div>
 
               <div className="mt-5 space-y-1">
-                {navItems.map((item) => (
+                {visibleNavItems.map((item) => (
                   <button
                     key={item.key}
                     className={cn(

@@ -19,6 +19,7 @@
 #include <optional>
 #include <sstream>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 
@@ -410,6 +411,7 @@ struct TunnelManager::Impl {
   mutable std::mutex mu;
   std::string proxy_host;
   int proxy_port = kDefaultProxyPort;
+  std::string proxy_token;
   std::vector<core::TunnelMappingConfig> mappings;
   std::unordered_map<std::string, TunnelMappingRuntime> runtime_by_id;
   bool sync_needed = false;
@@ -461,12 +463,14 @@ struct TunnelManager::Impl {
     }
   }
 
-  void Configure(const std::string& host, int port, const std::vector<core::TunnelMappingConfig>& next_mappings) {
+  void Configure(const std::string& host, int port, const std::string& token,
+                 const std::vector<core::TunnelMappingConfig>& next_mappings) {
     std::unordered_map<std::string, TunnelMappingRuntime> previous_runtime;
     {
       std::lock_guard<std::mutex> lock(mu);
       proxy_host = util::Trim(host);
       proxy_port = (port > 0 && port <= 65535) ? port : kDefaultProxyPort;
+      proxy_token = util::Trim(token);
 
       previous_runtime = runtime_by_id;
       mappings.clear();
@@ -560,9 +564,9 @@ struct TunnelManager::Impl {
     return std::nullopt;
   }
 
-  std::pair<std::string, int> ProxyAddressSnapshot() const {
+  std::tuple<std::string, int, std::string> ProxyAddressSnapshot() const {
     std::lock_guard<std::mutex> lock(mu);
-    return {proxy_host, proxy_port};
+    return {proxy_host, proxy_port, proxy_token};
   }
 
   void HandleSyncResult(const json& payload) {
@@ -575,6 +579,14 @@ struct TunnelManager::Impl {
       }
       const std::string mapping_id = JsonStringValue(item, "mapping_id");
       if (mapping_id.empty()) {
+        continue;
+      }
+      const auto mapping = FindMappingById(mapping_id);
+      if (!mapping.has_value()) {
+        continue;
+      }
+      if (!mapping->enabled) {
+        SetRuntime(mapping_id, false, "disabled", "mapping disabled");
         continue;
       }
       const bool ok = JsonBoolValue(item, "ok", false);
@@ -651,12 +663,12 @@ struct TunnelManager::Impl {
       return;
     }
 
-    const auto [proxy_host_snapshot, proxy_port_snapshot] = ProxyAddressSnapshot();
+    const auto [proxy_host_snapshot, proxy_port_snapshot, proxy_token_snapshot] = ProxyAddressSnapshot();
     if (proxy_host_snapshot.empty() || proxy_port_snapshot <= 0) {
       return;
     }
 
-    std::thread([this, mapping = *mapping, token, proxy_host_snapshot, proxy_port_snapshot]() {
+    std::thread([this, mapping = *mapping, token, proxy_host_snapshot, proxy_port_snapshot, proxy_token_snapshot]() {
       std::string local_error;
       const int local_fd = ConnectTcpWithTimeout(mapping.local_host, mapping.local_port, 1500, &local_error);
       if (local_fd < 0) {
@@ -681,6 +693,7 @@ struct TunnelManager::Impl {
       const json hello = {
           {"type", "work"},
           {"token", token},
+          {"auth_token", proxy_token_snapshot},
       };
       const std::string line = hello.dump() + "\n";
       if (!SendAll(work_fd, line.data(), line.size())) {
@@ -801,17 +814,21 @@ struct TunnelManager::Impl {
     while (running.load()) {
       std::string host;
       int port = 0;
+      std::string token;
       bool has_enabled_mapping = false;
+      bool has_pending_sync = false;
       {
         std::lock_guard<std::mutex> lock(mu);
         host = proxy_host;
         port = proxy_port;
+        token = proxy_token;
         for (const auto& mapping : mappings) {
           if (mapping.enabled) {
             has_enabled_mapping = true;
             break;
           }
         }
+        has_pending_sync = sync_needed;
       }
 
       if (host.empty()) {
@@ -819,7 +836,10 @@ struct TunnelManager::Impl {
         std::this_thread::sleep_for(std::chrono::milliseconds(kControlSleepWhenIdleMs));
         continue;
       }
-      if (!has_enabled_mapping) {
+      // Keep idle when there are no enabled mappings and no pending config changes.
+      // If sync is pending (e.g. disable/update/delete), we still connect once to
+      // push the latest mapping set to proxy immediately.
+      if (!has_enabled_mapping && !has_pending_sync) {
         MarkDisconnectedRuntimes("no enabled mappings");
         std::this_thread::sleep_for(std::chrono::milliseconds(kControlSleepWhenIdleMs));
         continue;
@@ -841,6 +861,7 @@ struct TunnelManager::Impl {
               {"type", "hello"},
               {"client_id", client_id},
               {"version", "1"},
+              {"auth_token", token},
           })) {
         CloseSocket(control_fd);
         control_fd = -1;
@@ -858,11 +879,25 @@ struct TunnelManager::Impl {
       bool alive = true;
       while (running.load() && alive) {
         bool should_sync = false;
+        bool has_enabled = false;
         {
           std::lock_guard<std::mutex> lock(mu);
           should_sync = sync_needed;
+          for (const auto& mapping : mappings) {
+            if (mapping.enabled) {
+              has_enabled = true;
+              break;
+            }
+          }
         }
         if (should_sync && !SendSyncMappings()) {
+          alive = false;
+          break;
+        }
+
+        // After flushing pending sync, close control channel when no enabled
+        // mappings remain, so runtime can stay idle without losing immediate apply.
+        if (!has_enabled && !should_sync) {
           alive = false;
           break;
         }
@@ -967,11 +1002,13 @@ struct TunnelManager::Impl {
 
     mapping = NormalizeMapping(mapping);
     if (!mapping.enabled) {
+      SetRuntime(mapping.id, false, "disabled", "mapping disabled");
       if (detail != nullptr) {
         *detail = "mapping is disabled";
       }
       return true;
     }
+    SetRuntime(mapping.id, false, "testing", "running mapping test");
 
 #if defined(_WIN32)
     if (detail != nullptr) {
@@ -1064,9 +1101,9 @@ void TunnelManager::Stop() {
   }
 }
 
-void TunnelManager::Configure(const std::string& proxy_host, int proxy_port,
+void TunnelManager::Configure(const std::string& proxy_host, int proxy_port, const std::string& proxy_token,
                               const std::vector<core::TunnelMappingConfig>& mappings) {
-  impl_->Configure(proxy_host, proxy_port, mappings);
+  impl_->Configure(proxy_host, proxy_port, proxy_token, mappings);
 }
 
 std::string TunnelManager::ProxyHost() const {

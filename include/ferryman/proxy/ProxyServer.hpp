@@ -15,6 +15,7 @@ struct ProxyServerOptions {
   int control_port = 17000;
   std::string admin_host = "127.0.0.1";
   int admin_port = 17001;
+  std::string auth_token;
   std::filesystem::path log_file;
 };
 

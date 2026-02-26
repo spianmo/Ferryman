@@ -1,4 +1,5 @@
 #include "ferryman/proxy/ProxyServer.hpp"
+#include "ferryman/util/Random.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -6,6 +7,8 @@
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -34,14 +37,104 @@ void HandleSignal(int signal) {
   }
 }
 
+std::string Trim(std::string value) {
+  while (!value.empty() && (value.back() == '\n' || value.back() == '\r' || value.back() == ' ' || value.back() == '\t')) {
+    value.pop_back();
+  }
+  size_t pos = 0;
+  while (pos < value.size() && (value[pos] == ' ' || value[pos] == '\t')) {
+    ++pos;
+  }
+  return value.substr(pos);
+}
+
+std::string ExpandHome() {
+  const char* home = std::getenv("HOME");
+  if (home == nullptr || std::string(home).empty()) {
+    return ".";
+  }
+  return std::string(home);
+}
+
+bool WriteProxyTokenConfig(const std::filesystem::path& path, const std::string& token, std::string* error) {
+  std::error_code ec;
+  std::filesystem::create_directories(path.parent_path(), ec);
+  if (ec) {
+    if (error != nullptr) {
+      *error = "failed to create config directory: " + ec.message();
+    }
+    return false;
+  }
+
+  std::ofstream file(path, std::ios::trunc);
+  if (!file.is_open()) {
+    if (error != nullptr) {
+      *error = "failed to write config file: " + path.string();
+    }
+    return false;
+  }
+  file << "# FerrymanProxy configuration\n";
+  file << "proxy_token=" << token << '\n';
+  return true;
+}
+
+std::optional<std::string> ReadProxyTokenFromConfig(const std::filesystem::path& path) {
+  std::ifstream file(path);
+  if (!file.is_open()) {
+    return std::nullopt;
+  }
+
+  std::string line;
+  while (std::getline(file, line)) {
+    line = Trim(line);
+    if (line.empty() || line.front() == '#') {
+      continue;
+    }
+    const size_t eq = line.find('=');
+    if (eq == std::string::npos) {
+      continue;
+    }
+    const std::string key = Trim(line.substr(0, eq));
+    const std::string value = Trim(line.substr(eq + 1));
+    if (key == "proxy_token") {
+      return value;
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<std::string> EnsureProxyToken(std::filesystem::path* config_path_out, std::string* error) {
+  const std::filesystem::path config_path = std::filesystem::path(ExpandHome()) / ".ferryman-proxy" / "config.ini";
+  if (config_path_out != nullptr) {
+    *config_path_out = config_path;
+  }
+
+  const auto loaded = ReadProxyTokenFromConfig(config_path);
+  if (loaded.has_value() && !loaded->empty()) {
+    return *loaded;
+  }
+
+  const std::string token = ferryman::util::RandomHex(40);
+  if (!WriteProxyTokenConfig(config_path, token, error)) {
+    return std::nullopt;
+  }
+  if (!std::filesystem::exists(config_path) || !loaded.has_value()) {
+    std::cout << "[ferryman-proxy] initialized token at " << config_path << '\n';
+  } else {
+    std::cout << "[ferryman-proxy] regenerated empty token at " << config_path << '\n';
+  }
+  std::cout << "[ferryman-proxy] token: " << token << '\n';
+  return token;
+}
+
 void PrintUsage() {
   std::cout << "FerrymanProxy (Linux only)\n"
                "Usage:\n"
                "  FerrymanProxy [--bind 0.0.0.0] [--control-port 17000] [--admin-host 127.0.0.1] [--admin-port 17001]\n"
-               "                [--log-file /var/log/ferryman-proxy.log]\n"
-               "  FerrymanProxy --list [--admin-host 127.0.0.1] [--admin-port 17001]\n"
-               "  FerrymanProxy --status [--admin-host 127.0.0.1] [--admin-port 17001]\n"
-               "  FerrymanProxy --logs [N] [--admin-host 127.0.0.1] [--admin-port 17001]\n";
+               "                [--log-file /var/log/ferryman-proxy.log] [--token TOKEN]\n"
+               "  FerrymanProxy --list [--admin-host 127.0.0.1] [--admin-port 17001] [--token TOKEN]\n"
+               "  FerrymanProxy --status [--admin-host 127.0.0.1] [--admin-port 17001] [--token TOKEN]\n"
+               "  FerrymanProxy --logs [N] [--admin-host 127.0.0.1] [--admin-port 17001] [--token TOKEN]\n";
 }
 
 #if defined(__linux__)
@@ -81,12 +174,17 @@ int ConnectTcp(const std::string& host, int port, std::string* error) {
   return fd;
 }
 
-std::optional<std::string> QueryAdmin(const std::string& host, int port, const std::string& command, std::string* error) {
+std::optional<std::string> QueryAdmin(const std::string& host, int port, const std::string& command,
+                                      const std::string& auth_token, std::string* error) {
   int fd = ConnectTcp(host, port, error);
   if (fd < 0) {
     return std::nullopt;
   }
-  std::string request = command;
+  std::string request;
+  if (!auth_token.empty()) {
+    request += "TOKEN " + auth_token + " ";
+  }
+  request += command;
   request.push_back('\n');
   if (::send(fd, request.data(), request.size(), 0) != static_cast<ssize_t>(request.size())) {
     ::close(fd);
@@ -151,6 +249,7 @@ int main(int argc, char** argv) {
   ferryman::proxy::ProxyServerOptions options;
   std::string mode = "serve";
   size_t logs_limit = 100;
+  std::string auth_token_override;
 
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
@@ -178,6 +277,10 @@ int main(int argc, char** argv) {
       options.log_file = argv[++i];
       continue;
     }
+    if (arg == "--token" && i + 1 < argc) {
+      auth_token_override = Trim(argv[++i]);
+      continue;
+    }
     if (arg == "--list") {
       mode = "list";
       continue;
@@ -202,6 +305,18 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  if (!auth_token_override.empty()) {
+    options.auth_token = auth_token_override;
+  } else {
+    std::string token_error;
+    const auto token = EnsureProxyToken(nullptr, &token_error);
+    if (!token.has_value() || token->empty()) {
+      std::cerr << "failed to load proxy token: " << (token_error.empty() ? "unknown error" : token_error) << '\n';
+      return 1;
+    }
+    options.auth_token = *token;
+  }
+
   if (mode != "serve") {
     std::string error;
     std::string command = "LIST";
@@ -210,7 +325,7 @@ int main(int argc, char** argv) {
     } else if (mode == "logs") {
       command = "LOGS " + std::to_string(logs_limit);
     }
-    const auto response = QueryAdmin(options.admin_host, options.admin_port, command, &error);
+    const auto response = QueryAdmin(options.admin_host, options.admin_port, command, options.auth_token, &error);
     if (!response.has_value()) {
       std::cerr << "admin query failed: " << (error.empty() ? "unknown error" : error) << '\n';
       return 1;

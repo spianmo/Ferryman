@@ -8,7 +8,7 @@
 ![CMake](https://img.shields.io/badge/CMake-3.20%2B-064F8C)
 ![React](https://img.shields.io/badge/React-18-61DAFB)
 ![Vite](https://img.shields.io/badge/Vite-5-646CFF)
-![Native Stream](https://img.shields.io/badge/Native%20Stream-JPEG%2FH264%2FH265%2FVP8%2FVP9-0EA5E9)
+![Native Stream](https://img.shields.io/badge/Native%20Stream-JPEG%2FH264%2FH265%2FVP8%2FVP9%2FAV1-0EA5E9)
 ![Platforms](https://img.shields.io/badge/Platforms-macOS%20%7C%20Linux%20%7C%20Windows-334155)
 
 [English](README.md) | 中文
@@ -21,6 +21,10 @@ Ferryman 是一个面向局域网场景的**单进程、单二进制远程访问
 - 异步任务执行
 - 运行日志/审计日志查看
 - WebRTC 信令 + 原生屏幕流 + 远程输入回注
+- Docker 容器管理（生命周期/指标/日志/文件）
+- Dockurr 虚拟机管理（创建/启停/重启/日志/详情）
+- 内网穿透映射面板（FerrymanProxy 集成）
+- 设备实时监控（CPU/GPU/内存/磁盘）
 
 项目采用前后端同仓库结构，通过明确的 HTTP/WebSocket 协议交互，强调最小依赖、可审计与可扩展。
 
@@ -45,10 +49,27 @@ Ferryman 是一个面向局域网场景的**单进程、单二进制远程访问
   - 后端即时控制台输出（`stdout/stderr`）
   - `/api/logs/tail` 内存日志尾部读取
   - `/ws/logs` 实时推送
+- **Dockurr 虚拟机管理**：
+  - 创建/列举/启动/停止/重启 Windows/macOS 虚拟机
+  - 启动日志、运行日志与虚拟机详情查看
+  - Linux 主机在 `/dev/kvm` 缺失时可在 UI 一键安装 KVM
+- **Docker 容器管理**：
+  - 容器列表 + 启停/重启
+  - CPU/内存/网络/磁盘 I/O 指标与进程视图
+  - inspect/日志与容器内文件浏览/读写/上传/下载
+- **内网穿透能力**：
+  - FerrymanProxy 的 host/port/token 配置
+  - `tcp`/`udp` 映射的新增、更新、删除、启用/禁用、在线测试
+  - 本机监听端口（地址/端口/进程/PID）可视化
+- **设备实时监控**：
+  - 通过 `/ws/monitor` 推送快照
+  - CPU/GPU/内存/磁盘卡片与趋势图
 - **屏幕与远控能力**：
   - WebRTC 房间信令（`join` / `signal`）
   - 原生屏幕流（WS 二进制 `FRM1`）
   - 键鼠事件上行 + 本地输入注入
+  - 软键盘组合键（Ctrl/Alt/Meta）+ Tab/Esc/系统注意力快捷键
+  - 拖拽文件传输（冲突策略 + 分片上传会话）
   - 原生流按订阅者协商 codec/fps/分辨率/码率
 
 ### 屏幕采集后端
@@ -58,7 +79,7 @@ Ferryman 是一个面向局域网场景的**单进程、单二进制远程访问
 - Windows: GDI + SendInput
 - 编码器支持：
   - 始终可用：`jpeg`
-  - ffmpeg 可用时：`h264`、`h265`、`vp8`、`vp9`
+  - ffmpeg 可用时：`h264`、`h265`、`vp8`、`vp9`、`av1`
 - 运行时配置档位：
   - 帧率：`1..60`
   - 分辨率档：`full(100%)`、`balanced(75%)`、`performance(50%)`
@@ -71,7 +92,9 @@ Browser (React/Vite)
   |- /api/*  (HTTP)
   |- /ws/terminal (WebSocket)
   |- /ws/webrtc   (WebSocket)
-  `- /ws/logs     (WebSocket)
+  |- /ws/logs     (WebSocket)
+  |- /ws/dockurr  (WebSocket)
+  `- /ws/monitor  (WebSocket)
 
 Ferryman (single process)
   |- SessionManager / Auth (access key)
@@ -79,6 +102,10 @@ Ferryman (single process)
   |- PtyManager
   |- TaskManager
   |- AuditLogger
+  |- DockurrManager
+  |- DockerManager
+  |- TunnelManager
+  |- SystemMonitor
   |- WebRtcSignalingService
   `- ScreenService + VideoEncoder (ffmpeg)
 ```
@@ -200,6 +227,7 @@ tls_key_file=
 ws_port=18080
 tunnel_proxy_host=
 tunnel_proxy_port=17000
+tunnel_proxy_token=
 tunnel_mappings_json=[]
 ```
 
@@ -210,7 +238,7 @@ tunnel_mappings_json=[]
 - 当 `tls_cert_file`/`tls_key_file` 为空时，首次启用 HTTPS 会自动生成 `~/.ferryman/cert/server.crt` 与 `~/.ferryman/cert/server.key`。
 - 自动生成后的证书路径会回写到 `~/.ferryman/config.ini` 的 `tls_cert_file` / `tls_key_file`。
 - 启动时会初始化 `~/.ferryman/logs/`，并预留 `audit.log` 路径。
-- `tunnel_proxy_host/tunnel_proxy_port/tunnel_mappings_json` 用于内网穿透配置（由前端“内网穿透”面板维护）。
+- `tunnel_proxy_host/tunnel_proxy_port/tunnel_proxy_token/tunnel_mappings_json` 用于内网穿透配置（由前端“内网穿透”面板维护）。
 
 ## FerrymanProxy（Linux）
 
@@ -263,7 +291,7 @@ sudo systemctl status ferryman-proxy
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `POST` | `/api/auth/login` | Access Key 登录 |
-| `GET` | `/api/session/me` | 查询会话信息 |
+| `GET` | `/api/session/me` | 查询会话信息 + 主机能力（`host_os` / `docker_installed` / `kvm_installed`） |
 | `GET` | `/api/files/list` | 目录列表 |
 | `GET` | `/api/files/read` | 读取文件 |
 | `POST` | `/api/files/write` | 写入文件 |
@@ -271,11 +299,35 @@ sudo systemctl status ferryman-proxy
 | `GET` | `/api/tasks/list` | 任务列表 |
 | `GET` | `/api/tasks/get` | 任务详情/输出 |
 | `GET` | `/api/logs/tail` | 拉取运行日志 |
+| `GET` | `/api/dockurr/list` | 查询 Dockurr 虚拟机列表 |
+| `POST` | `/api/dockurr/create` | 创建虚拟机（windows/macos、版本/内存/磁盘/持久化/名称） |
+| `POST` | `/api/dockurr/start` | 启动虚拟机 |
+| `POST` | `/api/dockurr/stop` | 停止虚拟机 |
+| `POST` | `/api/dockurr/restart` | 重启虚拟机 |
+| `GET` | `/api/dockurr/logs` | 获取虚拟机日志 |
+| `GET` | `/api/dockurr/inspect` | 获取虚拟机详情 |
+| `GET` | `/api/docker/list` | 查询 Docker 容器列表 |
+| `POST` | `/api/docker/start` | 启动容器 |
+| `POST` | `/api/docker/stop` | 停止容器 |
+| `POST` | `/api/docker/restart` | 重启容器 |
+| `GET` | `/api/docker/logs` | 获取容器日志 |
+| `GET` | `/api/docker/inspect` | 获取容器 inspect 信息 |
+| `GET` | `/api/docker/stats` | 获取容器 CPU/内存/网络/磁盘 I/O 指标 |
+| `GET` | `/api/docker/processes` | 获取容器进程列表 |
+| `GET` | `/api/docker/files/list` | 列出容器路径文件 |
+| `GET` | `/api/docker/files/read` | 读取容器文件 |
+| `POST` | `/api/docker/files/write` | 写入容器文件 |
 | `GET` | `/api/screen/capabilities` | 屏幕能力协商 |
+| `GET` | `/api/screen/sources` | 查询可用本地屏幕源 |
 | `POST` | `/api/screen/input` | 注入原生输入 |
+| `POST` | `/api/screen/upload/preflight` | 上传前冲突预检 |
+| `POST` | `/api/screen/upload/begin` | 创建上传会话 |
+| `POST` | `/api/screen/upload/chunk` | 上传分片 |
+| `POST` | `/api/screen/upload/commit` | 提交上传会话 |
+| `POST` | `/api/screen/upload/cancel` | 取消上传会话 |
 | `GET` | `/api/health` | 健康检查 |
 | `GET` | `/api/tunnel/state` | 获取内网穿透配置与映射运行状态 |
-| `POST` | `/api/tunnel/config` | 更新并持久化 FerrymanProxy 地址/端口 |
+| `POST` | `/api/tunnel/config` | 更新并持久化 FerrymanProxy 地址/端口/令牌 |
 | `POST` | `/api/tunnel/mapping/upsert` | 新增或更新单条 TCP/UDP 映射 |
 | `POST` | `/api/tunnel/mapping/delete` | 删除映射 |
 | `POST` | `/api/tunnel/mapping/test` | 映射测试并返回成功/失败详情 |
@@ -310,6 +362,24 @@ sudo systemctl status ferryman-proxy
 - `tail`
 - `snapshot`
 
+### `/ws/dockurr`
+
+支持动作：
+
+- `list`
+- `create`
+- `start`
+- `stop`
+- `restart`
+- `logs`
+- `inspect`
+
+### `/ws/monitor`
+
+服务端推送：
+
+- `monitor_snapshot`
+
 ## 原生屏幕流协议
 
 - 传输：WebSocket 二进制包（`FRM1` header）
@@ -319,6 +389,7 @@ sudo systemctl status ferryman-proxy
   - `3`: H.265
   - `4`: VP8
   - `5`: VP9
+  - `6`: AV1
 - 后端会根据订阅者动态协商 codec/fps/分辨率/码率。
 
 如果 ffmpeg 不可用，则原生视频编码能力会被禁用，并在能力协商中回退。

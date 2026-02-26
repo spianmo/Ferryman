@@ -318,3 +318,44 @@ jobs:
           name: ferryman-proxy-deploy-script-${{ matrix.package_suffix }}
           path: scripts/deploy_ferryman_proxy.sh
           if-no-files-found: error
+
+  publish-release:
+    name: Publish release assets
+    runs-on: ubuntu-24.04
+    needs: build
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Resolve release metadata
+        id: release_meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            RELEASE_TAG="${GITHUB_REF_NAME}"
+            RELEASE_TITLE="${GITHUB_REF_NAME}"
+          else
+            RELEASE_TAG="${GITHUB_SHA}"
+            RELEASE_TITLE="${GITHUB_SHA}"
+          fi
+          echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "release_title=${RELEASE_TITLE}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_meta.outputs.release_tag }}
+          name: ${{ steps.release_meta.outputs.release_title }}
+          target_commitish: ${{ github.sha }}
+          files: |
+            release-assets/**/*.tar.gz
+            release-assets/**/*.zip
+            release-assets/**/*.sh
+          overwrite_files: true
+          generate_release_notes: true

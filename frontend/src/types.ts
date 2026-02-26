@@ -5,6 +5,12 @@ export type SessionInfo = {
   wsPort: number;
 };
 
+export type SessionEnvironment = {
+  host_os: "linux" | "macos" | "windows" | string;
+  docker_installed: boolean;
+  kvm_installed: boolean;
+};
+
 export type FileEntry = {
   name: string;
   path: string;

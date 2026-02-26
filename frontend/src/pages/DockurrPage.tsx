@@ -30,12 +30,14 @@ import {
 } from "react-icons/fi";
 
 import {
+  getTask,
   getDockerContainerInspect,
   getDockerContainerLogs,
   getDockerContainerProcesses,
   getDockerContainerStats,
   listDockerContainerFiles,
   readDockerContainerFile,
+  startTask,
   writeDockerContainerFile,
 } from "../api/client";
 import ImagePreview from "../components/files/preview/ImagePreview";
@@ -56,6 +58,8 @@ import { getDockurrSocket, type DockurrSocketStatus } from "../ws/dockurrSocket"
 
 type Props = {
   session: SessionInfo;
+  hostOs: string;
+  kvmInstalled: boolean;
 };
 
 type DetailTab = "load" | "inspect" | "logs" | "files";
@@ -245,6 +249,51 @@ function vmIsRunning(vm: DockurrVmInfo) {
 
 function makeRequestId(action: string) {
   return `${action}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function buildInstallKvmCommand() {
+  return `
+set -e
+echo "[kvm] checking current status..."
+if [ -e /dev/kvm ]; then
+  echo "[kvm] /dev/kvm already exists, skip installation."
+  exit 0
+fi
+
+SUDO=""
+if [ "$(id -u)" -ne 0 ]; then
+  SUDO="sudo"
+fi
+
+if command -v apt-get >/dev/null 2>&1; then
+  $SUDO apt-get update
+  $SUDO apt-get install -y qemu-kvm qemu-system-x86 libvirt-daemon-system libvirt-clients bridge-utils cpu-checker
+elif command -v dnf >/dev/null 2>&1; then
+  $SUDO dnf install -y qemu-kvm libvirt virt-install bridge-utils
+elif command -v yum >/dev/null 2>&1; then
+  $SUDO yum install -y qemu-kvm libvirt virt-install bridge-utils
+elif command -v pacman >/dev/null 2>&1; then
+  $SUDO pacman -Sy --noconfirm qemu-full libvirt virt-install dnsmasq bridge-utils
+elif command -v zypper >/dev/null 2>&1; then
+  $SUDO zypper --non-interactive install qemu-kvm libvirt virt-install bridge-utils
+else
+  echo "[kvm] unsupported package manager."
+  exit 1
+fi
+
+$SUDO modprobe kvm || true
+$SUDO modprobe kvm_intel || true
+$SUDO modprobe kvm_amd || true
+$SUDO systemctl enable --now libvirtd || true
+
+if [ -e /dev/kvm ]; then
+  echo "[kvm] installation finished, /dev/kvm is available."
+  exit 0
+fi
+
+echo "[kvm] installation finished, but /dev/kvm is still unavailable."
+exit 1
+`.trim();
 }
 
 function clampInt(value: number, min: number, max: number) {
@@ -562,7 +611,7 @@ function TrendChart({ points, strokeColor, fillColor }: TrendProps) {
   );
 }
 
-export default function DockurrPage({ session }: Props) {
+export default function DockurrPage({ session, hostOs, kvmInstalled }: Props) {
   const { t } = useI18n();
   const socket = useMemo(() => getDockurrSocket(), []);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
@@ -582,6 +631,14 @@ export default function DockurrPage({ session }: Props) {
   const [persist, setPersist] = useState(false);
   const [createLoading, setCreateLoading] = useState(false);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const [kvmInstalledState, setKvmInstalledState] = useState(kvmInstalled);
+  const [kvmInstallDialogOpen, setKvmInstallDialogOpen] = useState(false);
+  const [kvmInstallTaskId, setKvmInstallTaskId] = useState("");
+  const [kvmInstallStatus, setKvmInstallStatus] = useState("");
+  const [kvmInstallLogs, setKvmInstallLogs] = useState("");
+  const [kvmInstallRunning, setKvmInstallRunning] = useState(false);
+  const kvmInstallViewportRef = useRef<HTMLPreElement | null>(null);
+  const kvmInstallNotifiedRef = useRef(false);
 
   const [actionLoading, setActionLoading] = useState<"" | "start" | "stop" | "restart">("");
   const [detailTab, setDetailTab] = useState<DetailTab>("load");
@@ -626,6 +683,7 @@ export default function DockurrPage({ session }: Props) {
 
   const versionOptions = useMemo(() => (os === "windows" ? WINDOWS_VERSIONS : MACOS_VERSIONS), [os]);
   const selectedVm = useMemo(() => vms.find((vm) => vm.name === selectedName) ?? null, [selectedName, vms]);
+  const canInstallKvm = hostOs === "linux" && !kvmInstalledState;
 
   const replaceImageUrl = useCallback((next: string) => {
     setSelectedImageUrl((current) => {
@@ -654,11 +712,21 @@ export default function DockurrPage({ session }: Props) {
   }, [selectedImageUrl]);
 
   useEffect(() => {
+    setKvmInstalledState(kvmInstalled);
+  }, [kvmInstalled]);
+
+  useEffect(() => {
     if (versionOptions.some((option) => option.value === version)) {
       return;
     }
     setVersion(versionOptions[0]?.value ?? "");
   }, [version, versionOptions]);
+
+  useEffect(() => {
+    const viewport = kvmInstallViewportRef.current;
+    if (!viewport) return;
+    viewport.scrollTop = viewport.scrollHeight;
+  }, [kvmInstallLogs]);
 
   useEffect(() => {
     if (!runtimeAutoScroll) return;
@@ -701,6 +769,88 @@ export default function DockurrPage({ session }: Props) {
   const refreshVms = useCallback(() => {
     void sendAction("list", {});
   }, [socket]);
+
+  const runInstallKvm = useCallback(async () => {
+    if (kvmInstallRunning) {
+      return;
+    }
+    setKvmInstallDialogOpen(true);
+    setKvmInstallLogs("");
+    setKvmInstallStatus("queued");
+    setKvmInstallTaskId("");
+    setKvmInstallRunning(true);
+    kvmInstallNotifiedRef.current = false;
+
+    const res = await startTask(session.token, buildInstallKvmCommand());
+    if (!res.ok || !res.task_id) {
+      setKvmInstallRunning(false);
+      setKvmInstallStatus("failed");
+      setKvmInstallLogs(`[error] ${res.error ?? t("toast.request_failed")}`);
+      toast.error(res.error ?? t("toast.request_failed"));
+      return;
+    }
+    setKvmInstallTaskId(res.task_id);
+  }, [kvmInstallRunning, session.token, t]);
+
+  useEffect(() => {
+    if (!kvmInstallDialogOpen || !kvmInstallTaskId) {
+      return;
+    }
+    let stopped = false;
+    const poll = async () => {
+      const res = await getTask(session.token, kvmInstallTaskId);
+      if (stopped) {
+        return;
+      }
+      if (!res.ok) {
+        setKvmInstallStatus("failed");
+        setKvmInstallRunning(false);
+        setKvmInstallLogs((prev) => {
+          if (prev.includes("[error]")) {
+            return prev;
+          }
+          const suffix = `[error] ${res.error ?? t("toast.request_failed")}`;
+          return prev ? `${prev}\n${suffix}` : suffix;
+        });
+        if (!kvmInstallNotifiedRef.current) {
+          kvmInstallNotifiedRef.current = true;
+          toast.error(res.error ?? t("toast.request_failed"));
+        }
+        return;
+      }
+
+      const output = decodeBase64Utf8(res.output_base64 ?? "");
+      setKvmInstallLogs(output);
+      const nextStatus = typeof res.status === "string" ? res.status : "";
+      setKvmInstallStatus(nextStatus);
+      const finished = nextStatus === "succeeded" || nextStatus === "failed";
+      if (!finished) {
+        return;
+      }
+
+      setKvmInstallRunning(false);
+      if (kvmInstallNotifiedRef.current) {
+        return;
+      }
+      kvmInstallNotifiedRef.current = true;
+      if (nextStatus === "succeeded") {
+        setKvmInstalledState(true);
+        toast.success(t("dockurr.kvm_install_success"));
+        refreshVms();
+      } else {
+        toast.error(t("dockurr.kvm_install_failed"));
+      }
+    };
+
+    void poll();
+    const timer = window.setInterval(() => {
+      void poll();
+    }, 1000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [kvmInstallDialogOpen, kvmInstallTaskId, refreshVms, session.token, t]);
 
   useEffect(() => {
     setVms([]);
@@ -1245,6 +1395,21 @@ export default function DockurrPage({ session }: Props) {
                   <FiRefreshCw className={cn(status.kind === "connecting" && "animate-spin")} />
                   {t("common.refresh")}
                 </button>
+                {canInstallKvm ? (
+                  <button
+                    className={cn(
+                      "inline-flex h-10 items-center gap-2 rounded-2xl px-4 text-sm font-semibold transition-colors",
+                      kvmInstallRunning
+                        ? "cursor-wait bg-slate-200 text-slate-500 dark:bg-neutral-800 dark:text-neutral-500"
+                        : "bg-amber-100 text-amber-900 hover:bg-amber-200 dark:bg-amber-900/40 dark:text-amber-300 dark:hover:bg-amber-900/60"
+                    )}
+                    onClick={() => void runInstallKvm()}
+                    disabled={kvmInstallRunning}
+                  >
+                    <FiHardDrive />
+                    {kvmInstallRunning ? t("dockurr.kvm_installing") : t("dockurr.install_kvm")}
+                  </button>
+                ) : null}
                 <button
                   className="inline-flex h-10 items-center gap-2 rounded-2xl bg-slate-900 px-4 text-sm font-semibold text-white shadow-sm hover:bg-slate-800 dark:bg-neutral-50 dark:text-neutral-900 dark:hover:bg-white"
                   onClick={() => setCreateDialogOpen(true)}
@@ -1753,6 +1918,55 @@ export default function DockurrPage({ session }: Props) {
           )}
         </section>
       </div>
+
+      {kvmInstallDialogOpen ? (
+        <div
+          className="fixed inset-0 z-[130] flex items-center justify-center bg-slate-900/45 p-4 backdrop-blur-[2px]"
+          onClick={() => {
+            if (!kvmInstallRunning) {
+              setKvmInstallDialogOpen(false);
+            }
+          }}
+        >
+          <section
+            className="flex max-h-[92dvh] w-full max-w-3xl min-w-0 flex-col rounded-3xl bg-white/95 p-4 shadow-2xl ring-1 ring-slate-200/80 dark:bg-neutral-900/95 dark:ring-neutral-700"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-center justify-between gap-3">
+              <h3 className="inline-flex items-center gap-2 text-sm font-semibold tracking-tight text-slate-900 dark:text-neutral-50">
+                <FiHardDrive className="text-[14px]" />
+                {t("dockurr.kvm_install_dialog_title")}
+              </h3>
+              <div className="flex items-center gap-2">
+                <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600 dark:bg-neutral-800 dark:text-neutral-300">
+                  {kvmInstallStatus || "queued"}
+                </span>
+                <button
+                  type="button"
+                  className={cn(
+                    "inline-flex h-9 items-center gap-1.5 rounded-xl px-3 text-xs font-semibold transition-colors",
+                    kvmInstallRunning
+                      ? "cursor-not-allowed bg-slate-200 text-slate-500 dark:bg-neutral-800 dark:text-neutral-500"
+                      : "bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-neutral-800 dark:text-neutral-100 dark:hover:bg-neutral-700"
+                  )}
+                  disabled={kvmInstallRunning}
+                  onClick={() => setKvmInstallDialogOpen(false)}
+                >
+                  <FiX />
+                  {t("common.close")}
+                </button>
+              </div>
+            </div>
+
+            <pre
+              ref={kvmInstallViewportRef}
+              className="mt-4 min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-all rounded-2xl bg-neutral-950 p-3 font-mono text-[12px] leading-relaxed text-neutral-50"
+            >
+              {kvmInstallLogs || t("dockurr.install_log_empty")}
+            </pre>
+          </section>
+        </div>
+      ) : null}
 
       {createDialogOpen ? (
         <div

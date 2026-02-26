@@ -23,9 +23,11 @@ import {
   FiSave,
   FiSquare,
   FiUpload,
+  FiX,
 } from "react-icons/fi";
 
 import {
+  getTask,
   getDockerContainerInspect,
   getDockerContainerLogs,
   getDockerContainerProcesses,
@@ -34,6 +36,7 @@ import {
   listDockerContainers,
   readDockerContainerFile,
   restartDockerContainer,
+  startTask,
   startDockerContainer,
   stopDockerContainer,
   writeDockerContainerFile,
@@ -55,6 +58,8 @@ import { cn } from "../util/cn";
 
 type Props = {
   session: SessionInfo;
+  hostOs: string;
+  dockerInstalled: boolean;
 };
 
 type DetailTab = "load" | "inspect" | "logs" | "files";
@@ -269,6 +274,42 @@ function containerMimeType(fileName: string) {
   return IMAGE_MIME_TYPES[ext] ?? "application/octet-stream";
 }
 
+function buildInstallDockerCommand() {
+  return `
+set -e
+echo "[docker] checking current status..."
+if command -v docker >/dev/null 2>&1; then
+  echo "[docker] docker already installed."
+  docker --version || true
+  exit 0
+fi
+
+SUDO=""
+if [ "$(id -u)" -ne 0 ]; then
+  SUDO="sudo"
+fi
+
+if command -v apt-get >/dev/null 2>&1; then
+  $SUDO apt-get update
+  $SUDO apt-get install -y docker.io
+elif command -v dnf >/dev/null 2>&1; then
+  $SUDO dnf install -y docker
+elif command -v yum >/dev/null 2>&1; then
+  $SUDO yum install -y docker
+elif command -v pacman >/dev/null 2>&1; then
+  $SUDO pacman -Sy --noconfirm docker
+elif command -v zypper >/dev/null 2>&1; then
+  $SUDO zypper --non-interactive install docker
+else
+  echo "[docker] unsupported package manager."
+  exit 1
+fi
+
+$SUDO systemctl enable --now docker || true
+docker --version
+`.trim();
+}
+
 type TrendProps = {
   points: TrendPoint[];
   strokeColor: string;
@@ -418,12 +459,20 @@ function TrendChart({ points, strokeColor, fillColor }: TrendProps) {
   );
 }
 
-export default function DockerPage({ session }: Props) {
+export default function DockerPage({ session, hostOs, dockerInstalled }: Props) {
   const { t } = useI18n();
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const logsViewportRef = useRef<HTMLPreElement | null>(null);
+  const installViewportRef = useRef<HTMLPreElement | null>(null);
+  const installNotifiedRef = useRef(false);
 
   const [includeAll, setIncludeAll] = useState(true);
+  const [dockerInstalledState, setDockerInstalledState] = useState(dockerInstalled);
+  const [installDialogOpen, setInstallDialogOpen] = useState(false);
+  const [installTaskId, setInstallTaskId] = useState("");
+  const [installStatus, setInstallStatus] = useState("");
+  const [installLogs, setInstallLogs] = useState("");
+  const [installRunning, setInstallRunning] = useState(false);
   const [containers, setContainers] = useState<DockerContainerInfo[]>([]);
   const [selectedName, setSelectedName] = useState("");
   const [listLoading, setListLoading] = useState(false);
@@ -468,6 +517,7 @@ export default function DockerPage({ session }: Props) {
     () => containers.find((container) => container.name === selectedName) ?? null,
     [containers, selectedName]
   );
+  const canInstallDocker = hostOs === "linux" && !dockerInstalledState;
 
   const replaceImageUrl = useCallback((next: string) => {
     setSelectedImageUrl((current) => {
@@ -488,12 +538,24 @@ export default function DockerPage({ session }: Props) {
   }, [replaceImageUrl]);
 
   useEffect(() => {
+    setDockerInstalledState(dockerInstalled);
+  }, [dockerInstalled]);
+
+  useEffect(() => {
     return () => {
       if (selectedImageUrl) {
         URL.revokeObjectURL(selectedImageUrl);
       }
     };
   }, [selectedImageUrl]);
+
+  useEffect(() => {
+    const viewport = installViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+    viewport.scrollTop = viewport.scrollHeight;
+  }, [installLogs]);
 
   const refreshContainers = useCallback(async (showLoading = true) => {
     if (showLoading) {
@@ -517,6 +579,88 @@ export default function DockerPage({ session }: Props) {
       return next[0]?.name ?? "";
     });
   }, [includeAll, session.token, t]);
+
+  const runInstallDocker = useCallback(async () => {
+    if (installRunning) {
+      return;
+    }
+    setInstallDialogOpen(true);
+    setInstallTaskId("");
+    setInstallStatus("queued");
+    setInstallLogs("");
+    setInstallRunning(true);
+    installNotifiedRef.current = false;
+
+    const res = await startTask(session.token, buildInstallDockerCommand());
+    if (!res.ok || !res.task_id) {
+      setInstallStatus("failed");
+      setInstallRunning(false);
+      setInstallLogs(`[error] ${res.error ?? t("toast.request_failed")}`);
+      toast.error(res.error ?? t("toast.request_failed"));
+      return;
+    }
+    setInstallTaskId(res.task_id);
+  }, [installRunning, session.token, t]);
+
+  useEffect(() => {
+    if (!installDialogOpen || !installTaskId) {
+      return;
+    }
+    let stopped = false;
+    const poll = async () => {
+      const res = await getTask(session.token, installTaskId);
+      if (stopped) {
+        return;
+      }
+      if (!res.ok) {
+        setInstallStatus("failed");
+        setInstallRunning(false);
+        setInstallLogs((prev) => {
+          if (prev.includes("[error]")) {
+            return prev;
+          }
+          const suffix = `[error] ${res.error ?? t("toast.request_failed")}`;
+          return prev ? `${prev}\n${suffix}` : suffix;
+        });
+        if (!installNotifiedRef.current) {
+          installNotifiedRef.current = true;
+          toast.error(res.error ?? t("toast.request_failed"));
+        }
+        return;
+      }
+
+      const output = decodeBase64Utf8(res.output_base64 ?? "");
+      setInstallLogs(output);
+      const nextStatus = typeof res.status === "string" ? res.status : "";
+      setInstallStatus(nextStatus);
+      const finished = nextStatus === "succeeded" || nextStatus === "failed";
+      if (!finished) {
+        return;
+      }
+
+      setInstallRunning(false);
+      if (installNotifiedRef.current) {
+        return;
+      }
+      installNotifiedRef.current = true;
+      if (nextStatus === "succeeded") {
+        setDockerInstalledState(true);
+        toast.success(t("docker.install_success"));
+        void refreshContainers(true);
+      } else {
+        toast.error(t("docker.install_failed"));
+      }
+    };
+
+    void poll();
+    const timer = window.setInterval(() => {
+      void poll();
+    }, 1000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [installDialogOpen, installTaskId, refreshContainers, session.token, t]);
 
   const loadStats = useCallback(async (name: string, showLoading = false) => {
     if (showLoading) {
@@ -858,90 +1002,105 @@ export default function DockerPage({ session }: Props) {
   const memoryStyle = styleForLoad(stats?.memory_percent);
 
   return (
-    <div className="grid min-h-0 grid-cols-1 gap-4 xl:h-full xl:min-h-[520px] xl:grid-cols-[minmax(0,44rem)_minmax(0,1fr)]">
-      <section className="flex min-h-[320px] min-w-0 max-w-full flex-col overflow-hidden rounded-3xl bg-white/75 p-4 shadow-soft ring-1 ring-slate-200/70 backdrop-blur xl:h-full dark:bg-neutral-900/60 dark:ring-neutral-800/80">
-        <div className="flex items-center justify-between gap-2">
-          <div className="inline-flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-neutral-50">
-            <FiBox />
-            <span>{t("docker.title")}</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              className={cn(
-                "inline-flex h-8 items-center rounded-xl px-3 text-xs font-semibold transition-colors",
-                includeAll
-                  ? "bg-slate-900 text-white dark:bg-neutral-50 dark:text-neutral-900"
-                  : "bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-neutral-800 dark:text-neutral-100 dark:hover:bg-neutral-700"
-              )}
-              onClick={() => setIncludeAll((prev) => !prev)}
-            >
-              {includeAll ? t("docker.filter_all") : t("docker.filter_running")}
-            </button>
-            <button
-              className={cn(
-                "grid h-8 w-8 place-items-center rounded-xl bg-slate-100 text-slate-700 transition-colors hover:bg-slate-200 dark:bg-neutral-800 dark:text-neutral-100 dark:hover:bg-neutral-700",
-                listLoading && "animate-pulse"
-              )}
-              onClick={() => void refreshContainers(true)}
-              title={t("common.refresh")}
-            >
-              <FiRefreshCw />
-            </button>
-          </div>
-        </div>
-
-        {listError ? (
-          <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700 dark:border-rose-900/40 dark:bg-rose-950/30 dark:text-rose-300">
-            {listError}
-          </div>
-        ) : null}
-
-        <div className="mt-3 min-h-0 flex-1 space-y-2 overflow-y-auto overflow-x-hidden py-1.5 [scrollbar-gutter:stable]">
-          {containers.map((container) => {
-            const selected = selectedName === container.name;
-            return (
+    <>
+      <div className="grid min-h-0 grid-cols-1 gap-4 xl:h-full xl:min-h-[520px] xl:grid-cols-[minmax(0,44rem)_minmax(0,1fr)]">
+        <section className="flex min-h-[320px] min-w-0 max-w-full flex-col overflow-hidden rounded-3xl bg-white/75 p-4 shadow-soft ring-1 ring-slate-200/70 backdrop-blur xl:h-full dark:bg-neutral-900/60 dark:ring-neutral-800/80">
+          <div className="flex items-center justify-between gap-2">
+            <div className="inline-flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-neutral-50">
+              <FiBox />
+              <span>{t("docker.title")}</span>
+            </div>
+            <div className="flex items-center gap-2">
               <button
-                key={container.id || container.name}
                 className={cn(
-                  "block w-full min-w-0 max-w-full rounded-2xl border border-transparent bg-white/70 px-3 py-2.5 text-left ring-1 ring-inset ring-slate-200/60 transition-colors dark:bg-neutral-950/35 dark:ring-neutral-800/70",
-                  selected
-                    ? "ring-2 ring-slate-900/70 dark:ring-neutral-50/70"
-                    : "hover:bg-slate-50 dark:hover:bg-neutral-900/50"
+                  "inline-flex h-8 items-center rounded-xl px-3 text-xs font-semibold transition-colors",
+                  includeAll
+                    ? "bg-slate-900 text-white dark:bg-neutral-50 dark:text-neutral-900"
+                    : "bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-neutral-800 dark:text-neutral-100 dark:hover:bg-neutral-700"
                 )}
-                onClick={() => setSelectedName(container.name)}
+                onClick={() => setIncludeAll((prev) => !prev)}
               >
-                <div className="flex min-w-0 items-center justify-between gap-2">
-                  <div className="min-w-0 truncate text-sm font-semibold text-slate-900 dark:text-neutral-50">
-                    {container.name}
-                  </div>
-                  <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-700 dark:bg-neutral-800 dark:text-neutral-200">
-                    <span className={cn("h-2 w-2 rounded-full", stateDotClass(container.state))} />
-                    {container.state || "--"}
-                  </span>
-                </div>
-                <div className="mt-1 truncate text-xs text-slate-500 dark:text-neutral-400">
-                  {container.image || "--"}
-                </div>
-                <div className="mt-2 max-w-full text-[11px] text-slate-600 dark:text-neutral-300">
-                  <span className="font-medium">{t("docker.ports")}:</span>{" "}
-                  <span className="font-mono whitespace-normal break-all">{container.ports || "-"}</span>
-                </div>
-                <div className="mt-1 truncate text-[11px] text-slate-500 dark:text-neutral-400">
-                  {container.status || container.running_for || "--"}
-                </div>
+                {includeAll ? t("docker.filter_all") : t("docker.filter_running")}
               </button>
-            );
-          })}
-          {containers.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-slate-200 p-5 text-center text-sm text-slate-500 dark:border-neutral-800 dark:text-neutral-400">
-              {t("docker.empty")}
+              {canInstallDocker ? (
+                <button
+                  className={cn(
+                    "inline-flex h-8 items-center rounded-xl px-3 text-xs font-semibold transition-colors",
+                    installRunning
+                      ? "cursor-wait bg-slate-200 text-slate-500 dark:bg-neutral-800 dark:text-neutral-500"
+                      : "bg-amber-100 text-amber-900 hover:bg-amber-200 dark:bg-amber-900/40 dark:text-amber-300 dark:hover:bg-amber-900/60"
+                  )}
+                  onClick={() => void runInstallDocker()}
+                  disabled={installRunning}
+                >
+                  {installRunning ? t("docker.installing") : t("docker.install")}
+                </button>
+              ) : null}
+              <button
+                className={cn(
+                  "grid h-8 w-8 place-items-center rounded-xl bg-slate-100 text-slate-700 transition-colors hover:bg-slate-200 dark:bg-neutral-800 dark:text-neutral-100 dark:hover:bg-neutral-700",
+                  listLoading && "animate-pulse"
+                )}
+                onClick={() => void refreshContainers(true)}
+                title={t("common.refresh")}
+              >
+                <FiRefreshCw />
+              </button>
+            </div>
+          </div>
+
+          {listError ? (
+            <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700 dark:border-rose-900/40 dark:bg-rose-950/30 dark:text-rose-300">
+              {listError}
             </div>
           ) : null}
-        </div>
-      </section>
 
-      <section className="flex min-h-[320px] min-w-0 flex-col overflow-hidden rounded-3xl bg-white/75 p-4 shadow-soft ring-1 ring-slate-200/70 backdrop-blur xl:h-full dark:bg-neutral-900/60 dark:ring-neutral-800/80">
-        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div className="mt-3 min-h-0 flex-1 space-y-2 overflow-y-auto overflow-x-hidden py-1.5 [scrollbar-gutter:stable]">
+            {containers.map((container) => {
+              const selected = selectedName === container.name;
+              return (
+                <button
+                  key={container.id || container.name}
+                  className={cn(
+                    "block w-full min-w-0 max-w-full rounded-2xl border border-transparent bg-white/70 px-3 py-2.5 text-left ring-1 ring-inset ring-slate-200/60 transition-colors dark:bg-neutral-950/35 dark:ring-neutral-800/70",
+                    selected
+                      ? "ring-2 ring-slate-900/70 dark:ring-neutral-50/70"
+                      : "hover:bg-slate-50 dark:hover:bg-neutral-900/50"
+                  )}
+                  onClick={() => setSelectedName(container.name)}
+                >
+                  <div className="flex min-w-0 items-center justify-between gap-2">
+                    <div className="min-w-0 truncate text-sm font-semibold text-slate-900 dark:text-neutral-50">
+                      {container.name}
+                    </div>
+                    <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-700 dark:bg-neutral-800 dark:text-neutral-200">
+                      <span className={cn("h-2 w-2 rounded-full", stateDotClass(container.state))} />
+                      {container.state || "--"}
+                    </span>
+                  </div>
+                  <div className="mt-1 truncate text-xs text-slate-500 dark:text-neutral-400">
+                    {container.image || "--"}
+                  </div>
+                  <div className="mt-2 max-w-full text-[11px] text-slate-600 dark:text-neutral-300">
+                    <span className="font-medium">{t("docker.ports")}:</span>{" "}
+                    <span className="font-mono whitespace-normal break-all">{container.ports || "-"}</span>
+                  </div>
+                  <div className="mt-1 truncate text-[11px] text-slate-500 dark:text-neutral-400">
+                    {container.status || container.running_for || "--"}
+                  </div>
+                </button>
+              );
+            })}
+            {containers.length === 0 ? (
+              <div className="rounded-2xl border border-dashed border-slate-200 p-5 text-center text-sm text-slate-500 dark:border-neutral-800 dark:text-neutral-400">
+                {t("docker.empty")}
+              </div>
+            ) : null}
+          </div>
+        </section>
+
+        <section className="flex min-h-[320px] min-w-0 flex-col overflow-hidden rounded-3xl bg-white/75 p-4 shadow-soft ring-1 ring-slate-200/70 backdrop-blur xl:h-full dark:bg-neutral-900/60 dark:ring-neutral-800/80">
+          <div className="flex flex-wrap items-start justify-between gap-2">
           <div>
             <h3 className="inline-flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-neutral-50">
               <FiActivity />
@@ -1000,8 +1159,8 @@ export default function DockerPage({ session }: Props) {
           ) : null}
         </div>
 
-        {selectedContainer ? (
-          <>
+          {selectedContainer ? (
+            <>
             <div className="mt-3 inline-flex rounded-2xl bg-slate-100 p-1 dark:bg-neutral-800">
               {([
                 ["load", t("docker.tab_load")],
@@ -1302,13 +1461,63 @@ export default function DockerPage({ session }: Props) {
                 </div>
               </div>
             ) : null}
-          </>
-        ) : (
-          <div className="mt-4 rounded-2xl border border-dashed border-slate-200 p-6 text-center text-sm text-slate-500 dark:border-neutral-800 dark:text-neutral-400">
-            {t("docker.select_hint")}
-          </div>
-        )}
-      </section>
-    </div>
+            </>
+          ) : (
+            <div className="mt-4 rounded-2xl border border-dashed border-slate-200 p-6 text-center text-sm text-slate-500 dark:border-neutral-800 dark:text-neutral-400">
+              {t("docker.select_hint")}
+            </div>
+          )}
+        </section>
+      </div>
+
+      {installDialogOpen ? (
+        <div
+          className="fixed inset-0 z-[130] flex items-center justify-center bg-slate-900/45 p-4 backdrop-blur-[2px]"
+          onClick={() => {
+            if (!installRunning) {
+              setInstallDialogOpen(false);
+            }
+          }}
+        >
+          <section
+            className="flex max-h-[92dvh] w-full max-w-3xl min-w-0 flex-col rounded-3xl bg-white/95 p-4 shadow-2xl ring-1 ring-slate-200/80 dark:bg-neutral-900/95 dark:ring-neutral-700"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-center justify-between gap-3">
+              <h3 className="inline-flex items-center gap-2 text-sm font-semibold tracking-tight text-slate-900 dark:text-neutral-50">
+                <FiBox className="text-[14px]" />
+                {t("docker.install_dialog_title")}
+              </h3>
+              <div className="flex items-center gap-2">
+                <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600 dark:bg-neutral-800 dark:text-neutral-300">
+                  {installStatus || "queued"}
+                </span>
+                <button
+                  type="button"
+                  className={cn(
+                    "inline-flex h-9 items-center gap-1.5 rounded-xl px-3 text-xs font-semibold transition-colors",
+                    installRunning
+                      ? "cursor-not-allowed bg-slate-200 text-slate-500 dark:bg-neutral-800 dark:text-neutral-500"
+                      : "bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-neutral-800 dark:text-neutral-100 dark:hover:bg-neutral-700"
+                  )}
+                  disabled={installRunning}
+                  onClick={() => setInstallDialogOpen(false)}
+                >
+                  <FiX />
+                  {t("common.close")}
+                </button>
+              </div>
+            </div>
+
+            <pre
+              ref={installViewportRef}
+              className="mt-4 min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-all rounded-2xl bg-neutral-950 p-3 font-mono text-[12px] leading-relaxed text-neutral-50"
+            >
+              {installLogs || t("docker.install_log_empty")}
+            </pre>
+          </section>
+        </div>
+      ) : null}
+    </>
   );
 }

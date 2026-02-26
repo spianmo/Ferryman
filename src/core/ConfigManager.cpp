@@ -255,6 +255,8 @@ bool ConfigManager::LoadFromDisk(const std::filesystem::path& path) {
       config_.tunnel_proxy_host = Trim(value);
     } else if (key == "tunnel_proxy_port") {
       config_.tunnel_proxy_port = ParseInt(value, config_.tunnel_proxy_port);
+    } else if (key == "tunnel_proxy_token") {
+      config_.tunnel_proxy_token = Trim(value);
     } else if (key == "tunnel_mappings_json") {
       config_.tunnel_mappings = ParseTunnelMappingsJson(value);
     }
@@ -292,6 +294,7 @@ bool ConfigManager::WriteDefaultConfig(const std::filesystem::path& path, const 
   file << "ws_port=18080\n";
   file << "tunnel_proxy_host=\n";
   file << "tunnel_proxy_port=17000\n";
+  file << "tunnel_proxy_token=\n";
   file << "tunnel_mappings_json=" << SerializeTunnelMappingsJson({}) << '\n';
   return true;
 }

@@ -181,6 +181,48 @@ std::string RunCommandCapture(const std::string& command) {
   return output;
 }
 
+std::string HostOsTag() {
+#if defined(__linux__)
+  return "linux";
+#elif defined(__APPLE__)
+  return "macos";
+#elif defined(_WIN32)
+  return "windows";
+#else
+  return "unknown";
+#endif
+}
+
+bool CommandExists(const std::string& command) {
+  const std::string trimmed = util::Trim(command);
+  if (trimmed.empty()) {
+    return false;
+  }
+#if defined(_WIN32)
+  const std::string resolved = TrimAsciiWhitespace(RunCommandCapture("where " + trimmed + " 2>nul"));
+#else
+  const std::string resolved = TrimAsciiWhitespace(RunCommandCapture("command -v " + trimmed + " 2>/dev/null"));
+#endif
+  return !resolved.empty();
+}
+
+bool DetectDockerInstalled() {
+  return CommandExists("docker");
+}
+
+bool DetectKvmInstalled() {
+#if defined(__linux__)
+  std::error_code ec;
+  if (std::filesystem::exists("/dev/kvm", ec) && !ec) {
+    return true;
+  }
+  const std::string loaded = TrimAsciiWhitespace(RunCommandCapture("lsmod 2>/dev/null | grep -E '^kvm( |_)' | head -n 1"));
+  return !loaded.empty();
+#else
+  return false;
+#endif
+}
+
 std::filesystem::path ResolveDropTargetDirectory() {
 #if defined(_WIN32)
   const std::string command =
@@ -455,11 +497,13 @@ std::string SerializeTunnelMappingsJsonForConfig(const std::vector<core::TunnelM
 }
 
 bool PersistTunnelConfigToDisk(const core::AppConfig& config, const std::string& proxy_host, int proxy_port,
-                               const std::vector<core::TunnelMappingConfig>& mappings, std::string* error) {
+                               const std::string& proxy_token, const std::vector<core::TunnelMappingConfig>& mappings,
+                               std::string* error) {
   return UpsertConfigValues(config.config_path,
                             {
                                 {"tunnel_proxy_host", util::Trim(proxy_host)},
                                 {"tunnel_proxy_port", std::to_string(proxy_port)},
+                                {"tunnel_proxy_token", util::Trim(proxy_token)},
                                 {"tunnel_mappings_json", SerializeTunnelMappingsJsonForConfig(mappings)},
                             },
                             error);
@@ -971,7 +1015,8 @@ bool ServerApp::Start() {
   // WebSocket and HTTP share one listener.
   config_.ws_port = config_.http_port;
 
-  tunnel_manager_.Configure(config_.tunnel_proxy_host, config_.tunnel_proxy_port, config_.tunnel_mappings);
+  tunnel_manager_.Configure(config_.tunnel_proxy_host, config_.tunnel_proxy_port, config_.tunnel_proxy_token,
+                            config_.tunnel_mappings);
   tunnel_manager_.Start();
 
   // Disable libhv file logger to avoid generating libhv.yyyymmdd.log files.
@@ -1450,6 +1495,10 @@ int ServerApp::HandleSessionMe(HttpRequest* req, HttpResponse* resp) {
     return resp->status_code;
   }
 
+  const std::string host_os = HostOsTag();
+  const bool docker_installed = DetectDockerInstalled();
+  const bool kvm_installed = host_os == "linux" ? DetectKvmInstalled() : false;
+
   return Json(resp, 200,
               api::Success({
                   {"session_id", session->session_id, false},
@@ -1458,6 +1507,9 @@ int ServerApp::HandleSessionMe(HttpRequest* req, HttpResponse* resp) {
                   {"last_seen_at", std::to_string(session->last_seen_at), true},
                   {"command_authorized", "true", true},
                   {"screen_authorized", "true", true},
+                  {"host_os", host_os, false},
+                  {"docker_installed", docker_installed ? "true" : "false", true},
+                  {"kvm_installed", kvm_installed ? "true" : "false", true},
               }));
 }
 
@@ -2605,10 +2657,12 @@ int ServerApp::HandleTunnelState(HttpRequest* req, HttpResponse* resp) {
 
   std::string proxy_host;
   int proxy_port = 0;
+  std::string proxy_token;
   {
     std::lock_guard<std::mutex> lock(tunnel_mu_);
     proxy_host = config_.tunnel_proxy_host;
     proxy_port = config_.tunnel_proxy_port;
+    proxy_token = config_.tunnel_proxy_token;
   }
 
   const auto snapshots = tunnel_manager_.Snapshot();
@@ -2621,6 +2675,7 @@ int ServerApp::HandleTunnelState(HttpRequest* req, HttpResponse* resp) {
   return Json(resp, 200, api::Success({
                              {"proxy_host", proxy_host, false},
                              {"proxy_port", std::to_string(proxy_port), true},
+                             {"proxy_token", proxy_token, false},
                              {"mappings", JsonArray(serialized), true},
                          }));
 }
@@ -2634,19 +2689,26 @@ int ServerApp::HandleTunnelConfigUpdate(HttpRequest* req, HttpResponse* resp) {
   const auto payload = ParseJsonOrNull(req->body);
   const std::string requested_host = util::Trim(JsonString(payload, "proxy_host", QueryOf(req, "proxy_host")));
   const int requested_port = JsonInt(payload, "proxy_port", ParseInt(QueryOf(req, "proxy_port"), 0));
+  const std::string token_query = QueryOf(req, "proxy_token");
+  const bool has_requested_token =
+      (payload.has_value() && payload->is_object() && payload->contains("proxy_token")) || !token_query.empty();
+  const std::string requested_token = util::Trim(JsonString(payload, "proxy_token", token_query));
 
   std::string previous_host;
   int previous_port = 0;
+  std::string previous_token;
   std::vector<core::TunnelMappingConfig> mappings;
   {
     std::lock_guard<std::mutex> lock(tunnel_mu_);
     previous_host = config_.tunnel_proxy_host;
     previous_port = config_.tunnel_proxy_port;
+    previous_token = config_.tunnel_proxy_token;
     mappings = config_.tunnel_mappings;
   }
 
   const std::string next_host = requested_host;
   const int next_port = requested_port > 0 ? requested_port : previous_port;
+  const std::string next_token = has_requested_token ? requested_token : previous_token;
   if (!next_host.empty() && (next_port <= 0 || next_port > 65535)) {
     return Json(resp, 400, api::Error("proxy_port is invalid"));
   }
@@ -2655,22 +2717,25 @@ int ServerApp::HandleTunnelConfigUpdate(HttpRequest* req, HttpResponse* resp) {
     std::lock_guard<std::mutex> lock(tunnel_mu_);
     config_.tunnel_proxy_host = next_host;
     config_.tunnel_proxy_port = next_port;
+    config_.tunnel_proxy_token = next_token;
   }
 
   std::string persist_error;
-  if (!PersistTunnelConfigToDisk(config_, next_host, next_port, mappings, &persist_error)) {
+  if (!PersistTunnelConfigToDisk(config_, next_host, next_port, next_token, mappings, &persist_error)) {
     std::lock_guard<std::mutex> lock(tunnel_mu_);
     config_.tunnel_proxy_host = previous_host;
     config_.tunnel_proxy_port = previous_port;
+    config_.tunnel_proxy_token = previous_token;
     return Json(resp, 500, api::Error(persist_error.empty() ? "failed to persist tunnel config" : persist_error));
   }
 
-  tunnel_manager_.Configure(next_host, next_port, mappings);
+  tunnel_manager_.Configure(next_host, next_port, next_token, mappings);
   audit_logger_.Append(session->token, "tunnel.config.update", next_host + ":" + std::to_string(next_port));
 
   return Json(resp, 200, api::Success({
                              {"proxy_host", next_host, false},
                              {"proxy_port", std::to_string(next_port), true},
+                             {"proxy_token", next_token, false},
                          }));
 }
 
@@ -2691,12 +2756,14 @@ int ServerApp::HandleTunnelMappingUpsert(HttpRequest* req, HttpResponse* resp) {
   std::vector<core::TunnelMappingConfig> next_mappings;
   std::string proxy_host;
   int proxy_port = 0;
+  std::string proxy_token;
   {
     std::lock_guard<std::mutex> lock(tunnel_mu_);
     previous_mappings = config_.tunnel_mappings;
     next_mappings = config_.tunnel_mappings;
     proxy_host = config_.tunnel_proxy_host;
     proxy_port = config_.tunnel_proxy_port;
+    proxy_token = config_.tunnel_proxy_token;
   }
 
   bool replaced = false;
@@ -2729,13 +2796,13 @@ int ServerApp::HandleTunnelMappingUpsert(HttpRequest* req, HttpResponse* resp) {
   }
 
   std::string persist_error;
-  if (!PersistTunnelConfigToDisk(config_, proxy_host, proxy_port, next_mappings, &persist_error)) {
+  if (!PersistTunnelConfigToDisk(config_, proxy_host, proxy_port, proxy_token, next_mappings, &persist_error)) {
     std::lock_guard<std::mutex> lock(tunnel_mu_);
     config_.tunnel_mappings = previous_mappings;
     return Json(resp, 500, api::Error(persist_error.empty() ? "failed to persist mapping" : persist_error));
   }
 
-  tunnel_manager_.Configure(proxy_host, proxy_port, next_mappings);
+  tunnel_manager_.Configure(proxy_host, proxy_port, proxy_token, next_mappings);
   audit_logger_.Append(session->token, "tunnel.mapping.upsert",
                        mapping.id + " " + NormalizeTunnelProtocol(mapping.protocol) + " " +
                            std::to_string(mapping.local_port) + "->" + std::to_string(mapping.remote_port));
@@ -2762,12 +2829,14 @@ int ServerApp::HandleTunnelMappingDelete(HttpRequest* req, HttpResponse* resp) {
   std::vector<core::TunnelMappingConfig> next_mappings;
   std::string proxy_host;
   int proxy_port = 0;
+  std::string proxy_token;
   {
     std::lock_guard<std::mutex> lock(tunnel_mu_);
     previous_mappings = config_.tunnel_mappings;
     next_mappings = config_.tunnel_mappings;
     proxy_host = config_.tunnel_proxy_host;
     proxy_port = config_.tunnel_proxy_port;
+    proxy_token = config_.tunnel_proxy_token;
   }
 
   const auto before_count = next_mappings.size();
@@ -2785,13 +2854,13 @@ int ServerApp::HandleTunnelMappingDelete(HttpRequest* req, HttpResponse* resp) {
   }
 
   std::string persist_error;
-  if (!PersistTunnelConfigToDisk(config_, proxy_host, proxy_port, next_mappings, &persist_error)) {
+  if (!PersistTunnelConfigToDisk(config_, proxy_host, proxy_port, proxy_token, next_mappings, &persist_error)) {
     std::lock_guard<std::mutex> lock(tunnel_mu_);
     config_.tunnel_mappings = previous_mappings;
     return Json(resp, 500, api::Error(persist_error.empty() ? "failed to persist mapping" : persist_error));
   }
 
-  tunnel_manager_.Configure(proxy_host, proxy_port, next_mappings);
+  tunnel_manager_.Configure(proxy_host, proxy_port, proxy_token, next_mappings);
   audit_logger_.Append(session->token, "tunnel.mapping.delete", mapping_id);
 
   return Json(resp, 200, api::Success({
@@ -2848,7 +2917,28 @@ int ServerApp::HandleTunnelPorts(HttpRequest* req, HttpResponse* resp) {
     return resp->status_code;
   }
 
-  const auto ports = tunnel::PortInspector::ListListeningPorts();
+  static std::mutex ports_cache_mu;
+  static std::vector<tunnel::ListeningPortInfo> ports_cache;
+  static auto ports_cache_at = std::chrono::steady_clock::time_point{};
+  constexpr auto kPortsCacheTtl = std::chrono::milliseconds(1800);
+
+  std::vector<tunnel::ListeningPortInfo> ports;
+  bool cache_hit = false;
+  const auto now = std::chrono::steady_clock::now();
+  {
+    std::lock_guard<std::mutex> cache_lock(ports_cache_mu);
+    if (ports_cache_at != std::chrono::steady_clock::time_point{} && (now - ports_cache_at) < kPortsCacheTtl) {
+      ports = ports_cache;
+      cache_hit = true;
+    }
+  }
+  if (!cache_hit) {
+    ports = tunnel::PortInspector::ListListeningPorts();
+    std::lock_guard<std::mutex> cache_lock(ports_cache_mu);
+    ports_cache = ports;
+    ports_cache_at = std::chrono::steady_clock::now();
+  }
+
   std::vector<std::string> serialized;
   serialized.reserve(ports.size());
   for (const auto& item : ports) {

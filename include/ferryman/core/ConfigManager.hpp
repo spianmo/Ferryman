@@ -31,6 +31,7 @@ struct AppConfig {
   std::filesystem::path audit_log_path;
   std::string tunnel_proxy_host;
   int tunnel_proxy_port = 17000;
+  std::string tunnel_proxy_token;
   std::vector<TunnelMappingConfig> tunnel_mappings;
 };
 

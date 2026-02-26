@@ -35,7 +35,7 @@ class TunnelManager {
   void Start();
   void Stop();
 
-  void Configure(const std::string& proxy_host, int proxy_port,
+  void Configure(const std::string& proxy_host, int proxy_port, const std::string& proxy_token,
                  const std::vector<core::TunnelMappingConfig>& mappings);
 
   std::string ProxyHost() const;

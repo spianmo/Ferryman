@@ -400,6 +400,13 @@ struct ProxyServer::Impl {
     return NormalizeProtocol(protocol) + ":" + std::to_string(port);
   }
 
+  bool TokenAuthorized(const std::string& provided_token) const {
+    if (options.auth_token.empty()) {
+      return true;
+    }
+    return provided_token == options.auth_token;
+  }
+
 #if defined(__linux__)
   bool SendJson(const std::shared_ptr<ClientSession>& client, const json& payload) {
     if (!client || client->fd < 0) {
@@ -963,6 +970,12 @@ struct ProxyServer::Impl {
     }
 
     const std::string type = JsonStringValue(first_payload, "type");
+    const std::string auth_token = JsonStringValue(first_payload, "auth_token");
+    if (!TokenAuthorized(auth_token)) {
+      CloseSocket(fd);
+      Log("warn", "auth.reject", "unauthorized control handshake");
+      return;
+    }
     if (type == "work") {
       const std::string token = JsonStringValue(first_payload, "token");
       if (token.empty()) {
@@ -1032,14 +1045,52 @@ struct ProxyServer::Impl {
   }
 
   void HandleAdminCommand(int fd) {
+    std::string raw;
     std::array<char, 4096> buf{};
-    const ssize_t n = ::recv(fd, buf.data(), buf.size(), 0);
-    if (n <= 0) {
+    while (raw.find('\n') == std::string::npos && raw.size() < 4096) {
+      const ssize_t n = ::recv(fd, buf.data(), buf.size(), 0);
+      if (n <= 0) {
+        break;
+      }
+      raw.append(buf.data(), static_cast<size_t>(n));
+    }
+    if (raw.empty()) {
       CloseSocket(fd);
       return;
     }
-    std::string command(buf.data(), static_cast<size_t>(n));
+
+    std::string command;
+    {
+      std::istringstream stream(raw);
+      std::getline(stream, command);
+      command = util::Trim(command);
+    }
+
+    if (!options.auth_token.empty()) {
+      if (command.rfind("TOKEN ", 0) != 0) {
+        const std::string unauthorized = json({{"ok", false}, {"error", "unauthorized"}}).dump() + "\n";
+        SendAll(fd, unauthorized.data(), unauthorized.size());
+        CloseSocket(fd);
+        return;
+      }
+      std::string auth_suffix = util::Trim(command.substr(6));
+      size_t split = auth_suffix.find_first_of(" \t");
+      std::string provided_token = auth_suffix;
+      command.clear();
+      if (split != std::string::npos) {
+        provided_token = util::Trim(auth_suffix.substr(0, split));
+        command = util::Trim(auth_suffix.substr(split + 1));
+      }
+      if (!TokenAuthorized(provided_token)) {
+        const std::string unauthorized = json({{"ok", false}, {"error", "unauthorized"}}).dump() + "\n";
+        SendAll(fd, unauthorized.data(), unauthorized.size());
+        CloseSocket(fd);
+        Log("warn", "auth.reject", "unauthorized admin command");
+        return;
+      }
+    }
     command = util::Trim(command);
+
     std::string response;
     if (command.empty() || command == "LIST") {
       response = DumpMappingsJson();

@@ -86,7 +86,13 @@ export async function login(accessKey: string): Promise<ApiResponse<{ session_to
 }
 
 export async function getSessionMe(token: string) {
-  return request<{ command_authorized: boolean; screen_authorized: boolean }>(
+  return request<{
+    command_authorized: boolean;
+    screen_authorized: boolean;
+    host_os: string;
+    docker_installed: boolean;
+    kvm_installed: boolean;
+  }>(
     "/api/session/me",
     { method: "GET" },
     token
@@ -496,6 +502,7 @@ export async function getTunnelState(token: string) {
   return request<{
     proxy_host: string;
     proxy_port: number;
+    proxy_token: string;
     mappings: Array<TunnelMappingState>;
   }>(
     "/api/tunnel/state",
@@ -504,14 +511,15 @@ export async function getTunnelState(token: string) {
   );
 }
 
-export async function updateTunnelConfig(token: string, proxyHost: string, proxyPort: number) {
-  return request<{ proxy_host: string; proxy_port: number }>(
+export async function updateTunnelConfig(token: string, proxyHost: string, proxyPort: number, proxyToken: string) {
+  return request<{ proxy_host: string; proxy_port: number; proxy_token: string }>(
     "/api/tunnel/config",
     {
       method: "POST",
       body: JSON.stringify({
         proxy_host: proxyHost,
         proxy_port: proxyPort,
+        proxy_token: proxyToken,
       }),
     },
     token
