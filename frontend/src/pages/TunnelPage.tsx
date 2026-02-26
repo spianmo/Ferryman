@@ -118,7 +118,11 @@ export default function TunnelPage({ session }: Props) {
   const [localPort, setLocalPort] = useState("");
   const [remotePort, setRemotePort] = useState("");
   const [enabled, setEnabled] = useState(true);
+  const [localPortDropdownOpen, setLocalPortDropdownOpen] = useState(false);
+  const [localPortActiveIndex, setLocalPortActiveIndex] = useState(0);
   const lastLoadIdRef = useRef(0);
+  const localPortInputRef = useRef<HTMLInputElement | null>(null);
+  const localPortDropdownRef = useRef<HTMLDivElement | null>(null);
 
   const resetMappingForm = useCallback(() => {
     setName("");
@@ -127,6 +131,8 @@ export default function TunnelPage({ session }: Props) {
     setLocalPort("");
     setRemotePort("");
     setEnabled(true);
+    setLocalPortDropdownOpen(false);
+    setLocalPortActiveIndex(0);
   }, []);
 
   const loadData = useCallback(async (opts?: { background?: boolean; quietError?: boolean; withPorts?: boolean }) => {
@@ -191,6 +197,32 @@ export default function TunnelPage({ session }: Props) {
     };
   }, [session, tunnelSocket]);
 
+  useEffect(() => {
+    if (!localPortDropdownOpen) {
+      return;
+    }
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (!target) {
+        return;
+      }
+      if (localPortInputRef.current?.contains(target) || localPortDropdownRef.current?.contains(target)) {
+        return;
+      }
+      setLocalPortDropdownOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+    };
+  }, [localPortDropdownOpen]);
+
+  useEffect(() => {
+    if (!mappingDialogOpen) {
+      setLocalPortDropdownOpen(false);
+    }
+  }, [mappingDialogOpen]);
+
   const runTest = useCallback(
     async (mappingId: string) => {
       if (!mappingId) return;
@@ -246,6 +278,15 @@ export default function TunnelPage({ session }: Props) {
       .filter((item) => !keyword || item.port.includes(keyword) || item.hint.toLowerCase().includes(keyword))
       .slice(0, 80);
   }, [localPort, protocol, sortedListeningPorts]);
+  const showLocalPortDropdown = localPortDropdownOpen && localPortOptions.length > 0;
+
+  useEffect(() => {
+    if (!showLocalPortDropdown) {
+      setLocalPortActiveIndex(0);
+      return;
+    }
+    setLocalPortActiveIndex((prev) => Math.max(0, Math.min(prev, localPortOptions.length - 1)));
+  }, [localPortOptions.length, showLocalPortDropdown]);
 
   const onSaveProxy = async () => {
     const parsedPort = Number(proxyPort);
@@ -346,6 +387,7 @@ export default function TunnelPage({ session }: Props) {
       toast.success(t("tunnel.mapping_saved"));
       const createdId = res.mapping?.id ?? "";
       resetMappingForm();
+      setLocalPortDropdownOpen(false);
       setMappingDialogOpen(false);
       await loadData({ background: true, withPorts: false });
       if (createdId) {
@@ -722,20 +764,84 @@ export default function TunnelPage({ session }: Props) {
                 value={localHost}
                 onChange={(event) => setLocalHost(event.target.value)}
               />
-              <input
-                className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm dark:border-neutral-700 dark:bg-neutral-900"
-                placeholder={t("tunnel.local_port")}
-                value={localPort}
-                onChange={(event) => setLocalPort(event.target.value)}
-                list="tunnel-local-port-options"
-                inputMode="numeric"
-                autoComplete="off"
-              />
-              <datalist id="tunnel-local-port-options">
-                {localPortOptions.map((item) => (
-                  <option key={`${protocol}-${item.port}`} value={item.port} label={item.hint} />
-                ))}
-              </datalist>
+              <div className="relative">
+                <input
+                  ref={localPortInputRef}
+                  className="w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-slate-300 dark:border-neutral-700 dark:bg-neutral-900 dark:focus:border-neutral-600"
+                  placeholder={t("tunnel.local_port")}
+                  value={localPort}
+                  onChange={(event) => {
+                    setLocalPort(event.target.value);
+                    setLocalPortDropdownOpen(true);
+                  }}
+                  onFocus={() => setLocalPortDropdownOpen(true)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") {
+                      setLocalPortDropdownOpen(false);
+                      return;
+                    }
+                    if (!showLocalPortDropdown) {
+                      if (event.key === "ArrowDown") {
+                        setLocalPortDropdownOpen(true);
+                        setLocalPortActiveIndex(0);
+                        event.preventDefault();
+                      }
+                      return;
+                    }
+                    if (event.key === "ArrowDown") {
+                      event.preventDefault();
+                      setLocalPortActiveIndex((prev) => Math.min(prev + 1, localPortOptions.length - 1));
+                      return;
+                    }
+                    if (event.key === "ArrowUp") {
+                      event.preventDefault();
+                      setLocalPortActiveIndex((prev) => Math.max(prev - 1, 0));
+                      return;
+                    }
+                    if (event.key === "Enter") {
+                      const selected = localPortOptions[localPortActiveIndex];
+                      if (!selected) {
+                        return;
+                      }
+                      event.preventDefault();
+                      setLocalPort(selected.port);
+                      setLocalPortDropdownOpen(false);
+                    }
+                  }}
+                  inputMode="numeric"
+                  autoComplete="off"
+                />
+                {showLocalPortDropdown ? (
+                  <div
+                    ref={localPortDropdownRef}
+                    className="absolute left-0 right-0 top-[calc(100%+0.35rem)] z-40 overflow-hidden rounded-2xl border border-slate-200 bg-white/95 shadow-xl backdrop-blur dark:border-neutral-700 dark:bg-neutral-900/95"
+                  >
+                    <div className="max-h-56 overflow-auto p-1.5">
+                      {localPortOptions.map((item, index) => (
+                        <button
+                          key={`${protocol}-${item.port}-${item.hint}`}
+                          type="button"
+                          className={cn(
+                            "flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left transition-colors",
+                            index === localPortActiveIndex
+                              ? "bg-slate-100 dark:bg-neutral-800"
+                              : "hover:bg-slate-50 dark:hover:bg-neutral-800/70"
+                          )}
+                          onMouseDown={(event) => event.preventDefault()}
+                          onClick={() => {
+                            setLocalPort(item.port);
+                            setLocalPortDropdownOpen(false);
+                            localPortInputRef.current?.focus();
+                          }}
+                        >
+                          <span className="font-mono text-sm text-slate-900 dark:text-neutral-100">{item.port}</span>
+                          <span className="truncate text-xs text-slate-500 dark:text-neutral-400">{item.hint}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
               <input
                 className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm dark:border-neutral-700 dark:bg-neutral-900"
                 placeholder={t("tunnel.remote_port")}
