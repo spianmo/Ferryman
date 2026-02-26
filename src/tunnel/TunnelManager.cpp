@@ -661,6 +661,29 @@ struct TunnelManager::Impl {
     NotifyRuntimeUpdated();
   }
 
+  bool ProbeProxyEndpoint(const std::string& host, int port, const std::string& token, std::string* detail) const {
+    const std::string normalized_host = util::Trim(host);
+    const std::string normalized_token = util::Trim(token);
+    const int normalized_port = (port > 0 && port <= 65535) ? port : kDefaultProxyPort;
+    if (normalized_host.empty()) {
+      if (detail != nullptr) {
+        *detail = "proxy host is required";
+      }
+      return false;
+    }
+#if defined(_WIN32)
+    (void)normalized_host;
+    (void)normalized_port;
+    (void)normalized_token;
+    if (detail != nullptr) {
+      *detail = "proxy connectivity probe is not supported on this platform";
+    }
+    return true;
+#else
+    return ProbeProxyControlEndpoint(normalized_host, normalized_port, normalized_token, detail);
+#endif
+  }
+
 #if defined(_WIN32)
   void RunWorker() {
     while (running.load()) {
@@ -728,29 +751,6 @@ struct TunnelManager::Impl {
   std::tuple<std::string, int, std::string> ProxyAddressSnapshot() const {
     std::lock_guard<std::mutex> lock(mu);
     return {proxy_host, proxy_port, proxy_token};
-  }
-
-  bool ProbeProxyEndpoint(const std::string& host, int port, const std::string& token, std::string* detail) const {
-    const std::string normalized_host = util::Trim(host);
-    const std::string normalized_token = util::Trim(token);
-    const int normalized_port = (port > 0 && port <= 65535) ? port : kDefaultProxyPort;
-    if (normalized_host.empty()) {
-      if (detail != nullptr) {
-        *detail = "proxy host is required";
-      }
-      return false;
-    }
-#if defined(_WIN32)
-    (void)normalized_host;
-    (void)normalized_port;
-    (void)normalized_token;
-    if (detail != nullptr) {
-      *detail = "proxy connectivity probe is not supported on this platform";
-    }
-    return true;
-#else
-    return ProbeProxyControlEndpoint(normalized_host, normalized_port, normalized_token, detail);
-#endif
   }
 
   void HandleSyncResult(const json& payload) {
