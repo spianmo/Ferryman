@@ -6,10 +6,12 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include <sstream>
+#include <thread>
 #include <utility>
 
 #if defined(__unix__) || defined(__APPLE__)
@@ -574,6 +576,66 @@ std::vector<ContainerInfo> DockerManager::ListContainers(bool include_all, std::
     return a.name < b.name;
   });
   return containers;
+}
+
+bool DockerManager::StartService(std::string* error) const {
+#if defined(__linux__)
+  CommandResult probe;
+  std::string probe_error;
+  if (RunCommand({"docker", "info", "--format", "{{.ServerVersion}}"}, &probe, &probe_error)) {
+    return true;
+  }
+
+  std::string last_error = ErrorFromCommandOutput(probe.output, probe_error);
+  bool requested = false;
+  const std::array<std::vector<std::string>, 3> commands = {
+      std::vector<std::string>{"systemctl", "start", "docker"},
+      std::vector<std::string>{"service", "docker", "start"},
+      std::vector<std::string>{"rc-service", "docker", "start"},
+  };
+  for (const auto& command : commands) {
+    CommandResult result;
+    std::string command_error;
+    if (RunCommand(command, &result, &command_error)) {
+      requested = true;
+      break;
+    }
+    const std::string candidate = ErrorFromCommandOutput(result.output, command_error);
+    if (!candidate.empty()) {
+      last_error = candidate;
+    }
+  }
+
+  if (!requested) {
+    if (error != nullptr) {
+      *error = last_error.empty() ? "failed to start docker service" : last_error;
+    }
+    return false;
+  }
+
+  for (int attempt = 0; attempt < 24; ++attempt) {
+    CommandResult verify;
+    std::string verify_error;
+    if (RunCommand({"docker", "info", "--format", "{{.ServerVersion}}"}, &verify, &verify_error)) {
+      return true;
+    }
+    const std::string candidate = ErrorFromCommandOutput(verify.output, verify_error);
+    if (!candidate.empty()) {
+      last_error = candidate;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+  }
+
+  if (error != nullptr) {
+    *error = last_error.empty() ? "docker daemon is still unavailable after start request" : last_error;
+  }
+  return false;
+#else
+  if (error != nullptr) {
+    *error = "starting docker service is only supported on linux";
+  }
+  return false;
+#endif
 }
 
 bool DockerManager::StartContainer(const std::string& name, std::string* error) const {

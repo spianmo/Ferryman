@@ -37,6 +37,7 @@ import {
   readDockerContainerFile,
   restartDockerContainer,
   startTask,
+  startDockerService,
   startDockerContainer,
   stopDockerContainer,
   writeDockerContainerFile,
@@ -477,6 +478,8 @@ export default function DockerPage({ session, hostOs, dockerInstalled }: Props) 
   const [selectedName, setSelectedName] = useState("");
   const [listLoading, setListLoading] = useState(false);
   const [listError, setListError] = useState("");
+  const [dockerServiceInactive, setDockerServiceInactive] = useState(false);
+  const [serviceStartLoading, setServiceStartLoading] = useState(false);
 
   const [detailTab, setDetailTab] = useState<DetailTab>("load");
   const [actionLoading, setActionLoading] = useState<"" | "start" | "stop" | "restart">("");
@@ -518,6 +521,7 @@ export default function DockerPage({ session, hostOs, dockerInstalled }: Props) 
     [containers, selectedName]
   );
   const canInstallDocker = hostOs === "linux" && !dockerInstalledState;
+  const canStartDockerService = hostOs === "linux" && dockerInstalledState && dockerServiceInactive;
 
   const replaceImageUrl = useCallback((next: string) => {
     setSelectedImageUrl((current) => {
@@ -567,11 +571,13 @@ export default function DockerPage({ session, hostOs, dockerInstalled }: Props) 
     }
     if (!res.ok) {
       setListError(res.error ?? t("toast.request_failed"));
+      setDockerServiceInactive(res.code === "docker_daemon_inactive");
       return;
     }
     const next = Array.isArray(res.containers) ? res.containers : [];
     setContainers(next);
     setListError("");
+    setDockerServiceInactive(false);
     setSelectedName((prev) => {
       if (prev && next.some((item) => item.name === prev)) {
         return prev;
@@ -579,6 +585,21 @@ export default function DockerPage({ session, hostOs, dockerInstalled }: Props) 
       return next[0]?.name ?? "";
     });
   }, [includeAll, session.token, t]);
+
+  const runStartDockerService = useCallback(async () => {
+    if (serviceStartLoading) {
+      return;
+    }
+    setServiceStartLoading(true);
+    const res = await startDockerService(session.token);
+    setServiceStartLoading(false);
+    if (!res.ok) {
+      toast.error(res.error ?? t("toast.request_failed"));
+      return;
+    }
+    toast.success(t("docker.service_start_success"));
+    await refreshContainers(true);
+  }, [refreshContainers, serviceStartLoading, session.token, t]);
 
   const runInstallDocker = useCallback(async () => {
     if (installRunning) {
@@ -1034,6 +1055,20 @@ export default function DockerPage({ session, hostOs, dockerInstalled }: Props) 
                   disabled={installRunning}
                 >
                   {installRunning ? t("docker.installing") : t("docker.install")}
+                </button>
+              ) : null}
+              {canStartDockerService ? (
+                <button
+                  className={cn(
+                    "inline-flex h-8 items-center rounded-xl px-3 text-xs font-semibold transition-colors",
+                    serviceStartLoading
+                      ? "cursor-wait bg-slate-200 text-slate-500 dark:bg-neutral-800 dark:text-neutral-500"
+                      : "bg-amber-100 text-amber-900 hover:bg-amber-200 dark:bg-amber-900/40 dark:text-amber-300 dark:hover:bg-amber-900/60"
+                  )}
+                  onClick={() => void runStartDockerService()}
+                  disabled={serviceStartLoading}
+                >
+                  {serviceStartLoading ? t("docker.service_starting") : t("docker.service_start")}
                 </button>
               ) : null}
               <button

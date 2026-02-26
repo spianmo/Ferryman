@@ -210,6 +210,19 @@ bool DetectDockerInstalled() {
   return CommandExists("docker");
 }
 
+bool DockerErrorLooksDaemonInactive(const std::string& error) {
+  const std::string lowered = ToLower(util::Trim(error));
+  if (lowered.empty()) {
+    return false;
+  }
+  return lowered.find("cannot connect to the docker daemon") != std::string::npos ||
+         lowered.find("is the docker daemon running") != std::string::npos ||
+         lowered.find("docker daemon is not running") != std::string::npos ||
+         lowered.find("error during connect") != std::string::npos ||
+         lowered.find("failed to connect to daemon") != std::string::npos ||
+         lowered.find("docker.sock") != std::string::npos;
+}
+
 bool DetectKvmInstalled() {
 #if defined(__linux__)
   std::error_code ec;
@@ -1302,6 +1315,10 @@ bool ServerApp::RegisterHttpRoutes() {
     return HandleDockurrRestart(req, resp);
   });
 
+  http_service_.POST("/api/dockurr/delete", [this](HttpRequest* req, HttpResponse* resp) {
+    return HandleDockurrDelete(req, resp);
+  });
+
   http_service_.GET("/api/dockurr/logs", [this](HttpRequest* req, HttpResponse* resp) {
     return HandleDockurrLogs(req, resp);
   });
@@ -1312,6 +1329,10 @@ bool ServerApp::RegisterHttpRoutes() {
 
   http_service_.GET("/api/docker/list", [this](HttpRequest* req, HttpResponse* resp) {
     return HandleDockerList(req, resp);
+  });
+
+  http_service_.POST("/api/docker/service/start", [this](HttpRequest* req, HttpResponse* resp) {
+    return HandleDockerServiceStart(req, resp);
   });
 
   http_service_.POST("/api/docker/start", [this](HttpRequest* req, HttpResponse* resp) {
@@ -1841,6 +1862,31 @@ int ServerApp::HandleDockurrRestart(HttpRequest* req, HttpResponse* resp) {
                          }));
 }
 
+int ServerApp::HandleDockurrDelete(HttpRequest* req, HttpResponse* resp) {
+  auto session = RequireSession(req, resp);
+  if (!session.has_value()) {
+    return resp->status_code;
+  }
+
+  const auto payload = ParseJsonOrNull(req->body);
+  const std::string name = JsonString(payload, "name", QueryOf(req, "name"));
+  if (name.empty()) {
+    return Json(resp, 400, api::Error("name is required"));
+  }
+
+  std::string error;
+  if (!dockurr_manager_.DeleteVm(name, &error)) {
+    const std::string lowered = ToLower(error);
+    const bool bad_request = lowered.find("invalid") != std::string::npos;
+    return Json(resp, bad_request ? 400 : 500, api::Error(error, bad_request ? "bad_request" : "dockurr_failed"));
+  }
+
+  audit_logger_.Append(session->token, "dockurr.delete", name);
+  return Json(resp, 200, api::Success({
+                             {"name", name, false},
+                         }));
+}
+
 int ServerApp::HandleDockurrLogs(HttpRequest* req, HttpResponse* resp) {
   auto session = RequireSession(req, resp);
   if (!session.has_value()) {
@@ -1904,7 +1950,7 @@ int ServerApp::HandleDockerList(HttpRequest* req, HttpResponse* resp) {
   std::string error;
   const auto containers = docker_manager_.ListContainers(include_all, &error);
   if (!error.empty()) {
-    return Json(resp, 500, api::Error(error, "docker_unavailable"));
+    return Json(resp, 500, api::Error(error, DockerErrorLooksDaemonInactive(error) ? "docker_daemon_inactive" : "docker_unavailable"));
   }
 
   std::vector<std::string> serialized;
@@ -1916,6 +1962,25 @@ int ServerApp::HandleDockerList(HttpRequest* req, HttpResponse* resp) {
   return Json(resp, 200, api::Success({
                              {"containers", JsonArray(serialized), true},
                              {"all", include_all ? "true" : "false", true},
+                         }));
+}
+
+int ServerApp::HandleDockerServiceStart(HttpRequest* req, HttpResponse* resp) {
+  auto session = RequireSession(req, resp);
+  if (!session.has_value()) {
+    return resp->status_code;
+  }
+
+  std::string error;
+  if (!docker_manager_.StartService(&error)) {
+    const std::string lowered = ToLower(error);
+    const bool bad_request = lowered.find("only supported on linux") != std::string::npos;
+    return Json(resp, bad_request ? 400 : 500, api::Error(error, bad_request ? "bad_request" : "docker_service_failed"));
+  }
+
+  audit_logger_.Append(session->token, "docker.service.start", "docker");
+  return Json(resp, 200, api::Success({
+                             {"started", "true", true},
                          }));
 }
 
@@ -4142,7 +4207,8 @@ void ServerApp::HandleDockurrWsMessage(std::uintptr_t channel_key, const std::st
     return;
   }
 
-  if (action == "start" || action == "stop" || action == "restart" || action == "logs" || action == "inspect") {
+  if (action == "start" || action == "stop" || action == "restart" || action == "delete" || action == "logs" ||
+      action == "inspect") {
     const std::string name = JsonString(payload, "name");
     if (name.empty()) {
       send_runtime_log("error", action, "name is required");
@@ -4178,6 +4244,15 @@ void ServerApp::HandleDockurrWsMessage(std::uintptr_t channel_key, const std::st
       }
       audit_logger_.Append(client.session_token, "dockurr.restart", name);
       send_runtime_log("info", action, "vm restarted: " + name);
+      send_action_result(true, "", {{"name", name, false}});
+    } else if (action == "delete") {
+      if (!dockurr_manager_.DeleteVm(name, &error)) {
+        send_runtime_log("error", action, error);
+        send_action_result(false, error);
+        return;
+      }
+      audit_logger_.Append(client.session_token, "dockurr.delete", name);
+      send_runtime_log("info", action, "vm deleted: " + name);
       send_action_result(true, "", {{"name", name, false}});
     } else if (action == "logs") {
       const int tail = std::clamp(JsonInt(payload, "tail", 50), 1, 500);

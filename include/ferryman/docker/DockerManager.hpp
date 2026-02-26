@@ -50,6 +50,7 @@ class DockerManager {
   explicit DockerManager(std::filesystem::path workspace_root);
 
   std::vector<ContainerInfo> ListContainers(bool include_all, std::string* error) const;
+  bool StartService(std::string* error) const;
   bool StartContainer(const std::string& name, std::string* error) const;
   bool StopContainer(const std::string& name, std::string* error) const;
   bool RestartContainer(const std::string& name, std::string* error) const;

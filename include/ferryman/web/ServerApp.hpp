@@ -117,9 +117,11 @@ class ServerApp {
   int HandleDockurrStart(HttpRequest* req, HttpResponse* resp);
   int HandleDockurrStop(HttpRequest* req, HttpResponse* resp);
   int HandleDockurrRestart(HttpRequest* req, HttpResponse* resp);
+  int HandleDockurrDelete(HttpRequest* req, HttpResponse* resp);
   int HandleDockurrLogs(HttpRequest* req, HttpResponse* resp);
   int HandleDockurrInspect(HttpRequest* req, HttpResponse* resp);
   int HandleDockerList(HttpRequest* req, HttpResponse* resp);
+  int HandleDockerServiceStart(HttpRequest* req, HttpResponse* resp);
   int HandleDockerStart(HttpRequest* req, HttpResponse* resp);
   int HandleDockerStop(HttpRequest* req, HttpResponse* resp);
   int HandleDockerRestart(HttpRequest* req, HttpResponse* resp);

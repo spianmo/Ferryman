@@ -785,6 +785,47 @@ bool DockurrManager::RestartVm(const std::string& name, std::string* error) cons
   return true;
 }
 
+bool DockurrManager::DeleteVm(const std::string& name, std::string* error) const {
+  const std::string trimmed = util::Trim(name);
+  if (!IsValidVmName(trimmed)) {
+    if (error != nullptr) {
+      *error = "invalid vm name";
+    }
+    return false;
+  }
+
+  VmInfo vm;
+  std::string lookup_error;
+  if (!LookupVmByName(trimmed, &vm, &lookup_error)) {
+    if (error != nullptr) {
+      *error = lookup_error.empty() ? "vm not found" : lookup_error;
+    }
+    return false;
+  }
+
+  CommandResult result;
+  if (!RunCommand({"docker", "rm", "-f", trimmed}, &result, error)) {
+    if (error != nullptr) {
+      *error = ErrorFromCommandOutput(result.output, "failed to delete vm");
+    }
+    return false;
+  }
+
+  if (vm.persistent) {
+    const std::filesystem::path vmdata_dir = workspace_root_ / ("vmdata-" + trimmed);
+    std::error_code ec;
+    std::filesystem::remove_all(vmdata_dir, ec);
+    if (ec) {
+      if (error != nullptr) {
+        *error = "vm container deleted, but failed to cleanup persistent storage: " + ec.message();
+      }
+      return false;
+    }
+  }
+
+  return true;
+}
+
 bool DockurrManager::GetLogs(const std::string& name, int tail_lines, std::string* logs, std::string* error) const {
   const std::string trimmed = util::Trim(name);
   if (!IsValidVmName(trimmed)) {

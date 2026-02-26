@@ -44,6 +44,7 @@ class DockurrManager {
   bool StartVm(const std::string& name, std::string* error) const;
   bool StopVm(const std::string& name, std::string* error) const;
   bool RestartVm(const std::string& name, std::string* error) const;
+  bool DeleteVm(const std::string& name, std::string* error) const;
   bool GetLogs(const std::string& name, int tail_lines, std::string* logs, std::string* error) const;
   bool InspectVm(const std::string& name, std::string* inspect, std::string* error) const;
   bool StopTemporaryVms(std::vector<std::string>* stopped_names, std::string* error) const;

@@ -25,6 +25,7 @@ import {
   FiSave,
   FiServer,
   FiSquare,
+  FiTrash2,
   FiUpload,
   FiX,
 } from "react-icons/fi";
@@ -640,7 +641,7 @@ export default function DockurrPage({ session, hostOs, kvmInstalled }: Props) {
   const kvmInstallViewportRef = useRef<HTMLPreElement | null>(null);
   const kvmInstallNotifiedRef = useRef(false);
 
-  const [actionLoading, setActionLoading] = useState<"" | "start" | "stop" | "restart">("");
+  const [actionLoading, setActionLoading] = useState<"" | "start" | "stop" | "restart" | "delete">("");
   const [detailTab, setDetailTab] = useState<DetailTab>("load");
 
   const [statsLoading, setStatsLoading] = useState(false);
@@ -940,7 +941,7 @@ export default function DockurrPage({ session, hostOs, kvmInstalled }: Props) {
         if (action === "create") {
           setCreateLoading(false);
         }
-        if (action === "start" || action === "stop" || action === "restart") {
+        if (action === "start" || action === "stop" || action === "restart" || action === "delete") {
           setActionLoading("");
         }
         appendRuntimeLog("error", action || "dockurr", error, asString(payload.ts));
@@ -981,6 +982,13 @@ export default function DockurrPage({ session, hostOs, kvmInstalled }: Props) {
       if (action === "restart") {
         setActionLoading("");
         toast.success(t("toast.dockurr_restarted", { name: asString(payload.name) }));
+        refreshVms();
+        return;
+      }
+
+      if (action === "delete") {
+        setActionLoading("");
+        toast.success(t("toast.dockurr_deleted", { name: asString(payload.name) }));
         refreshVms();
       }
     });
@@ -1336,6 +1344,19 @@ export default function DockurrPage({ session, hostOs, kvmInstalled }: Props) {
     }
   };
 
+  const runDelete = (vm: DockurrVmInfo) => {
+    if (actionLoading) return;
+    const confirmed = window.confirm(t("dockurr.delete_confirm", { name: vm.name }));
+    if (!confirmed) {
+      return;
+    }
+    setActionLoading("delete");
+    const requestId = sendAction("delete", { name: vm.name });
+    if (!requestId) {
+      setActionLoading("");
+    }
+  };
+
   const openVm = (vm: DockurrVmInfo) => {
     if (!vm.novnc_port) {
       toast.error(t("dockurr.open_unavailable"));
@@ -1471,6 +1492,25 @@ export default function DockurrPage({ session, hostOs, kvmInstalled }: Props) {
                       <div className="truncate sm:col-span-2">
                         {t("dockurr.ports")}: <span className="font-mono text-[11px]">{vm.ports || "-"}</span>
                       </div>
+                    </div>
+                    <div className="mt-2 flex justify-end">
+                      <button
+                        type="button"
+                        className={cn(
+                          "inline-flex h-7 items-center gap-1 rounded-lg px-2 text-[11px] font-semibold transition-colors",
+                          actionLoading === "delete"
+                            ? "cursor-wait bg-slate-200 text-slate-500 dark:bg-neutral-800 dark:text-neutral-500"
+                            : "bg-rose-100 text-rose-700 hover:bg-rose-200 dark:bg-rose-900/40 dark:text-rose-300 dark:hover:bg-rose-900/60"
+                        )}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          runDelete(vm);
+                        }}
+                        disabled={actionLoading.length > 0}
+                      >
+                        <FiTrash2 />
+                        {t("dockurr.delete")}
+                      </button>
                     </div>
                   </article>
                 );

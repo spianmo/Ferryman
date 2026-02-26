@@ -248,6 +248,17 @@ export async function listDockerContainers(token: string, all = true) {
   );
 }
 
+export async function startDockerService(token: string) {
+  return request<{ started: boolean }>(
+    "/api/docker/service/start",
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    },
+    token
+  );
+}
+
 export async function startDockerContainer(token: string, name: string) {
   return request<{ name: string }>(
     "/api/docker/start",
