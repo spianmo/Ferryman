@@ -71,7 +71,7 @@ export default function ToastHost() {
   }, []);
 
   return (
-    <div className="pointer-events-none fixed inset-x-0 bottom-3 z-50 flex justify-center px-3 sm:inset-x-auto sm:right-4 sm:top-4 sm:bottom-auto sm:px-0">
+    <div className="pointer-events-none fixed inset-x-0 bottom-3 z-[9999] flex justify-center px-3 sm:inset-x-auto sm:right-4 sm:top-4 sm:bottom-auto sm:px-0">
       <div className="flex w-[min(420px,calc(100vw-24px))] flex-col gap-2">
         {items.map((item) => (
           <div

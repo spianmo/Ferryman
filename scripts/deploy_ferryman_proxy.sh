@@ -24,7 +24,7 @@ Options:
   --extra-udp-ports <list>     Comma-separated extra UDP ports to open in firewall
   --firewall-backend <name>    auto|ufw|firewalld|iptables|none (default: auto)
   --no-firewall                Skip firewall changes
-  --no-enable                  Do not enable/start service after install
+  --no-enable                  Do not enable/start/restart service after install
   -h, --help                   Show help
 
 Examples:
@@ -291,7 +291,14 @@ rm -f "$TMP_SERVICE"
 echo "Reloading systemd and applying service..."
 run_root systemctl daemon-reload
 if [[ $ENABLE_SERVICE -eq 1 ]]; then
-  run_root systemctl enable --now "$SERVICE_NAME"
+  run_root systemctl enable "$SERVICE_NAME"
+  if run_root systemctl is-active --quiet "$SERVICE_NAME"; then
+    echo "Service is running; restarting to apply new binary/config..."
+    run_root systemctl restart "$SERVICE_NAME"
+  else
+    echo "Service is not running; starting service..."
+    run_root systemctl start "$SERVICE_NAME"
+  fi
 else
   echo "Service installed but not started (--no-enable)."
 fi

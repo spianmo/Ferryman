@@ -339,12 +339,12 @@ export default function TunnelPage({ token }: Props) {
             </div>
 
             <div className="mt-3 min-h-0 flex-1 overflow-auto rounded-2xl border border-slate-200/80 dark:border-neutral-800/80">
-              <table className="min-w-full text-sm sm:min-w-[760px] md:min-w-[860px]">
+              <table className="w-full text-sm sm:min-w-[760px] md:min-w-[860px]">
                 <thead className="sticky top-0 z-10 bg-slate-100 dark:bg-neutral-900">
                   <tr className="text-left text-slate-600 dark:text-neutral-300">
                     <th className="w-[188px] min-w-[188px] whitespace-nowrap px-2.5 py-2">{t("tunnel.name")}</th>
                     <th className="hidden w-[72px] min-w-[72px] whitespace-nowrap px-2.5 py-2 sm:table-cell">{t("tunnel.protocol")}</th>
-                    <th className="hidden w-[196px] min-w-[196px] whitespace-nowrap px-2.5 py-2 sm:table-cell">{t("tunnel.mapping")}</th>
+                    <th className="hidden min-w-[240px] whitespace-nowrap px-2.5 py-2 sm:table-cell">{t("tunnel.mapping")}</th>
                     <th className="hidden w-[200px] min-w-[200px] whitespace-nowrap px-2.5 py-2 sm:table-cell">{t("tunnel.status")}</th>
                     <th className="sticky right-0 z-20 w-[188px] min-w-[188px] whitespace-nowrap bg-slate-100 px-2.5 py-2 shadow-[-10px_0_18px_-14px_rgba(15,23,42,0.65)] sm:w-[196px] sm:min-w-[196px] dark:bg-neutral-900 dark:shadow-[-10px_0_18px_-14px_rgba(0,0,0,0.85)]">
                       {t("tunnel.actions")}
@@ -382,7 +382,7 @@ export default function TunnelPage({ token }: Props) {
                           </div>
                         </td>
                         <td className="hidden w-[72px] min-w-[72px] px-2.5 py-2 uppercase sm:table-cell">{item.protocol}</td>
-                        <td className="hidden w-[196px] min-w-[196px] whitespace-nowrap px-2.5 py-2 font-mono text-xs sm:table-cell">
+                        <td className="hidden min-w-[240px] whitespace-nowrap px-2.5 py-2 font-mono text-xs sm:table-cell">
                           {item.local_host}:{item.local_port} {"->"} *:{item.remote_port}
                         </td>
                         <td className="hidden w-[200px] min-w-[200px] px-2.5 py-2 sm:table-cell">

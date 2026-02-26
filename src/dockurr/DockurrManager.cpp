@@ -62,6 +62,45 @@ int ClosePipe(FILE* pipe) {
 }
 
 std::string QuoteShellArg(const std::string& value) {
+#if defined(_WIN32)
+  if (value.empty()) {
+    return "\"\"";
+  }
+  const bool is_safe =
+      std::all_of(value.begin(), value.end(), [](unsigned char ch) {
+        return std::isalnum(ch) != 0 || ch == '-' || ch == '_' || ch == '.' || ch == '/' || ch == '\\' ||
+               ch == ':' || ch == '=';
+      });
+  if (is_safe) {
+    return value;
+  }
+  std::string quoted;
+  quoted.reserve(value.size() + 2);
+  quoted.push_back('"');
+  size_t slash_count = 0;
+  for (char ch : value) {
+    if (ch == '\\') {
+      ++slash_count;
+      continue;
+    }
+    if (ch == '"') {
+      quoted.append(slash_count * 2 + 1, '\\');
+      quoted.push_back('"');
+      slash_count = 0;
+      continue;
+    }
+    if (slash_count > 0) {
+      quoted.append(slash_count, '\\');
+      slash_count = 0;
+    }
+    quoted.push_back(ch);
+  }
+  if (slash_count > 0) {
+    quoted.append(slash_count * 2, '\\');
+  }
+  quoted.push_back('"');
+  return quoted;
+#else
   if (value.empty()) {
     return "''";
   }
@@ -82,6 +121,7 @@ std::string QuoteShellArg(const std::string& value) {
   }
   quoted.push_back('\'');
   return quoted;
+#endif
 }
 
 bool RunCommand(const std::vector<std::string>& args, CommandResult* result, std::string* error,

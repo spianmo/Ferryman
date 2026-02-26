@@ -438,6 +438,27 @@ bool TunnelPortValid(int port) {
   return port > 0 && port <= 65535;
 }
 
+bool TunnelProxyHostLooksLocal(const std::string& host) {
+  const std::string normalized = ToLower(util::Trim(host));
+  return normalized == "127.0.0.1" || normalized == "localhost" || normalized == "::1" || normalized == "[::1]" ||
+         normalized == "0.0.0.0" || normalized == "::" || normalized == "[::]";
+}
+
+std::optional<tunnel::ListeningPortInfo> FindListeningPortConflict(const std::vector<tunnel::ListeningPortInfo>& ports,
+                                                                    const std::string& protocol, int port) {
+  const std::string normalized_protocol = NormalizeTunnelProtocol(protocol);
+  for (const auto& item : ports) {
+    if (item.port != port) {
+      continue;
+    }
+    if (NormalizeTunnelProtocol(item.protocol) != normalized_protocol) {
+      continue;
+    }
+    return item;
+  }
+  return std::nullopt;
+}
+
 std::optional<core::TunnelMappingConfig> ParseTunnelMappingFromJson(const std::optional<json>& payload,
                                                                     const std::string& fallback_id = "") {
   if (!payload.has_value() || !payload->is_object()) {
@@ -2766,6 +2787,17 @@ int ServerApp::HandleTunnelMappingUpsert(HttpRequest* req, HttpResponse* resp) {
     proxy_token = config_.tunnel_proxy_token;
   }
 
+  const std::string mapping_protocol = NormalizeTunnelProtocol(mapping.protocol);
+  bool had_previous = false;
+  core::TunnelMappingConfig previous_mapping;
+  for (const auto& existing : previous_mappings) {
+    if (existing.id == mapping.id) {
+      previous_mapping = existing;
+      had_previous = true;
+      break;
+    }
+  }
+
   bool replaced = false;
   for (auto& existing : next_mappings) {
     if (existing.id == mapping.id) {
@@ -2783,10 +2815,37 @@ int ServerApp::HandleTunnelMappingUpsert(HttpRequest* req, HttpResponse* resp) {
       if (item.id == mapping.id || !item.enabled) {
         continue;
       }
-      if (NormalizeTunnelProtocol(item.protocol) == NormalizeTunnelProtocol(mapping.protocol) &&
-          item.remote_port == mapping.remote_port) {
+      if (NormalizeTunnelProtocol(item.protocol) == mapping_protocol && item.remote_port == mapping.remote_port) {
         return Json(resp, 409, api::Error("remote port conflict with another mapping", "conflict"));
       }
+    }
+  }
+
+  const bool keeps_existing_bound_remote_port =
+      had_previous && previous_mapping.enabled && mapping.enabled &&
+      NormalizeTunnelProtocol(previous_mapping.protocol) == mapping_protocol &&
+      previous_mapping.remote_port == mapping.remote_port;
+  if (mapping.enabled && !keeps_existing_bound_remote_port && TunnelProxyHostLooksLocal(proxy_host)) {
+    const auto listening_ports = tunnel::PortInspector::ListListeningPorts();
+    const auto occupied = FindListeningPortConflict(listening_ports, mapping_protocol, mapping.remote_port);
+    if (occupied.has_value()) {
+      std::ostringstream message;
+      message << "remote (public) port " << mapping.remote_port << "/" << mapping_protocol << " is already occupied";
+      const std::string address = util::Trim(occupied->address).empty() ? "0.0.0.0" : occupied->address;
+      message << " at " << address;
+      if (occupied->pid > 0 || !occupied->process.empty()) {
+        message << " by ";
+        if (occupied->pid > 0) {
+          message << "pid " << occupied->pid;
+          if (!occupied->process.empty()) {
+            message << ' ';
+          }
+        }
+        if (!occupied->process.empty()) {
+          message << occupied->process;
+        }
+      }
+      return Json(resp, 409, api::Error(message.str(), "port_occupied"));
     }
   }
 
