@@ -440,6 +440,16 @@ struct ProxyServer::Impl {
     return it->second;
   }
 
+  std::vector<std::string> FindMappingKeysByIdLocked(const std::string& mapping_id) const {
+    std::vector<std::string> keys;
+    for (const auto& [key, mapping] : mappings_by_key) {
+      if (mapping && mapping->mapping_id == mapping_id) {
+        keys.push_back(key);
+      }
+    }
+    return keys;
+  }
+
   void RemovePendingToken(const std::string& token, const std::string& reason) {
     PendingTcpWork pending;
     bool found = false;
@@ -888,12 +898,15 @@ struct ProxyServer::Impl {
     }
   }
 
-  void RemoveClientMappings(const std::string& client_id) {
+  void RemoveClientMappings(const std::string& client_id, bool include_disabled = true) {
     std::vector<std::string> keys;
     {
       std::lock_guard<std::mutex> lock(state_mu);
       for (const auto& [key, mapping] : mappings_by_key) {
         if (mapping->client_id == client_id) {
+          if (!include_disabled && !mapping->enabled) {
+            continue;
+          }
           keys.push_back(key);
         }
       }
@@ -911,7 +924,9 @@ struct ProxyServer::Impl {
       std::lock_guard<std::mutex> lock(state_mu);
       clients_by_id.erase(client->id);
     }
-    RemoveClientMappings(client->id);
+    // Keep disabled mappings in admin list after client disconnects; they carry
+    // desired state but do not hold a listening socket.
+    RemoveClientMappings(client->id, false);
     Log("info", "client.disconnect", client->id);
   }
 
@@ -1113,6 +1128,41 @@ struct ProxyServer::Impl {
       response = DumpMappingsJson();
     } else if (command == "STATUS") {
       response = DumpStatusJson();
+    } else if (command.rfind("DELETE", 0) == 0) {
+      const std::string mapping_id = util::Trim(command.substr(6));
+      if (mapping_id.empty()) {
+        response = json({
+                            {"ok", false},
+                            {"error", "mapping_id is required"},
+                        })
+                       .dump();
+      } else {
+        std::vector<std::string> keys;
+        {
+          std::lock_guard<std::mutex> lock(state_mu);
+          keys = FindMappingKeysByIdLocked(mapping_id);
+        }
+        for (const auto& key : keys) {
+          RemoveMapping(key);
+        }
+        if (keys.empty()) {
+          response = json({
+                              {"ok", false},
+                              {"error", "mapping not found"},
+                              {"mapping_id", mapping_id},
+                              {"removed", 0},
+                          })
+                         .dump();
+        } else {
+          response = json({
+                              {"ok", true},
+                              {"mapping_id", mapping_id},
+                              {"removed", keys.size()},
+                          })
+                         .dump();
+          Log("info", "mapping.delete.admin", "mapping_id=" + mapping_id + " removed=" + std::to_string(keys.size()));
+        }
+      }
     } else if (command.rfind("LOGS", 0) == 0) {
       size_t limit = 100;
       const std::string suffix = util::Trim(command.substr(4));

@@ -136,6 +136,7 @@ void PrintUsage() {
                "                [--log-file /var/log/ferryman-proxy.log] [--token TOKEN]\n"
                "  FerrymanProxy --list [--admin-host 127.0.0.1] [--admin-port 17001] [--token TOKEN]\n"
                "  FerrymanProxy --status [--admin-host 127.0.0.1] [--admin-port 17001] [--token TOKEN]\n"
+               "  FerrymanProxy --delete <mapping_id> [--admin-host 127.0.0.1] [--admin-port 17001] [--token TOKEN]\n"
                "  FerrymanProxy --logs [N] [--admin-host 127.0.0.1] [--admin-port 17001] [--token TOKEN]  (streaming)\n";
 }
 
@@ -291,6 +292,7 @@ int main(int argc, char** argv) {
   std::string mode = "serve";
   size_t logs_limit = 100;
   std::string auth_token_override;
+  std::string delete_mapping_id;
 
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
@@ -339,6 +341,11 @@ int main(int argc, char** argv) {
           ++i;
         }
       }
+      continue;
+    }
+    if (arg == "--delete" && i + 1 < argc) {
+      mode = "delete";
+      delete_mapping_id = Trim(argv[++i]);
       continue;
     }
     std::cerr << "Unknown argument: " << arg << '\n';
@@ -390,6 +397,12 @@ int main(int argc, char** argv) {
     std::string command = "LIST";
     if (mode == "status") {
       command = "STATUS";
+    } else if (mode == "delete") {
+      if (delete_mapping_id.empty()) {
+        std::cerr << "mapping_id is required for --delete\n";
+        return 1;
+      }
+      command = "DELETE " + delete_mapping_id;
     }
     const auto response = QueryAdmin(options.admin_host, options.admin_port, command, options.auth_token, &error);
     if (!response.has_value()) {

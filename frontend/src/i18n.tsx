@@ -365,6 +365,8 @@ const DICTS: Record<Lang, Dict> = {
     "tunnel.invalid_local_host": "Local host is required.",
     "tunnel.invalid_local_port": "Invalid local port.",
     "tunnel.invalid_remote_port": "Invalid remote port.",
+    "tunnel.remote_port_conflict": "Remote port {port}/{protocol} conflicts with an existing mapping.",
+    "tunnel.remote_port_occupied": "Remote port {port}/{protocol} is already occupied.",
   },
   "zh-CN": {
     "app.name": "Ferryman",
@@ -726,6 +728,8 @@ const DICTS: Record<Lang, Dict> = {
     "tunnel.invalid_local_host": "本地地址不能为空。",
     "tunnel.invalid_local_port": "本地端口无效。",
     "tunnel.invalid_remote_port": "公网端口无效。",
+    "tunnel.remote_port_conflict": "公网端口 {port}/{protocol} 与已有映射冲突。",
+    "tunnel.remote_port_occupied": "公网端口 {port}/{protocol} 已被占用。",
   },
 };
 

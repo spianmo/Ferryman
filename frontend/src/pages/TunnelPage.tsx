@@ -63,6 +63,37 @@ function sortedPorts(items: ListeningPortInfo[]) {
   });
 }
 
+function normalizeTunnelProtocol(value: string): "tcp" | "udp" {
+  return value.trim().toLowerCase() === "udp" ? "udp" : "tcp";
+}
+
+function isLocalTunnelProxyHost(host: string) {
+  const normalized = host.trim().toLowerCase();
+  return (
+    normalized === "127.0.0.1" ||
+    normalized === "localhost" ||
+    normalized === "::1" ||
+    normalized === "[::1]" ||
+    normalized === "0.0.0.0" ||
+    normalized === "::" ||
+    normalized === "[::]"
+  );
+}
+
+function listeningPortHint(item: ListeningPortInfo) {
+  const process = item.process?.trim() ?? "";
+  if (!process && item.pid <= 0) {
+    return item.address;
+  }
+  if (process && item.pid > 0) {
+    return `${process} (pid ${item.pid})`;
+  }
+  if (process) {
+    return process;
+  }
+  return `pid ${item.pid}`;
+}
+
 export default function TunnelPage({ session }: Props) {
   const token = session.token;
   const { t } = useI18n();
@@ -84,10 +115,19 @@ export default function TunnelPage({ session }: Props) {
   const [name, setName] = useState("");
   const [protocol, setProtocol] = useState<"tcp" | "udp">("tcp");
   const [localHost, setLocalHost] = useState("127.0.0.1");
-  const [localPort, setLocalPort] = useState("8080");
-  const [remotePort, setRemotePort] = useState("18080");
+  const [localPort, setLocalPort] = useState("");
+  const [remotePort, setRemotePort] = useState("");
   const [enabled, setEnabled] = useState(true);
   const lastLoadIdRef = useRef(0);
+
+  const resetMappingForm = useCallback(() => {
+    setName("");
+    setProtocol("tcp");
+    setLocalHost("127.0.0.1");
+    setLocalPort("");
+    setRemotePort("");
+    setEnabled(true);
+  }, []);
 
   const loadData = useCallback(async (opts?: { background?: boolean; quietError?: boolean; withPorts?: boolean }) => {
     const loadId = ++lastLoadIdRef.current;
@@ -186,6 +226,26 @@ export default function TunnelPage({ session }: Props) {
   );
 
   const sortedListeningPorts = useMemo(() => sortedPorts(ports), [ports]);
+  const localPortOptions = useMemo(() => {
+    const options = new Map<number, string>();
+    for (const item of sortedListeningPorts) {
+      if (normalizeTunnelProtocol(item.protocol) !== protocol) {
+        continue;
+      }
+      if (!options.has(item.port)) {
+        options.set(item.port, listeningPortHint(item));
+      }
+    }
+    const keyword = localPort.trim().toLowerCase();
+    return [...options.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([port, hint]) => ({
+        port: String(port),
+        hint,
+      }))
+      .filter((item) => !keyword || item.port.includes(keyword) || item.hint.toLowerCase().includes(keyword))
+      .slice(0, 80);
+  }, [localPort, protocol, sortedListeningPorts]);
 
   const onSaveProxy = async () => {
     const parsedPort = Number(proxyPort);
@@ -211,6 +271,7 @@ export default function TunnelPage({ session }: Props) {
   const onUpsertMapping = async () => {
     const parsedLocalPort = Number(localPort);
     const parsedRemotePort = Number(remotePort);
+    const selectedProtocol = protocol === "udp" ? "udp" : "tcp";
     if (!Number.isFinite(parsedLocalPort) || parsedLocalPort <= 0 || parsedLocalPort > 65535) {
       toast.error(t("tunnel.invalid_local_port"));
       return;
@@ -222,6 +283,39 @@ export default function TunnelPage({ session }: Props) {
     if (!localHost.trim()) {
       toast.error(t("tunnel.invalid_local_host"));
       return;
+    }
+    if (enabled) {
+      const mappingPortConflict = mappings.find(
+        (item) =>
+          item.enabled &&
+          normalizeTunnelProtocol(item.protocol) === selectedProtocol &&
+          item.remote_port === parsedRemotePort
+      );
+      if (mappingPortConflict) {
+        toast.error(
+          t("tunnel.remote_port_conflict", {
+            port: parsedRemotePort,
+            protocol: selectedProtocol.toUpperCase(),
+          })
+        );
+        return;
+      }
+      if (isLocalTunnelProxyHost(proxyHost)) {
+        const occupied = ports.find(
+          (item) =>
+            normalizeTunnelProtocol(item.protocol) === selectedProtocol &&
+            item.port === parsedRemotePort
+        );
+        if (occupied) {
+          toast.error(
+            t("tunnel.remote_port_occupied", {
+              port: parsedRemotePort,
+              protocol: selectedProtocol.toUpperCase(),
+            })
+          );
+          return;
+        }
+      }
     }
 
     setBusy(true);
@@ -235,13 +329,23 @@ export default function TunnelPage({ session }: Props) {
         enabled,
       });
       if (!res.ok) {
-        toast.error(res.error ?? t("toast.request_failed"));
+        if (res.code === "port_occupied" || res.code === "conflict") {
+          toast.error(
+            res.error ??
+              t("tunnel.remote_port_occupied", {
+                port: parsedRemotePort,
+                protocol: selectedProtocol.toUpperCase(),
+              })
+          );
+        } else {
+          toast.error(res.error ?? t("toast.request_failed"));
+        }
         return;
       }
 
       toast.success(t("tunnel.mapping_saved"));
       const createdId = res.mapping?.id ?? "";
-      setName("");
+      resetMappingForm();
       setMappingDialogOpen(false);
       await loadData({ background: true, withPorts: false });
       if (createdId) {
@@ -338,7 +442,10 @@ export default function TunnelPage({ session }: Props) {
                 </button>
                 <button
                   className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-slate-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-slate-800 sm:w-auto sm:justify-start dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-200"
-                  onClick={() => setMappingDialogOpen(true)}
+                  onClick={() => {
+                    resetMappingForm();
+                    setMappingDialogOpen(true);
+                  }}
                 >
                   <FiPlus />
                   {t("tunnel.add_mapping")}
@@ -620,12 +727,21 @@ export default function TunnelPage({ session }: Props) {
                 placeholder={t("tunnel.local_port")}
                 value={localPort}
                 onChange={(event) => setLocalPort(event.target.value)}
+                list="tunnel-local-port-options"
+                inputMode="numeric"
+                autoComplete="off"
               />
+              <datalist id="tunnel-local-port-options">
+                {localPortOptions.map((item) => (
+                  <option key={`${protocol}-${item.port}`} value={item.port} label={item.hint} />
+                ))}
+              </datalist>
               <input
                 className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm dark:border-neutral-700 dark:bg-neutral-900"
                 placeholder={t("tunnel.remote_port")}
                 value={remotePort}
                 onChange={(event) => setRemotePort(event.target.value)}
+                inputMode="numeric"
               />
               <label className="inline-flex items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-300">
                 <span className="font-semibold">{t("tunnel.enabled")}</span>
