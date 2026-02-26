@@ -164,11 +164,13 @@ class ServerApp {
   void HandleLogsWsMessage(std::uintptr_t channel_key, const std::string& message);
   void HandleDockurrWsMessage(std::uintptr_t channel_key, const std::string& message);
   void HandleMonitorWsMessage(std::uintptr_t channel_key, const std::string& message);
+  void HandleTunnelWsMessage(std::uintptr_t channel_key, const std::string& message);
   void BroadcastTerminalOutput(const std::string& terminal_id, const std::string& chunk);
   void BroadcastLogEntry(const std::string& serialized_entry);
   void BroadcastNativeFrames();
   void BroadcastDockurrSnapshots();
   void BroadcastMonitorSnapshots();
+  void BroadcastTunnelSnapshots();
   void SyncNativeSubscribersToActiveSource();
   void SendToWs(std::uintptr_t channel_key, const std::string& payload);
   NativeCaptureDemand CollectNativeCaptureDemandLocked() const;

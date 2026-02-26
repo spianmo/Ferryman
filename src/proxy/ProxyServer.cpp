@@ -347,6 +347,7 @@ struct ProxyServer::Impl {
     std::string local_host;
     int local_port = 0;
     int remote_port = 0;
+    bool enabled = true;
     int listener_fd = -1;
     std::thread thread;
     std::atomic<bool> active{false};
@@ -504,9 +505,25 @@ struct ProxyServer::Impl {
     const int local_port = JsonIntValue(item, "local_port", 0);
     const std::string local_host = util::Trim(JsonStringValue(item, "local_host", "127.0.0.1"));
     const std::string name = JsonStringValue(item, "name", mapping_id);
+    const std::string mapping_key = MappingKey(client->id, mapping_id);
     const bool enabled = JsonBoolValue(item, "enabled", true);
     if (!enabled) {
-      RemoveMapping(MappingKey(client->id, mapping_id));
+      RemoveMapping(mapping_key);
+      auto mapping = std::make_shared<Mapping>();
+      mapping->key = mapping_key;
+      mapping->client_id = client->id;
+      mapping->mapping_id = mapping_id;
+      mapping->name = name;
+      mapping->protocol = protocol;
+      mapping->local_host = local_host.empty() ? "127.0.0.1" : local_host;
+      mapping->local_port = local_port;
+      mapping->remote_port = remote_port;
+      mapping->enabled = false;
+      mapping->active.store(false);
+      {
+        std::lock_guard<std::mutex> lock(state_mu);
+        mappings_by_key[mapping_key] = mapping;
+      }
       return true;
     }
 
@@ -517,7 +534,6 @@ struct ProxyServer::Impl {
       return false;
     }
 
-    const std::string mapping_key = MappingKey(client->id, mapping_id);
     const std::string port_key = PortKey(protocol, remote_port);
 
     std::shared_ptr<Mapping> existing;
@@ -568,6 +584,7 @@ struct ProxyServer::Impl {
     mapping->local_host = local_host.empty() ? "127.0.0.1" : local_host;
     mapping->local_port = local_port;
     mapping->remote_port = remote_port;
+    mapping->enabled = true;
     mapping->listener_fd = listener_fd;
     mapping->active.store(true);
 
@@ -1241,6 +1258,7 @@ struct ProxyServer::Impl {
           {"remote_port", mapping->remote_port},
           {"local_host", mapping->local_host},
           {"local_port", mapping->local_port},
+          {"enabled", mapping->enabled},
           {"active", mapping->active.load()},
           {"ingress_bytes", mapping->ingress_bytes.load()},
           {"egress_bytes", mapping->egress_bytes.load()},

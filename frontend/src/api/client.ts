@@ -569,7 +569,7 @@ export async function listListeningPorts(token: string) {
 
 export function wsUrl(
   session: SessionInfo,
-  path: "/ws/terminal" | "/ws/webrtc" | "/ws/logs" | "/ws/dockurr" | "/ws/monitor"
+  path: "/ws/terminal" | "/ws/webrtc" | "/ws/logs" | "/ws/dockurr" | "/ws/monitor" | "/ws/tunnel"
 ): string {
   const url = new URL(path, window.location.origin);
   url.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";

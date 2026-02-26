@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <csignal>
 #include <cstdlib>
@@ -15,6 +16,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #if defined(__linux__)
@@ -134,7 +136,7 @@ void PrintUsage() {
                "                [--log-file /var/log/ferryman-proxy.log] [--token TOKEN]\n"
                "  FerrymanProxy --list [--admin-host 127.0.0.1] [--admin-port 17001] [--token TOKEN]\n"
                "  FerrymanProxy --status [--admin-host 127.0.0.1] [--admin-port 17001] [--token TOKEN]\n"
-               "  FerrymanProxy --logs [N] [--admin-host 127.0.0.1] [--admin-port 17001] [--token TOKEN]\n";
+               "  FerrymanProxy --logs [N] [--admin-host 127.0.0.1] [--admin-port 17001] [--token TOKEN]  (streaming)\n";
 }
 
 #if defined(__linux__)
@@ -220,11 +222,11 @@ void PrintMappingsTable(const std::string& raw_json) {
   }
   const auto items = payload.value("mappings", nlohmann::json::array());
   if (!items.is_array() || items.empty()) {
-    std::cout << "No active mappings\n";
+    std::cout << "No mappings\n";
     return;
   }
 
-  std::cout << "mapping_id\tprotocol\tremote\tlocal\tclient\tactive\n";
+  std::cout << "mapping_id\tprotocol\tremote\tlocal\tclient\tenabled\tactive\n";
   for (const auto& item : items) {
     if (!item.is_object()) {
       continue;
@@ -232,8 +234,47 @@ void PrintMappingsTable(const std::string& raw_json) {
     std::cout << item.value("mapping_id", "") << '\t' << item.value("protocol", "") << '\t'
               << item.value("remote_port", 0) << '\t' << item.value("local_host", "") << ':'
               << item.value("local_port", 0) << '\t' << item.value("client_id", "") << '\t'
+              << (item.value("enabled", true) ? "yes" : "no") << '\t'
               << (item.value("active", false) ? "yes" : "no") << '\n';
   }
+}
+
+std::vector<std::string> ParseLogItems(const std::string& raw_json) {
+  std::vector<std::string> items;
+  const auto payload = nlohmann::json::parse(raw_json, nullptr, false);
+  if (payload.is_discarded() || !payload.is_object()) {
+    return items;
+  }
+  const auto entries = payload.value("items", nlohmann::json::array());
+  if (!entries.is_array()) {
+    return items;
+  }
+  items.reserve(entries.size());
+  for (const auto& entry : entries) {
+    if (entry.is_string()) {
+      items.push_back(entry.get<std::string>());
+    } else {
+      items.push_back(entry.dump());
+    }
+  }
+  return items;
+}
+
+size_t FindLogOverlap(const std::vector<std::string>& previous, const std::vector<std::string>& current) {
+  const size_t max_overlap = std::min(previous.size(), current.size());
+  for (size_t overlap = max_overlap; overlap > 0; --overlap) {
+    bool same = true;
+    for (size_t idx = 0; idx < overlap; ++idx) {
+      if (previous[previous.size() - overlap + idx] != current[idx]) {
+        same = false;
+        break;
+      }
+    }
+    if (same) {
+      return overlap;
+    }
+  }
+  return 0;
 }
 #endif
 
@@ -318,12 +359,37 @@ int main(int argc, char** argv) {
   }
 
   if (mode != "serve") {
+    if (mode == "logs") {
+      std::signal(SIGINT, HandleSignal);
+      std::signal(SIGTERM, HandleSignal);
+      std::vector<std::string> previous_items;
+      while (g_running.load()) {
+        std::string error;
+        const auto response =
+            QueryAdmin(options.admin_host, options.admin_port, "LOGS " + std::to_string(logs_limit), options.auth_token, &error);
+        if (!response.has_value()) {
+          std::cerr << "admin query failed: " << (error.empty() ? "unknown error" : error) << '\n';
+          std::this_thread::sleep_for(std::chrono::milliseconds(800));
+          continue;
+        }
+        const auto current_items = ParseLogItems(*response);
+        if (!current_items.empty()) {
+          const size_t overlap = FindLogOverlap(previous_items, current_items);
+          for (size_t i = overlap; i < current_items.size(); ++i) {
+            std::cout << current_items[i] << '\n';
+          }
+          std::cout.flush();
+          previous_items = current_items;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(700));
+      }
+      return 0;
+    }
+
     std::string error;
     std::string command = "LIST";
     if (mode == "status") {
       command = "STATUS";
-    } else if (mode == "logs") {
-      command = "LOGS " + std::to_string(logs_limit);
     }
     const auto response = QueryAdmin(options.admin_host, options.admin_port, command, options.auth_token, &error);
     if (!response.has_value()) {

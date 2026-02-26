@@ -269,7 +269,7 @@ export default function App() {
       case "monitor":
         return <MonitorPage session={session} />;
       case "tunnel":
-        return <TunnelPage token={session.token} />;
+        return <TunnelPage session={session} />;
       case "logs":
         return <LogsPage session={session} />;
       default:

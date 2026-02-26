@@ -980,6 +980,18 @@ std::string SerializeTunnelSnapshot(const tunnel::TunnelMappingSnapshot& snapsho
   });
 }
 
+std::string BuildTunnelSnapshotPayload(const std::vector<tunnel::TunnelMappingSnapshot>& snapshots) {
+  std::vector<std::string> serialized;
+  serialized.reserve(snapshots.size());
+  for (const auto& snapshot : snapshots) {
+    serialized.push_back(SerializeTunnelSnapshot(snapshot));
+  }
+  return api::Success({
+      {"event", "tunnel_snapshot", false},
+      {"mappings", JsonArray(serialized), true},
+  });
+}
+
 std::string BuildDockurrSnapshotPayload(const std::vector<dockurr::VmInfo>& vms) {
   std::vector<std::string> serialized;
   serialized.reserve(vms.size());
@@ -1016,6 +1028,9 @@ ServerApp::ServerApp(core::AppConfig config)
 #if FERRYMAN_WITH_LIBHV
   audit_logger_.SetRealtimeCallback([this](const std::string& serialized_entry) {
     BroadcastLogEntry(serialized_entry);
+  });
+  tunnel_manager_.SetRuntimeUpdateCallback([this]() {
+    BroadcastTunnelSnapshots();
   });
 #endif
 }
@@ -2733,6 +2748,15 @@ int ServerApp::HandleTunnelConfigUpdate(HttpRequest* req, HttpResponse* resp) {
   if (!next_host.empty() && (next_port <= 0 || next_port > 65535)) {
     return Json(resp, 400, api::Error("proxy_port is invalid"));
   }
+  if (!next_host.empty()) {
+    std::string probe_detail;
+    if (!tunnel_manager_.ProbeProxyEndpoint(next_host, next_port, next_token, &probe_detail)) {
+      const std::string endpoint = next_host + ":" + std::to_string(next_port);
+      const std::string message = "failed to connect FerrymanProxy at " + endpoint +
+                                  (probe_detail.empty() ? std::string() : " (" + probe_detail + ")");
+      return Json(resp, 400, api::Error(message, "proxy_unreachable"));
+    }
+  }
 
   {
     std::lock_guard<std::mutex> lock(tunnel_mu_);
@@ -3261,6 +3285,8 @@ void ServerApp::HandleWsOpen(const WebSocketChannelPtr& channel, const HttpReque
     channel_type = "dockurr";
   } else if (ws_path == "/ws/monitor") {
     channel_type = "monitor";
+  } else if (ws_path == "/ws/tunnel") {
+    channel_type = "tunnel";
   } else {
     audit_logger_.Append(session->token, "ws.open.reject", "unknown path: " + req->path);
     channel->send(api::Error("unknown websocket path"));
@@ -3306,6 +3332,8 @@ void ServerApp::HandleWsOpen(const WebSocketChannelPtr& channel, const HttpReque
         {"event", "monitor_snapshot", false},
         {"snapshot", system_monitor_.SnapshotJson(), true},
     }));
+  } else if (channel_type == "tunnel") {
+    channel->send(BuildTunnelSnapshotPayload(tunnel_manager_.Snapshot()));
   }
 }
 
@@ -3331,6 +3359,8 @@ void ServerApp::HandleWsMessage(const WebSocketChannelPtr& channel, const std::s
     HandleDockurrWsMessage(key, message);
   } else if (channel_type == "monitor") {
     HandleMonitorWsMessage(key, message);
+  } else if (channel_type == "tunnel") {
+    HandleTunnelWsMessage(key, message);
   } else {
     audit_logger_.AppendSystem("warn", "ws.message.reject", "unknown channel type");
   }
@@ -3749,6 +3779,28 @@ void ServerApp::BroadcastMonitorSnapshots() {
     }
 
     std::this_thread::sleep_for(std::chrono::milliseconds(kMonitorSnapshotIntervalMs));
+  }
+}
+
+void ServerApp::BroadcastTunnelSnapshots() {
+  std::vector<std::uintptr_t> channels;
+  {
+    std::lock_guard<std::mutex> lock(ws_mu_);
+    channels.reserve(ws_clients_.size());
+    for (const auto& [channel_key, client] : ws_clients_) {
+      if (client.channel_type == "tunnel" && client.channel) {
+        channels.push_back(channel_key);
+      }
+    }
+  }
+
+  if (channels.empty()) {
+    return;
+  }
+
+  const std::string payload = BuildTunnelSnapshotPayload(tunnel_manager_.Snapshot());
+  for (const auto& channel_key : channels) {
+    SendToWs(channel_key, payload);
   }
 }
 
@@ -4299,6 +4351,46 @@ void ServerApp::HandleMonitorWsMessage(std::uintptr_t channel_key, const std::st
   }
 
   SendToWs(channel_key, api::Error("unknown monitor action"));
+}
+
+void ServerApp::HandleTunnelWsMessage(std::uintptr_t channel_key, const std::string& message) {
+  const auto payload = ParseJsonOrNull(message);
+  if (!payload.has_value() || !payload->is_object()) {
+    SendToWs(channel_key, api::Error("invalid json payload"));
+    return;
+  }
+
+  WsClient client;
+  {
+    std::lock_guard<std::mutex> lock(ws_mu_);
+    auto it = ws_clients_.find(channel_key);
+    if (it == ws_clients_.end()) {
+      return;
+    }
+    client = it->second;
+  }
+
+  auto session = session_manager_.GetSession(client.session_token);
+  if (!session.has_value()) {
+    SendToWs(channel_key, api::Error("session expired", "unauthorized"));
+    return;
+  }
+  (void)session;
+
+  const std::string action = JsonString(payload, "action", "snapshot");
+  if (action == "snapshot" || action == "refresh") {
+    SendToWs(channel_key, BuildTunnelSnapshotPayload(tunnel_manager_.Snapshot()));
+    return;
+  }
+
+  if (action == "ping") {
+    SendToWs(channel_key, api::Success({
+        {"event", "tunnel_pong", false},
+    }));
+    return;
+  }
+
+  SendToWs(channel_key, api::Error("unknown tunnel action"));
 }
 
 #endif

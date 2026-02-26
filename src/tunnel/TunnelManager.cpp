@@ -14,6 +14,7 @@
 #include <cerrno>
 #include <condition_variable>
 #include <cstring>
+#include <functional>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
@@ -287,6 +288,141 @@ bool TcpProbe(const std::string& host, int port, int timeout_ms, std::string* de
   return true;
 }
 
+bool ReceiveLineWithTimeout(int fd, int timeout_ms, std::string* line, std::string* error) {
+  if (line == nullptr) {
+    if (error != nullptr) {
+      *error = "missing output target";
+    }
+    return false;
+  }
+  line->clear();
+  if (fd < 0) {
+    if (error != nullptr) {
+      *error = "invalid socket";
+    }
+    return false;
+  }
+
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(std::max(1, timeout_ms));
+  std::array<char, 1> ch{};
+  while (line->size() < 8192) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) {
+      if (error != nullptr) {
+        *error = "proxy handshake timeout";
+      }
+      return false;
+    }
+
+    const int remaining_ms =
+        static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
+    struct timeval timeout {};
+    timeout.tv_sec = remaining_ms / 1000;
+    timeout.tv_usec = (remaining_ms % 1000) * 1000;
+    fd_set read_fds;
+    FD_ZERO(&read_fds);
+    FD_SET(fd, &read_fds);
+    const int selected = ::select(fd + 1, &read_fds, nullptr, nullptr, &timeout);
+    if (selected == 0) {
+      if (error != nullptr) {
+        *error = "proxy handshake timeout";
+      }
+      return false;
+    }
+    if (selected < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      if (error != nullptr) {
+        *error = "select failed";
+      }
+      return false;
+    }
+    if (!FD_ISSET(fd, &read_fds)) {
+      continue;
+    }
+
+    const ssize_t n = ::recv(fd, ch.data(), 1, 0);
+    if (n <= 0) {
+      if (error != nullptr) {
+        *error = "proxy closed connection";
+      }
+      return false;
+    }
+    if (ch[0] == '\n') {
+      return true;
+    }
+    line->push_back(ch[0]);
+  }
+
+  if (error != nullptr) {
+    *error = "proxy handshake payload too large";
+  }
+  return false;
+}
+
+bool ProbeProxyControlEndpoint(const std::string& host, int port, const std::string& token, std::string* detail) {
+  std::string connect_error;
+  const int fd = ConnectTcpWithTimeout(host, port, 2500, &connect_error);
+  if (fd < 0) {
+    if (detail != nullptr) {
+      *detail = connect_error.empty() ? "failed to connect proxy control endpoint" : connect_error;
+    }
+    return false;
+  }
+
+  const json hello_payload = {
+      {"type", "hello"},
+      {"client_id", "probe-" + util::RandomHex(8)},
+      {"version", "1"},
+      {"auth_token", util::Trim(token)},
+  };
+  const std::string hello_line = hello_payload.dump() + "\n";
+  if (!SendAll(fd, hello_line.data(), hello_line.size())) {
+    CloseSocket(fd);
+    if (detail != nullptr) {
+      *detail = "failed to send proxy handshake";
+    }
+    return false;
+  }
+
+  std::string response_line;
+  std::string response_error;
+  const bool read_ok = ReceiveLineWithTimeout(fd, 2500, &response_line, &response_error);
+  CloseSocket(fd);
+  if (!read_ok) {
+    if (detail != nullptr) {
+      *detail = response_error.empty() ? "failed to receive proxy handshake response" : response_error;
+    }
+    return false;
+  }
+
+  const json response_payload = json::parse(util::Trim(response_line), nullptr, false);
+  if (response_payload.is_discarded() || !response_payload.is_object()) {
+    if (detail != nullptr) {
+      *detail = "proxy returned invalid handshake response";
+    }
+    return false;
+  }
+  if (JsonStringValue(response_payload, "type") != "hello_ack") {
+    if (detail != nullptr) {
+      *detail = "unexpected proxy handshake response";
+    }
+    return false;
+  }
+  if (!JsonBoolValue(response_payload, "ok", false)) {
+    if (detail != nullptr) {
+      *detail = JsonStringValue(response_payload, "error", "proxy authentication failed");
+    }
+    return false;
+  }
+
+  if (detail != nullptr) {
+    *detail = "ok";
+  }
+  return true;
+}
+
 void BridgeOneWay(int from_fd, int to_fd, std::atomic<bool>* stop_flag) {
   std::array<char, 16 * 1024> buffer{};
   while (!stop_flag->load()) {
@@ -414,6 +550,7 @@ struct TunnelManager::Impl {
   std::string proxy_token;
   std::vector<core::TunnelMappingConfig> mappings;
   std::unordered_map<std::string, TunnelMappingRuntime> runtime_by_id;
+  std::function<void()> runtime_update_callback;
   bool sync_needed = false;
 
   std::atomic<bool> running{false};
@@ -436,16 +573,41 @@ struct TunnelManager::Impl {
     }
   }
 
+  void NotifyRuntimeUpdated() {
+    std::function<void()> callback;
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      callback = runtime_update_callback;
+    }
+    if (callback) {
+      callback();
+    }
+  }
+
+  void SetRuntimeUpdateCallback(std::function<void()> callback) {
+    std::lock_guard<std::mutex> lock(mu);
+    runtime_update_callback = std::move(callback);
+  }
+
   void SetRuntime(const std::string& mapping_id, bool active, const std::string& status, const std::string& detail) {
     if (mapping_id.empty()) {
       return;
     }
-    std::lock_guard<std::mutex> lock(mu);
-    auto& runtime = runtime_by_id[mapping_id];
-    runtime.active = active;
-    runtime.status = status;
-    runtime.detail = detail;
-    runtime.updated_at = RuntimeNow();
+    bool changed = false;
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      auto& runtime = runtime_by_id[mapping_id];
+      if (runtime.active != active || runtime.status != status || runtime.detail != detail) {
+        runtime.active = active;
+        runtime.status = status;
+        runtime.detail = detail;
+        runtime.updated_at = RuntimeNow();
+        changed = true;
+      }
+    }
+    if (changed) {
+      NotifyRuntimeUpdated();
+    }
   }
 
   void FailAllPendingTests(const std::string& detail) {
@@ -496,20 +658,19 @@ struct TunnelManager::Impl {
       }
       sync_needed = true;
     }
+    NotifyRuntimeUpdated();
   }
 
 #if defined(_WIN32)
   void RunWorker() {
     while (running.load()) {
+      std::vector<core::TunnelMappingConfig> local_mappings;
       {
         std::lock_guard<std::mutex> lock(mu);
-        for (const auto& mapping : mappings) {
-          auto& runtime = runtime_by_id[mapping.id];
-          runtime.active = false;
-          runtime.status = "unsupported";
-          runtime.detail = "tunnel is not supported on this platform";
-          runtime.updated_at = RuntimeNow();
-        }
+        local_mappings = mappings;
+      }
+      for (const auto& mapping : local_mappings) {
+        SetRuntime(mapping.id, false, "unsupported", "tunnel is not supported on this platform");
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(1200));
     }
@@ -567,6 +728,29 @@ struct TunnelManager::Impl {
   std::tuple<std::string, int, std::string> ProxyAddressSnapshot() const {
     std::lock_guard<std::mutex> lock(mu);
     return {proxy_host, proxy_port, proxy_token};
+  }
+
+  bool ProbeProxyEndpoint(const std::string& host, int port, const std::string& token, std::string* detail) const {
+    const std::string normalized_host = util::Trim(host);
+    const std::string normalized_token = util::Trim(token);
+    const int normalized_port = (port > 0 && port <= 65535) ? port : kDefaultProxyPort;
+    if (normalized_host.empty()) {
+      if (detail != nullptr) {
+        *detail = "proxy host is required";
+      }
+      return false;
+    }
+#if defined(_WIN32)
+    (void)normalized_host;
+    (void)normalized_port;
+    (void)normalized_token;
+    if (detail != nullptr) {
+      *detail = "proxy connectivity probe is not supported on this platform";
+    }
+    return true;
+#else
+    return ProbeProxyControlEndpoint(normalized_host, normalized_port, normalized_token, detail);
+#endif
   }
 
   void HandleSyncResult(const json& payload) {
@@ -1144,6 +1328,15 @@ std::vector<TunnelMappingSnapshot> TunnelManager::Snapshot() const {
     });
   }
   return snapshots;
+}
+
+void TunnelManager::SetRuntimeUpdateCallback(std::function<void()> callback) {
+  impl_->SetRuntimeUpdateCallback(std::move(callback));
+}
+
+bool TunnelManager::ProbeProxyEndpoint(const std::string& proxy_host, int proxy_port, const std::string& proxy_token,
+                                       std::string* detail) const {
+  return impl_->ProbeProxyEndpoint(proxy_host, proxy_port, proxy_token, detail);
 }
 
 bool TunnelManager::TestMapping(const std::string& mapping_id, bool* success, std::string* detail, int timeout_ms) {

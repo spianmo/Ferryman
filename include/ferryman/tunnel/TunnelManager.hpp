@@ -2,6 +2,7 @@
 
 #include "ferryman/core/ConfigManager.hpp"
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -42,6 +43,11 @@ class TunnelManager {
   int ProxyPort() const;
   std::vector<core::TunnelMappingConfig> Mappings() const;
   std::vector<TunnelMappingSnapshot> Snapshot() const;
+
+  void SetRuntimeUpdateCallback(std::function<void()> callback);
+
+  bool ProbeProxyEndpoint(const std::string& proxy_host, int proxy_port, const std::string& proxy_token,
+                          std::string* detail) const;
 
   bool TestMapping(const std::string& mapping_id, bool* success, std::string* detail, int timeout_ms = 5000);
 

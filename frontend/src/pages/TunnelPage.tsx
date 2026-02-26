@@ -11,11 +11,12 @@ import {
 } from "../api/client";
 import { useI18n } from "../i18n";
 import { toast } from "../toast";
-import type { ListeningPortInfo, TunnelMappingState } from "../types";
+import type { ListeningPortInfo, SessionInfo, TunnelMappingState } from "../types";
 import { cn } from "../util/cn";
+import { getTunnelSocket } from "../ws/tunnelSocket";
 
 type Props = {
-  token: string;
+  session: SessionInfo;
 };
 
 function normalizeStatusText(value: string) {
@@ -62,8 +63,10 @@ function sortedPorts(items: ListeningPortInfo[]) {
   });
 }
 
-export default function TunnelPage({ token }: Props) {
+export default function TunnelPage({ session }: Props) {
+  const token = session.token;
   const { t } = useI18n();
+  const tunnelSocket = useMemo(() => getTunnelSocket(), []);
   const [loading, setLoading] = useState(true);
   const [savingConfig, setSavingConfig] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -130,6 +133,24 @@ export default function TunnelPage({ token }: Props) {
     void loadData();
   }, [loadData]);
 
+  useEffect(() => {
+    const unsubscribeMessages = tunnelSocket.subscribeMessages((payload) => {
+      if (String(payload.event ?? "") !== "tunnel_snapshot") {
+        return;
+      }
+      if (!Array.isArray(payload.mappings)) {
+        return;
+      }
+      setMappings(payload.mappings as TunnelMappingState[]);
+    });
+
+    tunnelSocket.start(session);
+    return () => {
+      unsubscribeMessages();
+      tunnelSocket.stop();
+    };
+  }, [session, tunnelSocket]);
+
   const runTest = useCallback(
     async (mappingId: string) => {
       if (!mappingId) return;
@@ -165,19 +186,6 @@ export default function TunnelPage({ token }: Props) {
   );
 
   const sortedListeningPorts = useMemo(() => sortedPorts(ports), [ports]);
-  const hasPendingMappings = useMemo(() => mappings.some((item) => isPendingStatus(item.status, item.detail)), [mappings]);
-
-  useEffect(() => {
-    if (!hasPendingMappings) {
-      return;
-    }
-    const timer = window.setInterval(() => {
-      void loadData({ background: true, quietError: true, withPorts: false });
-    }, 2000);
-    return () => {
-      window.clearInterval(timer);
-    };
-  }, [hasPendingMappings, loadData]);
 
   const onSaveProxy = async () => {
     const parsedPort = Number(proxyPort);
