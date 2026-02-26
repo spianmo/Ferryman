@@ -578,7 +578,7 @@ std::vector<ContainerInfo> DockerManager::ListContainers(bool include_all, std::
   return containers;
 }
 
-bool DockerManager::StartService(std::string* error) const {
+bool DockerManager::StartDockerService(std::string* error) const {
   CommandResult probe;
   std::string probe_error;
   if (RunCommand({"docker", "info", "--format", "{{.ServerVersion}}"}, &probe, &probe_error)) {
