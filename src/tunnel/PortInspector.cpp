@@ -134,7 +134,7 @@ std::vector<ListeningPortInfo> ListLinuxListeningPorts() {
     return out;
   }
 
-  static const std::regex kProcessPattern(R"("([^"]+)",pid=([0-9]+))");
+  static const std::regex kProcessPattern(R"PROC("([^"]+)",pid=([0-9]+))PROC");
 
   std::istringstream lines(raw);
   for (std::string line; std::getline(lines, line);) {
