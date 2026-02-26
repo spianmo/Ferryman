@@ -18,6 +18,7 @@ import {
   FiFileText,
   FiFolder,
   FiHardDrive,
+  FiPlay,
   FiPlus,
   FiRefreshCw,
   FiRotateCw,
@@ -1403,7 +1404,7 @@ export default function DockurrPage({ session }: Props) {
                   onClick={() => (selectedVmRunning ? runStop(selectedVm) : runStart(selectedVm))}
                   disabled={actionLoading.length > 0}
                 >
-                  <FiSquare /> {selectedVmRunning ? t("dockurr.stop") : t("dockurr.start")}
+                  {selectedVmRunning ? <FiSquare /> : <FiPlay />} {selectedVmRunning ? t("dockurr.stop") : t("dockurr.start")}
                 </button>
                 <button
                   className={cn(
