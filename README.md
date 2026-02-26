@@ -200,6 +200,9 @@ https_port=18443
 tls_cert_file=
 tls_key_file=
 ws_port=18080
+tunnel_proxy_host=
+tunnel_proxy_port=17000
+tunnel_mappings_json=[]
 ```
 
 Note:
@@ -209,6 +212,53 @@ Note:
 - If `tls_cert_file`/`tls_key_file` are empty, Ferryman auto-generates `~/.ferryman/cert/server.crt` and `~/.ferryman/cert/server.key` on first HTTPS startup.
 - Auto-generated certificate paths are written back into `~/.ferryman/config.ini` (`tls_cert_file` / `tls_key_file`).
 - Ferryman also initializes `~/.ferryman/logs/` and reserves `audit.log` path for audit output.
+- `tunnel_proxy_host/tunnel_proxy_port/tunnel_mappings_json` are used by the built-in tunnel panel for NAT traversal settings.
+
+## FerrymanProxy (Linux)
+
+`FerrymanProxy` is a standalone public proxy server (Linux-only) for Ferryman reverse TCP/UDP port mappings.
+
+Build the standalone target:
+
+```bash
+cmake --build build --target FerrymanProxy -j
+# or
+make build-proxy
+```
+
+Run the proxy server:
+
+```bash
+./build/FerrymanProxy --bind 0.0.0.0 --control-port 17000 --admin-host 127.0.0.1 --admin-port 17001 --log-file /var/log/ferryman-proxy.log
+```
+
+One-click deployment on public Linux (install binary + systemd + firewall):
+
+```bash
+sudo ./scripts/deploy_ferryman_proxy.sh \
+  --bin ./build/FerrymanProxy \
+  --bind 0.0.0.0 \
+  --control-port 17000 \
+  --admin-host 127.0.0.1 \
+  --admin-port 17001
+```
+
+CLI inspect current mappings and modes:
+
+```bash
+./build/FerrymanProxy --list --admin-host 127.0.0.1 --admin-port 17001
+./build/FerrymanProxy --status --admin-host 127.0.0.1 --admin-port 17001
+./build/FerrymanProxy --logs 200 --admin-host 127.0.0.1 --admin-port 17001
+```
+
+Enable at boot via systemd template:
+
+```bash
+sudo cp scripts/ferryman-proxy.service /etc/systemd/system/ferryman-proxy.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now ferryman-proxy
+sudo systemctl status ferryman-proxy
+```
 
 ## HTTP API
 
@@ -226,6 +276,12 @@ Note:
 | `GET` | `/api/screen/capabilities` | Screen capability negotiation |
 | `POST` | `/api/screen/input` | Native input injection |
 | `GET` | `/api/health` | Health check |
+| `GET` | `/api/tunnel/state` | Tunnel config + mapping runtime state |
+| `POST` | `/api/tunnel/config` | Update FerrymanProxy host/port and persist |
+| `POST` | `/api/tunnel/mapping/upsert` | Add or update one TCP/UDP mapping |
+| `POST` | `/api/tunnel/mapping/delete` | Delete one mapping |
+| `POST` | `/api/tunnel/mapping/test` | Test one mapping and return pass/fail detail |
+| `GET` | `/api/tunnel/ports` | List local listening ports/process/pid |
 
 ## WebSocket Channels
 

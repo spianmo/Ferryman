@@ -133,3 +133,31 @@ export type MonitorSnapshot = {
     }>;
   };
 };
+
+export type TunnelMappingState = {
+  id: string;
+  name: string;
+  protocol: "tcp" | "udp" | string;
+  local_host: string;
+  local_port: number;
+  remote_port: number;
+  enabled: boolean;
+  active: boolean;
+  status: string;
+  detail: string;
+  updated_at: string;
+};
+
+export type TunnelState = {
+  proxy_host: string;
+  proxy_port: number;
+  mappings: TunnelMappingState[];
+};
+
+export type ListeningPortInfo = {
+  protocol: "tcp" | "udp" | string;
+  address: string;
+  port: number;
+  process: string;
+  pid: number;
+};

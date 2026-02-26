@@ -1,6 +1,7 @@
 #include "ferryman/web/ServerApp.hpp"
 
 #include "ferryman/api/ResponseUtil.hpp"
+#include "ferryman/tunnel/PortInspector.hpp"
 #include "ferryman/util/Random.hpp"
 #include "ferryman/util/StringUtil.hpp"
 #include "ferryman/util/Time.hpp"
@@ -15,6 +16,7 @@
 #include <fstream>
 #include <iostream>
 #include <nlohmann/json.hpp>
+#include <set>
 #include <sstream>
 #include <thread>
 #include <vector>
@@ -48,6 +50,10 @@ constexpr uint8_t kNativeBinaryCodecAV1 = 6;
 constexpr int kDockurrSnapshotIntervalMs = 1000;
 constexpr int kMonitorSnapshotIntervalMs = 1000;
 constexpr int kDockurrCreateLogWaitSeconds = 90;
+
+std::string JsonString(const std::optional<json>& payload, const char* key, const std::string& fallback);
+bool JsonBool(const std::optional<json>& payload, const char* key, bool fallback);
+int JsonInt(const std::optional<json>& payload, const char* key, int fallback);
 
 std::string ToLower(std::string value) {
   std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
@@ -374,6 +380,87 @@ bool PersistTlsPathsToConfig(const core::AppConfig& config, const std::filesyste
                             {
                                 {"tls_cert_file", NormalizePathForIni(crt_path)},
                                 {"tls_key_file", NormalizePathForIni(key_path)},
+                            },
+                            error);
+}
+
+std::string NormalizeTunnelProtocol(std::string protocol) {
+  protocol = ToLower(util::Trim(protocol));
+  if (protocol == "udp") {
+    return "udp";
+  }
+  return "tcp";
+}
+
+bool TunnelPortValid(int port) {
+  return port > 0 && port <= 65535;
+}
+
+std::optional<core::TunnelMappingConfig> ParseTunnelMappingFromJson(const std::optional<json>& payload,
+                                                                    const std::string& fallback_id = "") {
+  if (!payload.has_value() || !payload->is_object()) {
+    return std::nullopt;
+  }
+
+  core::TunnelMappingConfig mapping;
+  mapping.id = util::Trim(JsonString(payload, "id", fallback_id));
+  if (mapping.id.empty()) {
+    mapping.id = "map-" + util::RandomHex(12);
+  }
+  mapping.name = util::Trim(JsonString(payload, "name", ""));
+  if (mapping.name.empty()) {
+    mapping.name = mapping.id;
+  }
+  mapping.protocol = NormalizeTunnelProtocol(JsonString(payload, "protocol", "tcp"));
+  mapping.local_host = util::Trim(JsonString(payload, "local_host", "127.0.0.1"));
+  if (mapping.local_host.empty()) {
+    mapping.local_host = "127.0.0.1";
+  }
+  mapping.local_port = JsonInt(payload, "local_port", 0);
+  mapping.remote_port = JsonInt(payload, "remote_port", 0);
+  mapping.enabled = JsonBool(payload, "enabled", true);
+
+  if (!TunnelPortValid(mapping.local_port) || !TunnelPortValid(mapping.remote_port)) {
+    return std::nullopt;
+  }
+  return mapping;
+}
+
+std::string SerializeTunnelMappingConfig(const core::TunnelMappingConfig& mapping) {
+  return util::BuildJsonObject({
+      {"id", mapping.id, false},
+      {"name", mapping.name, false},
+      {"protocol", NormalizeTunnelProtocol(mapping.protocol), false},
+      {"local_host", mapping.local_host.empty() ? "127.0.0.1" : mapping.local_host, false},
+      {"local_port", std::to_string(mapping.local_port), true},
+      {"remote_port", std::to_string(mapping.remote_port), true},
+      {"enabled", mapping.enabled ? "true" : "false", true},
+  });
+}
+
+std::string SerializeTunnelMappingsJsonForConfig(const std::vector<core::TunnelMappingConfig>& mappings) {
+  json arr = json::array();
+  for (const auto& mapping : mappings) {
+    arr.push_back({
+        {"id", mapping.id},
+        {"name", mapping.name},
+        {"protocol", NormalizeTunnelProtocol(mapping.protocol)},
+        {"local_host", mapping.local_host.empty() ? "127.0.0.1" : mapping.local_host},
+        {"local_port", mapping.local_port},
+        {"remote_port", mapping.remote_port},
+        {"enabled", mapping.enabled},
+    });
+  }
+  return arr.dump();
+}
+
+bool PersistTunnelConfigToDisk(const core::AppConfig& config, const std::string& proxy_host, int proxy_port,
+                               const std::vector<core::TunnelMappingConfig>& mappings, std::string* error) {
+  return UpsertConfigValues(config.config_path,
+                            {
+                                {"tunnel_proxy_host", util::Trim(proxy_host)},
+                                {"tunnel_proxy_port", std::to_string(proxy_port)},
+                                {"tunnel_mappings_json", SerializeTunnelMappingsJsonForConfig(mappings)},
                             },
                             error);
 }
@@ -812,6 +899,22 @@ std::string SerializeStringArray(const std::vector<std::string>& values) {
   return JsonArray(items);
 }
 
+std::string SerializeTunnelSnapshot(const tunnel::TunnelMappingSnapshot& snapshot) {
+  return util::BuildJsonObject({
+      {"id", snapshot.mapping.id, false},
+      {"name", snapshot.mapping.name, false},
+      {"protocol", NormalizeTunnelProtocol(snapshot.mapping.protocol), false},
+      {"local_host", snapshot.mapping.local_host.empty() ? "127.0.0.1" : snapshot.mapping.local_host, false},
+      {"local_port", std::to_string(snapshot.mapping.local_port), true},
+      {"remote_port", std::to_string(snapshot.mapping.remote_port), true},
+      {"enabled", snapshot.mapping.enabled ? "true" : "false", true},
+      {"active", snapshot.runtime.active ? "true" : "false", true},
+      {"status", snapshot.runtime.status, false},
+      {"detail", snapshot.runtime.detail, false},
+      {"updated_at", snapshot.runtime.updated_at, false},
+  });
+}
+
 std::string BuildDockurrSnapshotPayload(const std::vector<dockurr::VmInfo>& vms) {
   std::vector<std::string> serialized;
   serialized.reserve(vms.size());
@@ -843,7 +946,8 @@ ServerApp::ServerApp(core::AppConfig config)
       audit_logger_(config_.audit_log_path),
       file_service_(config_.workspace_root),
       docker_manager_(config_.workspace_root),
-      dockurr_manager_(config_.workspace_root) {
+      dockurr_manager_(config_.workspace_root),
+      tunnel_manager_(&audit_logger_) {
 #if FERRYMAN_WITH_LIBHV
   audit_logger_.SetRealtimeCallback([this](const std::string& serialized_entry) {
     BroadcastLogEntry(serialized_entry);
@@ -867,11 +971,15 @@ bool ServerApp::Start() {
   // WebSocket and HTTP share one listener.
   config_.ws_port = config_.http_port;
 
+  tunnel_manager_.Configure(config_.tunnel_proxy_host, config_.tunnel_proxy_port, config_.tunnel_mappings);
+  tunnel_manager_.Start();
+
   // Disable libhv file logger to avoid generating libhv.yyyymmdd.log files.
   hlog_set_handler(stderr_logger);
 
   if (!RegisterHttpRoutes() || !RegisterWsHandlers()) {
     audit_logger_.AppendSystem("error", "server.start", "failed to register HTTP/WS routes");
+    tunnel_manager_.Stop();
     running_ = false;
     return false;
   }
@@ -1031,6 +1139,7 @@ void ServerApp::Stop() {
   active_capture_video_bitrate_bps_ = kNativeBitrateDefaultBps;
 #endif
   pty_manager_.Shutdown();
+  tunnel_manager_.Stop();
   if (was_running) {
     std::vector<std::string> stopped_names;
     std::string cleanup_error;
@@ -1194,6 +1303,30 @@ bool ServerApp::RegisterHttpRoutes() {
 
   http_service_.POST("/api/screen/upload/cancel", [this](HttpRequest* req, HttpResponse* resp) {
     return HandleScreenUploadCancel(req, resp);
+  });
+
+  http_service_.GET("/api/tunnel/state", [this](HttpRequest* req, HttpResponse* resp) {
+    return HandleTunnelState(req, resp);
+  });
+
+  http_service_.POST("/api/tunnel/config", [this](HttpRequest* req, HttpResponse* resp) {
+    return HandleTunnelConfigUpdate(req, resp);
+  });
+
+  http_service_.POST("/api/tunnel/mapping/upsert", [this](HttpRequest* req, HttpResponse* resp) {
+    return HandleTunnelMappingUpsert(req, resp);
+  });
+
+  http_service_.POST("/api/tunnel/mapping/delete", [this](HttpRequest* req, HttpResponse* resp) {
+    return HandleTunnelMappingDelete(req, resp);
+  });
+
+  http_service_.POST("/api/tunnel/mapping/test", [this](HttpRequest* req, HttpResponse* resp) {
+    return HandleTunnelMappingTest(req, resp);
+  });
+
+  http_service_.GET("/api/tunnel/ports", [this](HttpRequest* req, HttpResponse* resp) {
+    return HandleTunnelPorts(req, resp);
   });
 
   http_service_.GET("/", [this](HttpRequest* req, HttpResponse* resp) {
@@ -2461,6 +2594,276 @@ int ServerApp::HandleScreenUploadCancel(HttpRequest* req, HttpResponse* resp) {
   return Json(resp, 200, api::Success({
                              {"transfer_id", transfer_id, false},
                              {"cancelled", found ? "true" : "false", true},
+                         }));
+}
+
+int ServerApp::HandleTunnelState(HttpRequest* req, HttpResponse* resp) {
+  auto session = RequireSession(req, resp);
+  if (!session.has_value()) {
+    return resp->status_code;
+  }
+
+  std::string proxy_host;
+  int proxy_port = 0;
+  {
+    std::lock_guard<std::mutex> lock(tunnel_mu_);
+    proxy_host = config_.tunnel_proxy_host;
+    proxy_port = config_.tunnel_proxy_port;
+  }
+
+  const auto snapshots = tunnel_manager_.Snapshot();
+  std::vector<std::string> serialized;
+  serialized.reserve(snapshots.size());
+  for (const auto& snapshot : snapshots) {
+    serialized.push_back(SerializeTunnelSnapshot(snapshot));
+  }
+
+  return Json(resp, 200, api::Success({
+                             {"proxy_host", proxy_host, false},
+                             {"proxy_port", std::to_string(proxy_port), true},
+                             {"mappings", JsonArray(serialized), true},
+                         }));
+}
+
+int ServerApp::HandleTunnelConfigUpdate(HttpRequest* req, HttpResponse* resp) {
+  auto session = RequireSession(req, resp);
+  if (!session.has_value()) {
+    return resp->status_code;
+  }
+
+  const auto payload = ParseJsonOrNull(req->body);
+  const std::string requested_host = util::Trim(JsonString(payload, "proxy_host", QueryOf(req, "proxy_host")));
+  const int requested_port = JsonInt(payload, "proxy_port", ParseInt(QueryOf(req, "proxy_port"), 0));
+
+  std::string previous_host;
+  int previous_port = 0;
+  std::vector<core::TunnelMappingConfig> mappings;
+  {
+    std::lock_guard<std::mutex> lock(tunnel_mu_);
+    previous_host = config_.tunnel_proxy_host;
+    previous_port = config_.tunnel_proxy_port;
+    mappings = config_.tunnel_mappings;
+  }
+
+  const std::string next_host = requested_host;
+  const int next_port = requested_port > 0 ? requested_port : previous_port;
+  if (!next_host.empty() && (next_port <= 0 || next_port > 65535)) {
+    return Json(resp, 400, api::Error("proxy_port is invalid"));
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(tunnel_mu_);
+    config_.tunnel_proxy_host = next_host;
+    config_.tunnel_proxy_port = next_port;
+  }
+
+  std::string persist_error;
+  if (!PersistTunnelConfigToDisk(config_, next_host, next_port, mappings, &persist_error)) {
+    std::lock_guard<std::mutex> lock(tunnel_mu_);
+    config_.tunnel_proxy_host = previous_host;
+    config_.tunnel_proxy_port = previous_port;
+    return Json(resp, 500, api::Error(persist_error.empty() ? "failed to persist tunnel config" : persist_error));
+  }
+
+  tunnel_manager_.Configure(next_host, next_port, mappings);
+  audit_logger_.Append(session->token, "tunnel.config.update", next_host + ":" + std::to_string(next_port));
+
+  return Json(resp, 200, api::Success({
+                             {"proxy_host", next_host, false},
+                             {"proxy_port", std::to_string(next_port), true},
+                         }));
+}
+
+int ServerApp::HandleTunnelMappingUpsert(HttpRequest* req, HttpResponse* resp) {
+  auto session = RequireSession(req, resp);
+  if (!session.has_value()) {
+    return resp->status_code;
+  }
+
+  const auto payload = ParseJsonOrNull(req->body);
+  const auto parsed_mapping = ParseTunnelMappingFromJson(payload);
+  if (!parsed_mapping.has_value()) {
+    return Json(resp, 400, api::Error("invalid mapping payload"));
+  }
+  core::TunnelMappingConfig mapping = *parsed_mapping;
+
+  std::vector<core::TunnelMappingConfig> previous_mappings;
+  std::vector<core::TunnelMappingConfig> next_mappings;
+  std::string proxy_host;
+  int proxy_port = 0;
+  {
+    std::lock_guard<std::mutex> lock(tunnel_mu_);
+    previous_mappings = config_.tunnel_mappings;
+    next_mappings = config_.tunnel_mappings;
+    proxy_host = config_.tunnel_proxy_host;
+    proxy_port = config_.tunnel_proxy_port;
+  }
+
+  bool replaced = false;
+  for (auto& existing : next_mappings) {
+    if (existing.id == mapping.id) {
+      existing = mapping;
+      replaced = true;
+      break;
+    }
+  }
+  if (!replaced) {
+    next_mappings.push_back(mapping);
+  }
+
+  if (mapping.enabled) {
+    for (const auto& item : next_mappings) {
+      if (item.id == mapping.id || !item.enabled) {
+        continue;
+      }
+      if (NormalizeTunnelProtocol(item.protocol) == NormalizeTunnelProtocol(mapping.protocol) &&
+          item.remote_port == mapping.remote_port) {
+        return Json(resp, 409, api::Error("remote port conflict with another mapping", "conflict"));
+      }
+    }
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(tunnel_mu_);
+    config_.tunnel_mappings = next_mappings;
+  }
+
+  std::string persist_error;
+  if (!PersistTunnelConfigToDisk(config_, proxy_host, proxy_port, next_mappings, &persist_error)) {
+    std::lock_guard<std::mutex> lock(tunnel_mu_);
+    config_.tunnel_mappings = previous_mappings;
+    return Json(resp, 500, api::Error(persist_error.empty() ? "failed to persist mapping" : persist_error));
+  }
+
+  tunnel_manager_.Configure(proxy_host, proxy_port, next_mappings);
+  audit_logger_.Append(session->token, "tunnel.mapping.upsert",
+                       mapping.id + " " + NormalizeTunnelProtocol(mapping.protocol) + " " +
+                           std::to_string(mapping.local_port) + "->" + std::to_string(mapping.remote_port));
+
+  return Json(resp, 200, api::Success({
+                             {"mapping", SerializeTunnelMappingConfig(mapping), true},
+                             {"updated", replaced ? "true" : "false", true},
+                         }));
+}
+
+int ServerApp::HandleTunnelMappingDelete(HttpRequest* req, HttpResponse* resp) {
+  auto session = RequireSession(req, resp);
+  if (!session.has_value()) {
+    return resp->status_code;
+  }
+
+  const auto payload = ParseJsonOrNull(req->body);
+  const std::string mapping_id = util::Trim(JsonString(payload, "id", QueryOf(req, "id")));
+  if (mapping_id.empty()) {
+    return Json(resp, 400, api::Error("id is required"));
+  }
+
+  std::vector<core::TunnelMappingConfig> previous_mappings;
+  std::vector<core::TunnelMappingConfig> next_mappings;
+  std::string proxy_host;
+  int proxy_port = 0;
+  {
+    std::lock_guard<std::mutex> lock(tunnel_mu_);
+    previous_mappings = config_.tunnel_mappings;
+    next_mappings = config_.tunnel_mappings;
+    proxy_host = config_.tunnel_proxy_host;
+    proxy_port = config_.tunnel_proxy_port;
+  }
+
+  const auto before_count = next_mappings.size();
+  next_mappings.erase(std::remove_if(next_mappings.begin(), next_mappings.end(), [&](const core::TunnelMappingConfig& item) {
+                      return item.id == mapping_id;
+                    }),
+                    next_mappings.end());
+  if (next_mappings.size() == before_count) {
+    return Json(resp, 404, api::Error("mapping not found", "not_found"));
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(tunnel_mu_);
+    config_.tunnel_mappings = next_mappings;
+  }
+
+  std::string persist_error;
+  if (!PersistTunnelConfigToDisk(config_, proxy_host, proxy_port, next_mappings, &persist_error)) {
+    std::lock_guard<std::mutex> lock(tunnel_mu_);
+    config_.tunnel_mappings = previous_mappings;
+    return Json(resp, 500, api::Error(persist_error.empty() ? "failed to persist mapping" : persist_error));
+  }
+
+  tunnel_manager_.Configure(proxy_host, proxy_port, next_mappings);
+  audit_logger_.Append(session->token, "tunnel.mapping.delete", mapping_id);
+
+  return Json(resp, 200, api::Success({
+                             {"id", mapping_id, false},
+                         }));
+}
+
+int ServerApp::HandleTunnelMappingTest(HttpRequest* req, HttpResponse* resp) {
+  auto session = RequireSession(req, resp);
+  if (!session.has_value()) {
+    return resp->status_code;
+  }
+
+  const auto payload = ParseJsonOrNull(req->body);
+  const std::string mapping_id = util::Trim(JsonString(payload, "id", QueryOf(req, "id")));
+  if (mapping_id.empty()) {
+    return Json(resp, 400, api::Error("id is required"));
+  }
+
+  bool exists = false;
+  {
+    std::lock_guard<std::mutex> lock(tunnel_mu_);
+    for (const auto& item : config_.tunnel_mappings) {
+      if (item.id == mapping_id) {
+        exists = true;
+        break;
+      }
+    }
+  }
+  if (!exists) {
+    return Json(resp, 404, api::Error("mapping not found", "not_found"));
+  }
+
+  bool test_ok = false;
+  std::string detail;
+  const bool executed = tunnel_manager_.TestMapping(mapping_id, &test_ok, &detail, 5000);
+  if (!executed && detail.empty()) {
+    return Json(resp, 500, api::Error("failed to execute mapping test"));
+  }
+
+  audit_logger_.Append(session->token, "tunnel.mapping.test",
+                       mapping_id + " result=" + std::string(test_ok ? "ok" : "failed") + " detail=" + detail);
+
+  return Json(resp, 200, api::Success({
+                             {"id", mapping_id, false},
+                             {"test_ok", test_ok ? "true" : "false", true},
+                             {"detail", detail, false},
+                         }));
+}
+
+int ServerApp::HandleTunnelPorts(HttpRequest* req, HttpResponse* resp) {
+  auto session = RequireSession(req, resp);
+  if (!session.has_value()) {
+    return resp->status_code;
+  }
+
+  const auto ports = tunnel::PortInspector::ListListeningPorts();
+  std::vector<std::string> serialized;
+  serialized.reserve(ports.size());
+  for (const auto& item : ports) {
+    serialized.push_back(util::BuildJsonObject({
+        {"protocol", item.protocol, false},
+        {"address", item.address, false},
+        {"port", std::to_string(item.port), true},
+        {"process", item.process, false},
+        {"pid", std::to_string(item.pid), true},
+    }));
+  }
+
+  return Json(resp, 200, api::Success({
+                             {"items", JsonArray(serialized), true},
+                             {"count", std::to_string(serialized.size()), true},
                          }));
 }
 

@@ -40,7 +40,7 @@ ifneq ("$(wildcard $(VCPKG_TOOLCHAIN))","")
 	CMAKE_RELEASE_ARGS += -DCMAKE_TOOLCHAIN_FILE=$(VCPKG_TOOLCHAIN)
 endif
 
-.PHONY: configure build run run-backend dev-backend clean frontend dev-frontend dev release deps deps-proxy
+.PHONY: configure build build-proxy run run-proxy run-backend dev-backend clean frontend dev-frontend dev release deps deps-proxy
 
 configure:
 	$(CMAKE) -S . -B $(BUILD_DIR) $(CMAKE_DEBUG_ARGS)
@@ -48,8 +48,20 @@ configure:
 build: configure
 	$(CMAKE) --build $(BUILD_DIR) -j
 
+build-proxy:
+ifeq ($(UNAME_S),Linux)
+	$(CMAKE) -S . -B $(BUILD_DIR) $(CMAKE_RELEASE_ARGS)
+	$(CMAKE) --build $(BUILD_DIR) --target FerrymanProxy -j
+else
+	@echo "FerrymanProxy is Linux-only. Build this target on a Linux host."
+	@false
+endif
+
 run: build
 	./$(BUILD_DIR)/Ferryman
+
+run-proxy: build-proxy
+	./$(BUILD_DIR)/FerrymanProxy
 
 run-backend: build
 	./$(BUILD_DIR)/Ferryman

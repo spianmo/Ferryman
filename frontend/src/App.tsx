@@ -29,11 +29,12 @@ import MonitorPage from "./pages/MonitorPage";
 import ScreenPage from "./pages/ScreenPage";
 import TasksPage from "./pages/TasksPage";
 import TerminalPage from "./pages/TerminalPage";
+import TunnelPage from "./pages/TunnelPage";
 import { useTheme } from "./theme";
 import type { SessionInfo } from "./types";
 import { cn } from "./util/cn";
 
-type TabKey = "files" | "terminal" | "tasks" | "dockurr" | "docker" | "screen" | "monitor" | "logs";
+type TabKey = "files" | "terminal" | "tasks" | "dockurr" | "docker" | "screen" | "monitor" | "tunnel" | "logs";
 
 type NavItem = {
   key: TabKey;
@@ -43,6 +44,7 @@ type NavItem = {
 
 const navItems: NavItem[] = [
   { key: "monitor", labelKey: "nav.monitor", icon: <FiActivity /> },
+  { key: "tunnel", labelKey: "nav.tunnel", icon: <FiGlobe /> },
   { key: "docker", labelKey: "nav.docker", icon: <FiBox /> },
   { key: "files", labelKey: "nav.files", icon: <FiFolder /> },
   { key: "terminal", labelKey: "nav.terminal", icon: <FiTerminal /> },
@@ -56,7 +58,7 @@ const SESSION_KEY = "ferryman.session";
 const SIDEBAR_COLLAPSED_KEY = "ferryman.sidebar.collapsed";
 const DEFAULT_TAB: TabKey = "monitor";
 
-const VALID_TABS: TabKey[] = ["files", "terminal", "tasks", "dockurr", "docker", "screen", "monitor", "logs"];
+const VALID_TABS: TabKey[] = ["files", "terminal", "tasks", "dockurr", "docker", "screen", "monitor", "tunnel", "logs"];
 
 function isTabKey(value: string): value is TabKey {
   return VALID_TABS.includes(value as TabKey);
@@ -211,6 +213,8 @@ export default function App() {
         return <ScreenPage session={session} />;
       case "monitor":
         return <MonitorPage session={session} />;
+      case "tunnel":
+        return <TunnelPage token={session.token} />;
       case "logs":
         return <LogsPage session={session} />;
       default:

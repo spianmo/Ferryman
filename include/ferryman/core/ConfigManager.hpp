@@ -3,8 +3,19 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace ferryman::core {
+
+struct TunnelMappingConfig {
+  std::string id;
+  std::string name;
+  std::string protocol = "tcp";
+  std::string local_host = "127.0.0.1";
+  int local_port = 0;
+  int remote_port = 0;
+  bool enabled = true;
+};
 
 struct AppConfig {
   std::string http_host = "0.0.0.0";
@@ -18,6 +29,9 @@ struct AppConfig {
   std::filesystem::path workspace_root;
   std::filesystem::path config_path;
   std::filesystem::path audit_log_path;
+  std::string tunnel_proxy_host;
+  int tunnel_proxy_port = 17000;
+  std::vector<TunnelMappingConfig> tunnel_mappings;
 };
 
 class ConfigManager {

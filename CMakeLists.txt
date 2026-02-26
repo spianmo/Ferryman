@@ -88,6 +88,10 @@ if(TARGET frontend_build)
 endif()
 
 file(GLOB_RECURSE FERRYMAN_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/*.cpp")
+file(GLOB_RECURSE FERRYMAN_PROXY_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/proxy/*.cpp")
+if(FERRYMAN_PROXY_SOURCES)
+  list(REMOVE_ITEM FERRYMAN_SOURCES ${FERRYMAN_PROXY_SOURCES})
+endif()
 if(APPLE)
   file(GLOB_RECURSE FERRYMAN_OBJC_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/*.mm")
   list(APPEND FERRYMAN_SOURCES ${FERRYMAN_OBJC_SOURCES})
@@ -102,8 +106,23 @@ target_include_directories(Ferryman
     ${CMAKE_SOURCE_DIR}/include
 )
 
+if(UNIX AND NOT APPLE AND FERRYMAN_PROXY_SOURCES)
+  add_executable(FerrymanProxy
+    ${FERRYMAN_PROXY_SOURCES}
+    ${CMAKE_SOURCE_DIR}/src/util/StringUtil.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/Time.cpp
+  )
+  target_include_directories(FerrymanProxy
+    PRIVATE
+      ${CMAKE_SOURCE_DIR}/include
+  )
+endif()
+
 find_package(Threads REQUIRED)
 target_link_libraries(Ferryman PRIVATE Threads::Threads)
+if(TARGET FerrymanProxy)
+  target_link_libraries(FerrymanProxy PRIVATE Threads::Threads)
+endif()
 
 set(FERRYMAN_WITH_FFMPEG 0)
 find_package(FFMPEG QUIET)
@@ -119,11 +138,17 @@ endif()
 find_package(nlohmann_json CONFIG QUIET)
 if(nlohmann_json_FOUND)
   target_link_libraries(Ferryman PRIVATE nlohmann_json::nlohmann_json)
+  if(TARGET FerrymanProxy)
+    target_link_libraries(FerrymanProxy PRIVATE nlohmann_json::nlohmann_json)
+  endif()
   message(STATUS "Using nlohmann_json via CMake package")
 else()
   find_path(NLOHMANN_JSON_INCLUDE_DIR NAMES nlohmann/json.hpp)
   if(NLOHMANN_JSON_INCLUDE_DIR)
     target_include_directories(Ferryman PRIVATE ${NLOHMANN_JSON_INCLUDE_DIR})
+    if(TARGET FerrymanProxy)
+      target_include_directories(FerrymanProxy PRIVATE ${NLOHMANN_JSON_INCLUDE_DIR})
+    endif()
     message(STATUS "Using nlohmann/json header from ${NLOHMANN_JSON_INCLUDE_DIR}")
   else()
     message(FATAL_ERROR "nlohmann/json.hpp not found. Install nlohmann-json via vcpkg or system package manager.")
@@ -214,4 +239,8 @@ if(FERRYMAN_WITH_LIBHV)
 else()
   target_compile_definitions(Ferryman PRIVATE FERRYMAN_WITH_LIBHV=0 FERRYMAN_WITH_FFMPEG=${FERRYMAN_WITH_FFMPEG})
   message(WARNING "libhv not found. Binary will compile without network runtime. Install libhv or add third_party/libhv.")
+endif()
+
+if(TARGET FerrymanProxy)
+  target_compile_definitions(FerrymanProxy PRIVATE FERRYMAN_PROXY_LINUX_ONLY=1)
 endif()

@@ -123,6 +123,22 @@ mkdir -p "\$PKG_ROOT"
 cp "\$BIN_PATH" "\$PKG_ROOT/"
 cp README.md README_CN.md LICENSE "\$PKG_ROOT/"
 tar -czf "ferryman-${cfg.packageSuffix}.tar.gz" -C package "ferryman-${cfg.packageSuffix}"
+
+if [[ "${cfg.isMac}" == "false" ]]; then
+  PROXY_BIN_PATH="\$BUILD_DIR/FerrymanProxy"
+  if [[ ! -f "\$PROXY_BIN_PATH" ]]; then
+    PROXY_BIN_PATH="\$BUILD_DIR/Release/FerrymanProxy"
+  fi
+  if [[ ! -f "\$PROXY_BIN_PATH" ]]; then
+    echo "FerrymanProxy binary not found."
+    exit 1
+  fi
+  PROXY_PKG_ROOT="package/ferryman-proxy-${cfg.packageSuffix}"
+  mkdir -p "\$PROXY_PKG_ROOT"
+  cp "\$PROXY_BIN_PATH" "\$PROXY_PKG_ROOT/"
+  cp README.md README_CN.md LICENSE scripts/ferryman-proxy.service scripts/deploy_ferryman_proxy.sh "\$PROXY_PKG_ROOT/"
+  tar -czf "ferryman-proxy-${cfg.packageSuffix}.tar.gz" -C package "ferryman-proxy-${cfg.packageSuffix}"
+fi
 """
 }
 
@@ -258,7 +274,11 @@ done
                       }
                       throw err
                     } finally {
-                      archiveArtifacts artifacts: "ferryman-${localCfg.packageSuffix}.${localCfg.packageExt}", fingerprint: true, onlyIfSuccessful: true
+                      def artifactsPattern = "ferryman-${localCfg.packageSuffix}.${localCfg.packageExt}"
+                      if (!localCfg.isWindows && !localCfg.isMac) {
+                        artifactsPattern += ",ferryman-proxy-${localCfg.packageSuffix}.tar.gz,scripts/deploy_ferryman_proxy.sh"
+                      }
+                      archiveArtifacts artifacts: artifactsPattern, fingerprint: true, onlyIfSuccessful: true
                     }
                   }
                 }

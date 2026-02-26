@@ -198,6 +198,9 @@ https_port=18443
 tls_cert_file=
 tls_key_file=
 ws_port=18080
+tunnel_proxy_host=
+tunnel_proxy_port=17000
+tunnel_mappings_json=[]
 ```
 
 说明：
@@ -207,6 +210,53 @@ ws_port=18080
 - 当 `tls_cert_file`/`tls_key_file` 为空时，首次启用 HTTPS 会自动生成 `~/.ferryman/cert/server.crt` 与 `~/.ferryman/cert/server.key`。
 - 自动生成后的证书路径会回写到 `~/.ferryman/config.ini` 的 `tls_cert_file` / `tls_key_file`。
 - 启动时会初始化 `~/.ferryman/logs/`，并预留 `audit.log` 路径。
+- `tunnel_proxy_host/tunnel_proxy_port/tunnel_mappings_json` 用于内网穿透配置（由前端“内网穿透”面板维护）。
+
+## FerrymanProxy（Linux）
+
+`FerrymanProxy` 是独立的公网代理服务端（仅支持 Linux），用于承载 Ferryman 发起的 TCP/UDP 反向端口映射。
+
+编译独立 target：
+
+```bash
+cmake --build build --target FerrymanProxy -j
+# 或
+make build-proxy
+```
+
+运行服务端：
+
+```bash
+./build/FerrymanProxy --bind 0.0.0.0 --control-port 17000 --admin-host 127.0.0.1 --admin-port 17001 --log-file /var/log/ferryman-proxy.log
+```
+
+公网 Linux 一键部署（安装二进制 + systemd + 防火墙）：
+
+```bash
+sudo ./scripts/deploy_ferryman_proxy.sh \
+  --bin ./build/FerrymanProxy \
+  --bind 0.0.0.0 \
+  --control-port 17000 \
+  --admin-host 127.0.0.1 \
+  --admin-port 17001
+```
+
+命令行查看当前映射：
+
+```bash
+./build/FerrymanProxy --list --admin-host 127.0.0.1 --admin-port 17001
+./build/FerrymanProxy --status --admin-host 127.0.0.1 --admin-port 17001
+./build/FerrymanProxy --logs 200 --admin-host 127.0.0.1 --admin-port 17001
+```
+
+Systemd 开机自启（模板）：
+
+```bash
+sudo cp scripts/ferryman-proxy.service /etc/systemd/system/ferryman-proxy.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now ferryman-proxy
+sudo systemctl status ferryman-proxy
+```
 
 ## HTTP API
 
@@ -224,6 +274,12 @@ ws_port=18080
 | `GET` | `/api/screen/capabilities` | 屏幕能力协商 |
 | `POST` | `/api/screen/input` | 注入原生输入 |
 | `GET` | `/api/health` | 健康检查 |
+| `GET` | `/api/tunnel/state` | 获取内网穿透配置与映射运行状态 |
+| `POST` | `/api/tunnel/config` | 更新并持久化 FerrymanProxy 地址/端口 |
+| `POST` | `/api/tunnel/mapping/upsert` | 新增或更新单条 TCP/UDP 映射 |
+| `POST` | `/api/tunnel/mapping/delete` | 删除映射 |
+| `POST` | `/api/tunnel/mapping/test` | 映射测试并返回成功/失败详情 |
+| `GET` | `/api/tunnel/ports` | 列出本机监听端口/进程/PID |
 
 ## WebSocket 通道
 

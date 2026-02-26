@@ -4,8 +4,10 @@ import type {
   DockerContainerProcesses,
   DockerContainerStats,
   DockurrVmInfo,
+  ListeningPortInfo,
   ScreenSource,
   SessionInfo,
+  TunnelMappingState,
 } from "../types";
 
 export type ApiResponse<T = unknown> = {
@@ -476,6 +478,83 @@ export async function cancelScreenUploadTransfer(token: string, transferId: stri
       method: "POST",
       body: JSON.stringify({ transfer_id: transferId }),
     },
+    token
+  );
+}
+
+export type UpsertTunnelMappingPayload = {
+  id?: string;
+  name?: string;
+  protocol: "tcp" | "udp";
+  local_host: string;
+  local_port: number;
+  remote_port: number;
+  enabled?: boolean;
+};
+
+export async function getTunnelState(token: string) {
+  return request<{
+    proxy_host: string;
+    proxy_port: number;
+    mappings: Array<TunnelMappingState>;
+  }>(
+    "/api/tunnel/state",
+    { method: "GET" },
+    token
+  );
+}
+
+export async function updateTunnelConfig(token: string, proxyHost: string, proxyPort: number) {
+  return request<{ proxy_host: string; proxy_port: number }>(
+    "/api/tunnel/config",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        proxy_host: proxyHost,
+        proxy_port: proxyPort,
+      }),
+    },
+    token
+  );
+}
+
+export async function upsertTunnelMapping(token: string, payload: UpsertTunnelMappingPayload) {
+  return request<{ mapping: TunnelMappingState; updated: boolean }>(
+    "/api/tunnel/mapping/upsert",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+    token
+  );
+}
+
+export async function deleteTunnelMapping(token: string, id: string) {
+  return request<{ id: string }>(
+    "/api/tunnel/mapping/delete",
+    {
+      method: "POST",
+      body: JSON.stringify({ id }),
+    },
+    token
+  );
+}
+
+export async function testTunnelMapping(token: string, id: string) {
+  return request<{ id: string; test_ok: boolean; detail: string }>(
+    "/api/tunnel/mapping/test",
+    {
+      method: "POST",
+      body: JSON.stringify({ id }),
+    },
+    token
+  );
+}
+
+export async function listListeningPorts(token: string) {
+  return request<{ items: Array<ListeningPortInfo>; count: number }>(
+    "/api/tunnel/ports",
+    { method: "GET" },
     token
   );
 }

@@ -8,6 +8,7 @@
 #include "ferryman/dockurr/DockurrManager.hpp"
 #include "ferryman/pty/PtyManager.hpp"
 #include "ferryman/task/TaskManager.hpp"
+#include "ferryman/tunnel/TunnelManager.hpp"
 #include "ferryman/web/ScreenService.hpp"
 #include "ferryman/web/SystemMonitor.hpp"
 #include "ferryman/web/WebRtcSignalingService.hpp"
@@ -137,6 +138,12 @@ class ServerApp {
   int HandleScreenUploadChunk(HttpRequest* req, HttpResponse* resp);
   int HandleScreenUploadCommit(HttpRequest* req, HttpResponse* resp);
   int HandleScreenUploadCancel(HttpRequest* req, HttpResponse* resp);
+  int HandleTunnelState(HttpRequest* req, HttpResponse* resp);
+  int HandleTunnelConfigUpdate(HttpRequest* req, HttpResponse* resp);
+  int HandleTunnelMappingUpsert(HttpRequest* req, HttpResponse* resp);
+  int HandleTunnelMappingDelete(HttpRequest* req, HttpResponse* resp);
+  int HandleTunnelMappingTest(HttpRequest* req, HttpResponse* resp);
+  int HandleTunnelPorts(HttpRequest* req, HttpResponse* resp);
   int HandleHealth(HttpRequest* req, HttpResponse* resp);
   int HandleStaticAsset(HttpRequest* req, HttpResponse* resp);
 
@@ -176,11 +183,13 @@ class ServerApp {
   dockurr::DockurrManager dockurr_manager_;
   task::TaskManager task_manager_;
   pty::PtyManager pty_manager_;
+  tunnel::TunnelManager tunnel_manager_;
   ScreenService screen_service_;
   SystemMonitor system_monitor_;
   WebRtcSignalingService signaling_service_;
 
   std::atomic<bool> running_{false};
+  mutable std::mutex tunnel_mu_;
 
 #if FERRYMAN_WITH_LIBHV
   HttpService http_service_;

@@ -255,6 +255,23 @@ jobs:
 
           tar -czf "ferryman-${{ matrix.package_suffix }}.tar.gz" -C package "ferryman-${{ matrix.package_suffix }}"
 
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            PROXY_BIN_PATH="$BUILD_DIR/FerrymanProxy"
+            if [[ ! -f "$PROXY_BIN_PATH" ]]; then
+              PROXY_BIN_PATH="$BUILD_DIR/Release/FerrymanProxy"
+            fi
+            if [[ ! -f "$PROXY_BIN_PATH" ]]; then
+              echo "FerrymanProxy binary not found."
+              exit 1
+            fi
+
+            PROXY_PKG_ROOT="package/ferryman-proxy-${{ matrix.package_suffix }}"
+            mkdir -p "$PROXY_PKG_ROOT"
+            cp "$PROXY_BIN_PATH" "$PROXY_PKG_ROOT/"
+            cp README.md README_CN.md LICENSE scripts/ferryman-proxy.service scripts/deploy_ferryman_proxy.sh "$PROXY_PKG_ROOT/"
+            tar -czf "ferryman-proxy-${{ matrix.package_suffix }}.tar.gz" -C package "ferryman-proxy-${{ matrix.package_suffix }}"
+          fi
+
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -284,4 +301,20 @@ jobs:
         with:
           name: ferryman-${{ matrix.package_suffix }}
           path: ferryman-${{ matrix.package_suffix }}.${{ matrix.package_ext }}
+          if-no-files-found: error
+
+      - name: Upload artifact (FerrymanProxy Linux)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ferryman-proxy-${{ matrix.package_suffix }}
+          path: ferryman-proxy-${{ matrix.package_suffix }}.tar.gz
+          if-no-files-found: error
+
+      - name: Upload artifact (FerrymanProxy deploy script)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ferryman-proxy-deploy-script-${{ matrix.package_suffix }}
+          path: scripts/deploy_ferryman_proxy.sh
           if-no-files-found: error
