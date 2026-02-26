@@ -106,13 +106,16 @@ jobs:
           path: |
             .vcpkg-binary-cache
             .vcpkg-downloads
+            vcpkg_installed/${{ matrix.triplet }}
           key: vcpkg-${{ runner.os }}-${{ matrix.triplet }}-${{ hashFiles('vcpkg.json', 'scripts/make_deps.sh') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ matrix.triplet }}-
 
       - name: Prepare vcpkg cache directories
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          mkdir -p "$VCPKG_DOWNLOADS" .vcpkg-binary-cache
+          mkdir -p "$VCPKG_DOWNLOADS" .vcpkg-binary-cache "vcpkg_installed/${{ matrix.triplet }}"
 
       - name: Prepare vcpkg cache directories (Windows)
         if: runner.os == 'Windows'
@@ -120,6 +123,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path "$env:VCPKG_DOWNLOADS" -Force | Out-Null
           New-Item -ItemType Directory -Path ".vcpkg-binary-cache" -Force | Out-Null
+          New-Item -ItemType Directory -Path "vcpkg_installed/${{ matrix.triplet }}" -Force | Out-Null
 
       - name: Setup vcpkg
         if: runner.os != 'Windows'
