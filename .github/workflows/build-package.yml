@@ -340,12 +340,21 @@ jobs:
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             RELEASE_TAG="${GITHUB_REF_NAME}"
             RELEASE_TITLE="${GITHUB_REF_NAME}"
+            RELEASE_PRERELEASE="false"
+            RELEASE_GENERATE_NOTES="true"
+            RELEASE_MAKE_LATEST="true"
           else
-            RELEASE_TAG="${GITHUB_SHA}"
+            RELEASE_TAG="build-${GITHUB_SHA}"
             RELEASE_TITLE="${GITHUB_SHA}"
+            RELEASE_PRERELEASE="true"
+            RELEASE_GENERATE_NOTES="false"
+            RELEASE_MAKE_LATEST="false"
           fi
           echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
           echo "release_title=${RELEASE_TITLE}" >> "$GITHUB_OUTPUT"
+          echo "release_prerelease=${RELEASE_PRERELEASE}" >> "$GITHUB_OUTPUT"
+          echo "release_generate_notes=${RELEASE_GENERATE_NOTES}" >> "$GITHUB_OUTPUT"
+          echo "release_make_latest=${RELEASE_MAKE_LATEST}" >> "$GITHUB_OUTPUT"
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
@@ -353,9 +362,11 @@ jobs:
           tag_name: ${{ steps.release_meta.outputs.release_tag }}
           name: ${{ steps.release_meta.outputs.release_title }}
           target_commitish: ${{ github.sha }}
+          prerelease: ${{ steps.release_meta.outputs.release_prerelease }}
+          make_latest: ${{ steps.release_meta.outputs.release_make_latest }}
           files: |
             release-assets/**/*.tar.gz
             release-assets/**/*.zip
             release-assets/**/*.sh
           overwrite_files: true
-          generate_release_notes: true
+          generate_release_notes: ${{ steps.release_meta.outputs.release_generate_notes }}
