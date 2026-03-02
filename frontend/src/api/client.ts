@@ -91,6 +91,7 @@ export async function getSessionMe(token: string) {
     screen_authorized: boolean;
     host_os: string;
     docker_installed: boolean;
+    codeserver_installed: boolean;
     kvm_installed: boolean;
   }>(
     "/api/session/me",

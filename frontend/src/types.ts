@@ -6,8 +6,9 @@ export type SessionInfo = {
 };
 
 export type SessionEnvironment = {
-  host_os: "linux" | "macos" | "windows" | string;
+  host_os: "linux" | "macos" | "windows" | "freebsd" | string;
   docker_installed: boolean;
+  codeserver_installed: boolean;
   kvm_installed: boolean;
 };
 

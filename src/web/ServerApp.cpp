@@ -184,6 +184,8 @@ std::string RunCommandCapture(const std::string& command) {
 std::string HostOsTag() {
 #if defined(__linux__)
   return "linux";
+#elif defined(__FreeBSD__)
+  return "freebsd";
 #elif defined(__APPLE__)
   return "macos";
 #elif defined(_WIN32)
@@ -208,6 +210,10 @@ bool CommandExists(const std::string& command) {
 
 bool DetectDockerInstalled() {
   return CommandExists("docker");
+}
+
+bool DetectCodeServerInstalled() {
+  return CommandExists("code-server");
 }
 
 bool DockerErrorLooksDaemonInactive(const std::string& error) {
@@ -1554,6 +1560,7 @@ int ServerApp::HandleSessionMe(HttpRequest* req, HttpResponse* resp) {
 
   const std::string host_os = HostOsTag();
   const bool docker_installed = DetectDockerInstalled();
+  const bool codeserver_installed = DetectCodeServerInstalled();
   const bool kvm_installed = host_os == "linux" ? DetectKvmInstalled() : false;
 
   return Json(resp, 200,
@@ -1566,6 +1573,7 @@ int ServerApp::HandleSessionMe(HttpRequest* req, HttpResponse* resp) {
                   {"screen_authorized", "true", true},
                   {"host_os", host_os, false},
                   {"docker_installed", docker_installed ? "true" : "false", true},
+                  {"codeserver_installed", codeserver_installed ? "true" : "false", true},
                   {"kvm_installed", kvm_installed ? "true" : "false", true},
               }));
 }

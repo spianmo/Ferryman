@@ -293,7 +293,7 @@ sudo systemctl status ferryman-proxy
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/api/auth/login` | Access key login |
-| `GET` | `/api/session/me` | Session info + host capability flags (`host_os` / `docker_installed` / `kvm_installed`) |
+| `GET` | `/api/session/me` | Session info + host capability flags (`host_os` / `docker_installed` / `codeserver_installed` / `kvm_installed`) |
 | `GET` | `/api/files/list` | List directory |
 | `GET` | `/api/files/read` | Read file |
 | `POST` | `/api/files/write` | Write file |

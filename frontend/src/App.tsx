@@ -3,6 +3,7 @@ import { toast } from "./toast";
 import {
   FiActivity,
   FiBox,
+  FiCode,
   FiClipboard,
   FiCommand,
   FiFolder,
@@ -20,6 +21,7 @@ import {
 
 import { getSessionMe, login, UNAUTHORIZED_EVENT } from "./api/client";
 import { useI18n } from "./i18n";
+import CodeServerPage from "./pages/CodeServerPage";
 import DockerPage from "./pages/DockerPage";
 import FilesPage from "./pages/FilesPage";
 import LoginPage from "./pages/LoginPage";
@@ -34,7 +36,17 @@ import { useTheme } from "./theme";
 import type { SessionEnvironment, SessionInfo } from "./types";
 import { cn } from "./util/cn";
 
-type TabKey = "files" | "terminal" | "tasks" | "dockurr" | "docker" | "screen" | "monitor" | "tunnel" | "logs";
+type TabKey =
+  | "files"
+  | "terminal"
+  | "tasks"
+  | "dockurr"
+  | "docker"
+  | "codeserver"
+  | "screen"
+  | "monitor"
+  | "tunnel"
+  | "logs";
 
 type NavItem = {
   key: TabKey;
@@ -46,6 +58,7 @@ const navItems: NavItem[] = [
   { key: "monitor", labelKey: "nav.monitor", icon: <FiActivity /> },
   { key: "tunnel", labelKey: "nav.tunnel", icon: <FiGlobe /> },
   { key: "docker", labelKey: "nav.docker", icon: <FiBox /> },
+  { key: "codeserver", labelKey: "nav.codeserver", icon: <FiCode /> },
   { key: "files", labelKey: "nav.files", icon: <FiFolder /> },
   { key: "terminal", labelKey: "nav.terminal", icon: <FiTerminal /> },
   { key: "tasks", labelKey: "nav.tasks", icon: <FiCommand /> },
@@ -58,11 +71,23 @@ const SESSION_KEY = "ferryman.session";
 const SIDEBAR_COLLAPSED_KEY = "ferryman.sidebar.collapsed";
 const DEFAULT_TAB: TabKey = "monitor";
 
-const VALID_TABS: TabKey[] = ["files", "terminal", "tasks", "dockurr", "docker", "screen", "monitor", "tunnel", "logs"];
+const VALID_TABS: TabKey[] = [
+  "files",
+  "terminal",
+  "tasks",
+  "dockurr",
+  "docker",
+  "codeserver",
+  "screen",
+  "monitor",
+  "tunnel",
+  "logs",
+];
 
 const DEFAULT_SESSION_ENV: SessionEnvironment = {
   host_os: "unknown",
   docker_installed: true,
+  codeserver_installed: true,
   kvm_installed: true,
 };
 
@@ -127,6 +152,7 @@ export default function App() {
     setSessionEnv({
       host_os: typeof res.host_os === "string" ? res.host_os.toLowerCase() : "unknown",
       docker_installed: res.docker_installed !== false,
+      codeserver_installed: res.codeserver_installed !== false,
       kvm_installed: res.kvm_installed !== false,
     });
   }, []);
@@ -264,6 +290,14 @@ export default function App() {
             dockerInstalled={sessionEnv.docker_installed}
           />
         );
+      case "codeserver":
+        return (
+          <CodeServerPage
+            session={session}
+            hostOs={sessionEnv.host_os}
+            codeServerInstalled={sessionEnv.codeserver_installed}
+          />
+        );
       case "screen":
         return <ScreenPage session={session} />;
       case "monitor":
@@ -275,7 +309,15 @@ export default function App() {
       default:
         return null;
     }
-  }, [activeTab, search, session, sessionEnv.docker_installed, sessionEnv.host_os, sessionEnv.kvm_installed]);
+  }, [
+    activeTab,
+    search,
+    session,
+    sessionEnv.codeserver_installed,
+    sessionEnv.docker_installed,
+    sessionEnv.host_os,
+    sessionEnv.kvm_installed,
+  ]);
 
   if (!session) {
     return <LoginPage loading={loadingLogin} onLogin={doLogin} />;

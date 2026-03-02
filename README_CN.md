@@ -291,7 +291,7 @@ sudo systemctl status ferryman-proxy
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `POST` | `/api/auth/login` | Access Key 登录 |
-| `GET` | `/api/session/me` | 查询会话信息 + 主机能力（`host_os` / `docker_installed` / `kvm_installed`） |
+| `GET` | `/api/session/me` | 查询会话信息 + 主机能力（`host_os` / `docker_installed` / `codeserver_installed` / `kvm_installed`） |
 | `GET` | `/api/files/list` | 目录列表 |
 | `GET` | `/api/files/read` | 读取文件 |
 | `POST` | `/api/files/write` | 写入文件 |
