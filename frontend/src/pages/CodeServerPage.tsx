@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FiCode, FiExternalLink, FiMaximize2, FiMinimize2, FiRefreshCw, FiX } from "react-icons/fi";
 
-import { getTask, startTask } from "../api/client";
+import { getTask, startTask, updateCodeServerConfig } from "../api/client";
 import { useI18n } from "../i18n";
 import { toast } from "../toast";
 import type { SessionInfo } from "../types";
@@ -23,8 +23,31 @@ type FullscreenPanel = HTMLDivElement & {
   webkitRequestFullscreen?: () => Promise<void> | void;
 };
 
+type CodeServerTlsMode = "ferryman" | "selfsigned" | "custom";
+
+type InstallCodeServerOptions = {
+  port: number;
+  httpsEnabled: boolean;
+  tlsMode: CodeServerTlsMode;
+  customCertPath: string;
+  customKeyPath: string;
+};
+
+type CodeServerConfigPayload = {
+  port: number;
+  https_enabled: boolean;
+  tls_mode: CodeServerTlsMode;
+  custom_cert_path: string;
+  custom_key_path: string;
+};
+
 const DEFAULT_CODE_SERVER_PORT = 13337;
 const CODE_SERVER_PORT_STORAGE_KEY = "ferryman.codeserver.port";
+const CODE_SERVER_HTTPS_ENABLED_STORAGE_KEY = "ferryman.codeserver.https_enabled";
+const CODE_SERVER_TLS_MODE_STORAGE_KEY = "ferryman.codeserver.tls_mode";
+const CODE_SERVER_CUSTOM_CERT_PATH_STORAGE_KEY = "ferryman.codeserver.custom_cert_path";
+const CODE_SERVER_CUSTOM_KEY_PATH_STORAGE_KEY = "ferryman.codeserver.custom_key_path";
+const CODE_SERVER_CONFIG_SYNC_DEBOUNCE_MS = 400;
 
 function parsePort(value: string): number | null {
   const trimmed = value.trim();
@@ -50,14 +73,85 @@ function loadStoredPortInput() {
   return parsed == null ? String(DEFAULT_CODE_SERVER_PORT) : String(parsed);
 }
 
-function buildInstallCodeServerCommand(hostOs: string, port: number) {
+function parseStoredBool(value: string | null, fallback: boolean) {
+  if (!value) {
+    return fallback;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on") {
+    return true;
+  }
+  if (normalized === "0" || normalized === "false" || normalized === "no" || normalized === "off") {
+    return false;
+  }
+  return fallback;
+}
+
+function normalizeTlsMode(value: string): CodeServerTlsMode {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "custom") {
+    return "custom";
+  }
+  if (normalized === "selfsigned" || normalized === "self-signed" || normalized === "self_signed") {
+    return "selfsigned";
+  }
+  return "ferryman";
+}
+
+function loadStoredHttpsEnabled() {
+  if (typeof window === "undefined") {
+    return true;
+  }
+  return parseStoredBool(window.localStorage.getItem(CODE_SERVER_HTTPS_ENABLED_STORAGE_KEY), true);
+}
+
+function loadStoredTlsMode() {
+  if (typeof window === "undefined") {
+    return "ferryman" as CodeServerTlsMode;
+  }
+  return normalizeTlsMode(window.localStorage.getItem(CODE_SERVER_TLS_MODE_STORAGE_KEY) ?? "ferryman");
+}
+
+function loadStoredCustomPath(storageKey: string) {
+  if (typeof window === "undefined") {
+    return "";
+  }
+  return window.localStorage.getItem(storageKey) ?? "";
+}
+
+function shellSingleQuote(value: string) {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function powerShellSingleQuote(value: string) {
+  return value.replace(/'/g, "''");
+}
+
+function buildInstallCodeServerCommand(hostOs: string, options: InstallCodeServerOptions) {
+  const port = options.port;
+  const httpsEnabled = options.httpsEnabled;
+  const tlsMode = options.tlsMode;
+  const customCertPath = options.customCertPath.trim();
+  const customKeyPath = options.customKeyPath.trim();
+  const httpsEnabledFlag = httpsEnabled ? "1" : "0";
+  const tlsModeLiteral = shellSingleQuote(tlsMode);
+  const customCertLiteral = shellSingleQuote(customCertPath);
+  const customKeyLiteral = shellSingleQuote(customKeyPath);
+  const customCertPs = powerShellSingleQuote(customCertPath);
+  const customKeyPs = powerShellSingleQuote(customKeyPath);
+
   if (hostOs === "linux" || hostOs === "macos" || hostOs === "freebsd") {
     return `
 set -e
 echo "[codeserver] checking current status..."
 if ! command -v code-server >/dev/null 2>&1; then
-  echo "[codeserver] installing via official script..."
-  curl -fsSL https://code-server.dev/install.sh | sh
+  echo "[codeserver] installing via official script (prefer latest standalone)..."
+  if curl -fsSL https://code-server.dev/install.sh | sh -s -- --method=standalone; then
+    echo "[codeserver] standalone install completed."
+  else
+    echo "[codeserver] standalone install failed, falling back to default installer..."
+    curl -fsSL https://code-server.dev/install.sh | sh
+  fi
 else
   echo "[codeserver] code-server already installed."
 fi
@@ -71,12 +165,95 @@ echo "[codeserver] starting code-server on 0.0.0.0:${port} ..."
 if command -v pkill >/dev/null 2>&1; then
   pkill -f "code-server.*--bind-addr 0.0.0.0:${port}" || true
 fi
+mkdir -p "\${HOME}/.ferryman"
+printf "%s\n" "${port}" > "\${HOME}/.ferryman/codeserver_port"
+printf "%s\n" "${httpsEnabledFlag}" > "\${HOME}/.ferryman/codeserver_https_enabled"
+printf "%s\n" ${tlsModeLiteral} > "\${HOME}/.ferryman/codeserver_https_mode"
+printf "%s\n" ${customCertLiteral} > "\${HOME}/.ferryman/codeserver_https_cert_file"
+printf "%s\n" ${customKeyLiteral} > "\${HOME}/.ferryman/codeserver_https_key_file"
+
+https_enabled="${httpsEnabledFlag}"
+tls_mode=${tlsModeLiteral}
+custom_cert_path=${customCertLiteral}
+custom_key_path=${customKeyLiteral}
+config_file="\${HOME}/.ferryman/config.ini"
+if [ -f "$config_file" ]; then
+  upsert_ini_key() {
+    ini_key="$1"
+    ini_value="$2"
+    tmp_file="\${config_file}.tmp.$$"
+    awk -v key="$ini_key" -v value="$ini_value" '
+      BEGIN { updated = 0 }
+      {
+        line = $0
+        trimmed = line
+        sub(/^[ \t]+/, "", trimmed)
+        if (trimmed ~ ("^" key "=")) {
+          print key "=" value
+          updated = 1
+          next
+        }
+        print line
+      }
+      END {
+        if (updated == 0) {
+          print key "=" value
+        }
+      }
+    ' "$config_file" > "$tmp_file" && mv "$tmp_file" "$config_file"
+  }
+  upsert_ini_key "codeserver_port" "${port}"
+  upsert_ini_key "codeserver_https_enabled" "$https_enabled"
+  upsert_ini_key "codeserver_https_mode" "$tls_mode"
+  upsert_ini_key "codeserver_https_cert_file" "$custom_cert_path"
+  upsert_ini_key "codeserver_https_key_file" "$custom_key_path"
+fi
 mkdir -p "\${HOME}/.ferryman/logs"
-nohup code-server --bind-addr 0.0.0.0:${port} --auth none > "\${HOME}/.ferryman/logs/codeserver.log" 2>&1 &
+scheme="http"
+if [ "$https_enabled" = "1" ]; then
+  scheme="https"
+  case "$tls_mode" in
+    custom)
+      if [ -z "$custom_cert_path" ] || [ -z "$custom_key_path" ]; then
+        echo "[codeserver] custom cert mode requires cert and key paths."
+        exit 1
+      fi
+      if [ ! -s "$custom_cert_path" ] || [ ! -s "$custom_key_path" ]; then
+        echo "[codeserver] custom cert/key not found: cert=$custom_cert_path key=$custom_key_path"
+        exit 1
+      fi
+      echo "[codeserver] using custom https certificate."
+      nohup code-server --bind-addr 0.0.0.0:${port} --auth none --cert "$custom_cert_path" --cert-key "$custom_key_path" > "\${HOME}/.ferryman/logs/codeserver.log" 2>&1 &
+      ;;
+    selfsigned)
+      echo "[codeserver] using code-server self-signed https certificate."
+      nohup code-server --bind-addr 0.0.0.0:${port} --auth none --cert > "\${HOME}/.ferryman/logs/codeserver.log" 2>&1 &
+      ;;
+    *)
+      ferryman_cert="\${HOME}/.ferryman/cert/server.crt"
+      ferryman_key="\${HOME}/.ferryman/cert/server.key"
+      if [ -s "$ferryman_cert" ] && [ -s "$ferryman_key" ]; then
+        echo "[codeserver] using ferryman https certificate."
+        nohup code-server --bind-addr 0.0.0.0:${port} --auth none --cert "$ferryman_cert" --cert-key "$ferryman_key" > "\${HOME}/.ferryman/logs/codeserver.log" 2>&1 &
+      else
+        echo "[codeserver] ferryman cert not found; fallback to self-signed https certificate."
+        nohup code-server --bind-addr 0.0.0.0:${port} --auth none --cert > "\${HOME}/.ferryman/logs/codeserver.log" 2>&1 &
+      fi
+      ;;
+  esac
+else
+  nohup code-server --bind-addr 0.0.0.0:${port} --auth none > "\${HOME}/.ferryman/logs/codeserver.log" 2>&1 &
+fi
 sleep 2
 
 if command -v curl >/dev/null 2>&1; then
-  if curl -fsS "http://127.0.0.1:${port}/healthz" >/dev/null 2>&1; then
+  if [ "$scheme" = "https" ]; then
+    if curl -kfsS "$scheme://127.0.0.1:${port}/healthz" >/dev/null 2>&1; then
+      echo "[codeserver] health check passed."
+    else
+      echo "[codeserver] health check failed. check \${HOME}/.ferryman/logs/codeserver.log"
+    fi
+  elif curl -fsS "$scheme://127.0.0.1:${port}/healthz" >/dev/null 2>&1; then
     echo "[codeserver] health check passed."
   else
     echo "[codeserver] health check failed. check \${HOME}/.ferryman/logs/codeserver.log"
@@ -104,9 +281,90 @@ echo "[codeserver] done."
       "  Write-Host '[codeserver] code-server already installed.'",
       "};",
       "$exe = (Get-Command code-server -ErrorAction Stop).Source;",
-      `$args = '--bind-addr','0.0.0.0:${port}','--auth','none';`,
+      "$ferrymanDir = Join-Path $Env:USERPROFILE '.ferryman';",
+      "New-Item -Path $ferrymanDir -ItemType Directory -Force | Out-Null;",
+      `Set-Content -Path (Join-Path $ferrymanDir 'codeserver_port') -Value '${port}' -Encoding ASCII;`,
+      `Set-Content -Path (Join-Path $ferrymanDir 'codeserver_https_enabled') -Value '${httpsEnabledFlag}' -Encoding ASCII;`,
+      `Set-Content -Path (Join-Path $ferrymanDir 'codeserver_https_mode') -Value '${powerShellSingleQuote(tlsMode)}' -Encoding ASCII;`,
+      `Set-Content -Path (Join-Path $ferrymanDir 'codeserver_https_cert_file') -Value '${customCertPs}' -Encoding ASCII;`,
+      `Set-Content -Path (Join-Path $ferrymanDir 'codeserver_https_key_file') -Value '${customKeyPs}' -Encoding ASCII;`,
+      `$httpsEnabled = '${httpsEnabledFlag}' -eq '1';`,
+      `$tlsMode = '${powerShellSingleQuote(tlsMode)}';`,
+      `$customCert = '${customCertPs}';`,
+      `$customKey = '${customKeyPs}';`,
+      "$configPath = Join-Path $ferrymanDir 'config.ini';",
+      "function Upsert-IniKey {",
+      "  param([string]$Path, [string]$Key, [string]$Value)",
+      "  if (-not (Test-Path -LiteralPath $Path)) {",
+      "    return",
+      "  }",
+      "  $lines = Get-Content -LiteralPath $Path;",
+      "  if ($null -eq $lines) { $lines = @() }",
+      "  if ($lines -isnot [System.Array]) { $lines = @($lines) }",
+      "  $pattern = '^\\s*' + [Regex]::Escape($Key) + '=';",
+      "  $updated = $false;",
+      "  for ($i = 0; $i -lt $lines.Count; $i++) {",
+      "    if ($lines[$i] -match $pattern) {",
+      "      $lines[$i] = ($Key + '=' + $Value);",
+      "      $updated = $true;",
+      "      break",
+      "    }",
+      "  }",
+      "  if (-not $updated) {",
+      "    $lines += ($Key + '=' + $Value)",
+      "  }",
+      "  Set-Content -LiteralPath $Path -Value $lines -Encoding ASCII;",
+      "}",
+      `Upsert-IniKey -Path $configPath -Key 'codeserver_port' -Value '${port}';`,
+      "Upsert-IniKey -Path $configPath -Key 'codeserver_https_enabled' -Value ($(if ($httpsEnabled) { 'true' } else { 'false' }));",
+      "Upsert-IniKey -Path $configPath -Key 'codeserver_https_mode' -Value $tlsMode;",
+      "Upsert-IniKey -Path $configPath -Key 'codeserver_https_cert_file' -Value $customCert;",
+      "Upsert-IniKey -Path $configPath -Key 'codeserver_https_key_file' -Value $customKey;",
+      `$args = @('--bind-addr','0.0.0.0:${port}','--auth','none');`,
+      `$healthScheme = 'http';`,
+      "if ($httpsEnabled) {",
+      "  $healthScheme = 'https';",
+      "  if ($tlsMode -eq 'custom') {",
+      "    if ([string]::IsNullOrWhiteSpace($customCert) -or [string]::IsNullOrWhiteSpace($customKey)) {",
+      "      Write-Host '[codeserver] custom cert mode requires cert and key paths.';",
+      "      exit 1",
+      "    }",
+      "    if (-not (Test-Path -LiteralPath $customCert) -or -not (Test-Path -LiteralPath $customKey)) {",
+      "      Write-Host ('[codeserver] custom cert/key not found: cert=' + $customCert + ' key=' + $customKey);",
+      "      exit 1",
+      "    }",
+      "    Write-Host '[codeserver] using custom https certificate.';",
+      "    $args += @('--cert', $customCert, '--cert-key', $customKey);",
+      "  } elseif ($tlsMode -eq 'selfsigned') {",
+      "    Write-Host '[codeserver] using code-server self-signed https certificate.';",
+      "    $args += '--cert';",
+      "  } else {",
+      "    $ferrymanCert = Join-Path (Join-Path $ferrymanDir 'cert') 'server.crt';",
+      "    $ferrymanKey = Join-Path (Join-Path $ferrymanDir 'cert') 'server.key';",
+      "    if ((Test-Path -LiteralPath $ferrymanCert) -and (Test-Path -LiteralPath $ferrymanKey)) {",
+      "      Write-Host '[codeserver] using ferryman https certificate.';",
+      "      $args += @('--cert', $ferrymanCert, '--cert-key', $ferrymanKey);",
+      "    } else {",
+      "      Write-Host '[codeserver] ferryman cert not found; fallback to self-signed https certificate.';",
+      "      $args += '--cert';",
+      "    }",
+      "  }",
+      "}",
       "Start-Process -FilePath $exe -ArgumentList $args -WindowStyle Hidden;",
       "Start-Sleep -Seconds 2;",
+      "if ($healthScheme -eq 'https') {",
+      "  [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true };",
+      "}",
+      `try {`,
+      `  $r = Invoke-WebRequest -UseBasicParsing -Uri ($healthScheme + '://127.0.0.1:${port}/healthz') -TimeoutSec 2;`,
+      `  if ($r.StatusCode -ge 200 -and $r.StatusCode -lt 400) {`,
+      `    Write-Host '[codeserver] health check passed.'`,
+      `  } else {`,
+      `    Write-Host '[codeserver] health check failed.'`,
+      "  }",
+      "} catch {",
+      "  Write-Host '[codeserver] health check failed.'",
+      "}",
       "code-server --version;",
       "Write-Host '[codeserver] done.'",
       `"`,
@@ -116,13 +374,24 @@ echo "[codeserver] done."
   return "";
 }
 
-function panelUrlForCurrentHost(port: number) {
+function panelUrlForCurrentHost(port: number, httpsEnabled: boolean) {
+  const protocol = httpsEnabled ? "https" : "http";
   if (typeof window === "undefined") {
-    return `http://127.0.0.1:${port}/`;
+    return `${protocol}://127.0.0.1:${port}/`;
   }
   const hostname = window.location.hostname;
   const wrappedHost = hostname.includes(":") ? `[${hostname}]` : hostname;
-  return `http://${wrappedHost}:${port}/`;
+  return `${protocol}://${wrappedHost}:${port}/`;
+}
+
+function buildCodeServerConfigSignature(payload: CodeServerConfigPayload) {
+  return [
+    String(payload.port),
+    payload.https_enabled ? "1" : "0",
+    payload.tls_mode,
+    payload.custom_cert_path,
+    payload.custom_key_path,
+  ].join("|");
 }
 
 function getFullscreenElement() {
@@ -144,11 +413,47 @@ export default function CodeServerPage({ session, hostOs, codeServerInstalled }:
   const [installRunning, setInstallRunning] = useState(false);
   const [iframeKey, setIframeKey] = useState(0);
   const [panelFullscreen, setPanelFullscreen] = useState(false);
+  const [portEditing, setPortEditing] = useState(false);
+  const [customCertEditing, setCustomCertEditing] = useState(false);
+  const [customKeyEditing, setCustomKeyEditing] = useState(false);
   const [portInput, setPortInput] = useState(() => loadStoredPortInput());
+  const [httpsEnabled, setHttpsEnabled] = useState(() => loadStoredHttpsEnabled());
+  const [tlsMode, setTlsMode] = useState<CodeServerTlsMode>(() => loadStoredTlsMode());
+  const [customCertPath, setCustomCertPath] = useState(() =>
+    loadStoredCustomPath(CODE_SERVER_CUSTOM_CERT_PATH_STORAGE_KEY)
+  );
+  const [customKeyPath, setCustomKeyPath] = useState(() =>
+    loadStoredCustomPath(CODE_SERVER_CUSTOM_KEY_PATH_STORAGE_KEY)
+  );
+  const configSyncInitializedRef = useRef(false);
+  const lastSyncedConfigSignatureRef = useRef("");
+  const configSyncRequestIdRef = useRef(0);
 
   const parsedPort = useMemo(() => parsePort(portInput), [portInput]);
   const effectivePort = parsedPort ?? DEFAULT_CODE_SERVER_PORT;
-  const panelUrl = useMemo(() => panelUrlForCurrentHost(effectivePort), [effectivePort]);
+  const panelUrl = useMemo(() => panelUrlForCurrentHost(effectivePort, httpsEnabled), [effectivePort, httpsEnabled]);
+  const trimmedCustomCertPath = customCertPath.trim();
+  const trimmedCustomKeyPath = customKeyPath.trim();
+  const configSyncPaused = portEditing || customCertEditing || customKeyEditing;
+  const configPayload = useMemo<CodeServerConfigPayload | null>(() => {
+    if (parsedPort == null) {
+      return null;
+    }
+    if (httpsEnabled && tlsMode === "custom" && (!trimmedCustomCertPath || !trimmedCustomKeyPath)) {
+      return null;
+    }
+    return {
+      port: parsedPort,
+      https_enabled: httpsEnabled,
+      tls_mode: tlsMode,
+      custom_cert_path: trimmedCustomCertPath,
+      custom_key_path: trimmedCustomKeyPath,
+    };
+  }, [httpsEnabled, parsedPort, tlsMode, trimmedCustomCertPath, trimmedCustomKeyPath]);
+  const configPayloadSignature = useMemo(
+    () => (configPayload == null ? "" : buildCodeServerConfigSignature(configPayload)),
+    [configPayload]
+  );
 
   const installSupportedHost = hostOs === "linux" || hostOs === "macos" || hostOs === "windows" || hostOs === "freebsd";
   const canInstallCodeServer = installSupportedHost && !installedState;
@@ -175,6 +480,99 @@ export default function CodeServerPage({ session, hostOs, codeServerInstalled }:
     }
     window.localStorage.setItem(CODE_SERVER_PORT_STORAGE_KEY, String(parsedPort));
   }, [parsedPort]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(CODE_SERVER_HTTPS_ENABLED_STORAGE_KEY, httpsEnabled ? "1" : "0");
+  }, [httpsEnabled]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(CODE_SERVER_TLS_MODE_STORAGE_KEY, tlsMode);
+  }, [tlsMode]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(CODE_SERVER_CUSTOM_CERT_PATH_STORAGE_KEY, customCertPath);
+  }, [customCertPath]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(CODE_SERVER_CUSTOM_KEY_PATH_STORAGE_KEY, customKeyPath);
+  }, [customKeyPath]);
+
+  useEffect(() => {
+    if (!httpsEnabled || tlsMode !== "custom") {
+      setCustomCertEditing(false);
+      setCustomKeyEditing(false);
+    }
+  }, [httpsEnabled, tlsMode]);
+
+  useEffect(() => {
+    if (!installedState) {
+      configSyncInitializedRef.current = false;
+      lastSyncedConfigSignatureRef.current = "";
+      configSyncRequestIdRef.current += 1;
+      return;
+    }
+    if (configPayload == null || !configPayloadSignature) {
+      configSyncRequestIdRef.current += 1;
+      return;
+    }
+    if (!configSyncInitializedRef.current) {
+      configSyncInitializedRef.current = true;
+      lastSyncedConfigSignatureRef.current = configPayloadSignature;
+      return;
+    }
+    if (configSyncPaused) {
+      configSyncRequestIdRef.current += 1;
+      return;
+    }
+    if (configPayloadSignature === lastSyncedConfigSignatureRef.current) {
+      return;
+    }
+
+    const requestId = ++configSyncRequestIdRef.current;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        const result = await updateCodeServerConfig(session.token, configPayload);
+        if (requestId !== configSyncRequestIdRef.current) {
+          return;
+        }
+        if (!result.ok) {
+          toast.error(result.error ?? t("toast.request_failed"));
+          return;
+        }
+
+        const normalizedPayload: CodeServerConfigPayload = {
+          port: Number.isFinite(result.codeserver_port) ? result.codeserver_port : configPayload.port,
+          https_enabled: result.https_enabled,
+          tls_mode: normalizeTlsMode(result.tls_mode),
+          custom_cert_path: (result.custom_cert_path ?? "").trim(),
+          custom_key_path: (result.custom_key_path ?? "").trim(),
+        };
+        lastSyncedConfigSignatureRef.current = buildCodeServerConfigSignature(normalizedPayload);
+        setPortInput(String(normalizedPayload.port));
+        setHttpsEnabled(normalizedPayload.https_enabled);
+        setTlsMode(normalizedPayload.tls_mode);
+        setCustomCertPath(normalizedPayload.custom_cert_path);
+        setCustomKeyPath(normalizedPayload.custom_key_path);
+        setIframeKey((prev) => prev + 1);
+      })();
+    }, CODE_SERVER_CONFIG_SYNC_DEBOUNCE_MS);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [configPayload, configPayloadSignature, configSyncPaused, installedState, session.token, t]);
 
   useEffect(() => {
     const onFullscreenChange = () => {
@@ -248,7 +646,17 @@ export default function CodeServerPage({ session, hostOs, codeServerInstalled }:
       toast.error(t("codeserver.invalid_port"));
       return;
     }
-    const command = buildInstallCodeServerCommand(hostOs, parsedPort);
+    if (httpsEnabled && tlsMode === "custom" && (!trimmedCustomCertPath || !trimmedCustomKeyPath)) {
+      toast.error(t("codeserver.invalid_custom_cert"));
+      return;
+    }
+    const command = buildInstallCodeServerCommand(hostOs, {
+      port: parsedPort,
+      httpsEnabled,
+      tlsMode,
+      customCertPath: trimmedCustomCertPath,
+      customKeyPath: trimmedCustomKeyPath,
+    });
     if (!command) {
       toast.error(t("codeserver.install_unsupported"));
       return;
@@ -270,7 +678,7 @@ export default function CodeServerPage({ session, hostOs, codeServerInstalled }:
       return;
     }
     setInstallTaskId(res.task_id);
-  }, [hostOs, installRunning, parsedPort, session.token, t]);
+  }, [hostOs, httpsEnabled, installRunning, parsedPort, session.token, t, tlsMode, trimmedCustomCertPath, trimmedCustomKeyPath]);
 
   useEffect(() => {
     if (!installDialogOpen || !installTaskId) {
@@ -353,6 +761,13 @@ export default function CodeServerPage({ session, hostOs, codeServerInstalled }:
                   inputMode="numeric"
                   value={portInput}
                   onChange={(event) => setPortInput(event.target.value.replace(/[^\d]/g, "").slice(0, 5))}
+                  onFocus={() => setPortEditing(true)}
+                  onBlur={() => setPortEditing(false)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.currentTarget.blur();
+                    }
+                  }}
                   className={cn(
                     "h-8 w-24 rounded-xl border bg-white px-2.5 text-xs shadow-sm outline-none dark:bg-neutral-950/40",
                     parsedPort == null
@@ -361,6 +776,43 @@ export default function CodeServerPage({ session, hostOs, codeServerInstalled }:
                   )}
                 />
               </div>
+              <div className="inline-flex items-center gap-1 rounded-xl bg-slate-100 p-1 dark:bg-neutral-800">
+                <button
+                  type="button"
+                  className={cn(
+                    "rounded-lg px-2 py-1 text-[11px] font-semibold transition-colors",
+                    !httpsEnabled
+                      ? "bg-white text-slate-800 shadow-sm dark:bg-neutral-700 dark:text-neutral-50"
+                      : "text-slate-500 hover:text-slate-700 dark:text-neutral-400 dark:hover:text-neutral-200"
+                  )}
+                  onClick={() => setHttpsEnabled(false)}
+                >
+                  {t("codeserver.protocol_http")}
+                </button>
+                <button
+                  type="button"
+                  className={cn(
+                    "rounded-lg px-2 py-1 text-[11px] font-semibold transition-colors",
+                    httpsEnabled
+                      ? "bg-white text-slate-800 shadow-sm dark:bg-neutral-700 dark:text-neutral-50"
+                      : "text-slate-500 hover:text-slate-700 dark:text-neutral-400 dark:hover:text-neutral-200"
+                  )}
+                  onClick={() => setHttpsEnabled(true)}
+                >
+                  {t("codeserver.protocol_https")}
+                </button>
+              </div>
+              {httpsEnabled ? (
+                <select
+                  value={tlsMode}
+                  onChange={(event) => setTlsMode(normalizeTlsMode(event.target.value))}
+                  className="h-8 rounded-xl border border-slate-200 bg-white px-2.5 text-xs text-slate-700 shadow-sm outline-none focus:border-slate-300 dark:border-neutral-800 dark:bg-neutral-950/40 dark:text-neutral-100 dark:focus:border-neutral-700"
+                >
+                  <option value="ferryman">{t("codeserver.tls_mode_ferryman")}</option>
+                  <option value="selfsigned">{t("codeserver.tls_mode_selfsigned")}</option>
+                  <option value="custom">{t("codeserver.tls_mode_custom")}</option>
+                </select>
+              ) : null}
               {canInstallCodeServer ? (
                 <button
                   className={cn(
@@ -404,8 +856,37 @@ export default function CodeServerPage({ session, hostOs, codeServerInstalled }:
             </div>
           </div>
 
+          {httpsEnabled && tlsMode === "custom" ? (
+            <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-2">
+              <input
+                type="text"
+                value={customCertPath}
+                onChange={(event) => setCustomCertPath(event.target.value)}
+                onFocus={() => setCustomCertEditing(true)}
+                onBlur={() => setCustomCertEditing(false)}
+                placeholder={t("codeserver.custom_cert_path")}
+                className="h-9 rounded-xl border border-slate-200 bg-white px-3 text-xs text-slate-700 shadow-sm outline-none focus:border-slate-300 dark:border-neutral-800 dark:bg-neutral-950/40 dark:text-neutral-100 dark:focus:border-neutral-700"
+              />
+              <input
+                type="text"
+                value={customKeyPath}
+                onChange={(event) => setCustomKeyPath(event.target.value)}
+                onFocus={() => setCustomKeyEditing(true)}
+                onBlur={() => setCustomKeyEditing(false)}
+                placeholder={t("codeserver.custom_key_path")}
+                className="h-9 rounded-xl border border-slate-200 bg-white px-3 text-xs text-slate-700 shadow-sm outline-none focus:border-slate-300 dark:border-neutral-800 dark:bg-neutral-950/40 dark:text-neutral-100 dark:focus:border-neutral-700"
+              />
+            </div>
+          ) : null}
+          {httpsEnabled && tlsMode === "ferryman" ? (
+            <div className="mt-2 text-xs text-slate-500 dark:text-neutral-400">{t("codeserver.ferryman_tls_hint")}</div>
+          ) : null}
+
           {parsedPort == null ? (
             <div className="mt-2 text-xs text-rose-600 dark:text-rose-300">{t("codeserver.invalid_port")}</div>
+          ) : null}
+          {httpsEnabled && tlsMode === "custom" && (!trimmedCustomCertPath || !trimmedCustomKeyPath) ? (
+            <div className="mt-2 text-xs text-rose-600 dark:text-rose-300">{t("codeserver.invalid_custom_cert")}</div>
           ) : null}
 
           {!installedState ? (

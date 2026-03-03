@@ -24,6 +24,16 @@ struct AppConfig {
   int https_port = 18443;
   std::filesystem::path tls_cert_file;
   std::filesystem::path tls_key_file;
+  int codeserver_port = 13337;
+  bool codeserver_https_enabled = true;
+  std::string codeserver_https_mode = "ferryman";
+  std::filesystem::path codeserver_https_cert_file;
+  std::filesystem::path codeserver_https_key_file;
+  bool has_codeserver_port = false;
+  bool has_codeserver_https_enabled = false;
+  bool has_codeserver_https_mode = false;
+  bool has_codeserver_https_cert_file = false;
+  bool has_codeserver_https_key_file = false;
   int ws_port = 18080;
   std::string access_key;
   std::filesystem::path workspace_root;

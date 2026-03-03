@@ -140,6 +140,7 @@ class ServerApp {
   int HandleScreenUploadChunk(HttpRequest* req, HttpResponse* resp);
   int HandleScreenUploadCommit(HttpRequest* req, HttpResponse* resp);
   int HandleScreenUploadCancel(HttpRequest* req, HttpResponse* resp);
+  int HandleCodeServerConfigUpdate(HttpRequest* req, HttpResponse* resp);
   int HandleTunnelState(HttpRequest* req, HttpResponse* resp);
   int HandleTunnelConfigUpdate(HttpRequest* req, HttpResponse* resp);
   int HandleTunnelMappingUpsert(HttpRequest* req, HttpResponse* resp);
@@ -194,6 +195,7 @@ class ServerApp {
 
   std::atomic<bool> running_{false};
   mutable std::mutex tunnel_mu_;
+  mutable std::mutex codeserver_mu_;
 
 #if FERRYMAN_WITH_LIBHV
   HttpService http_service_;

@@ -538,6 +538,33 @@ export async function updateTunnelConfig(token: string, proxyHost: string, proxy
   );
 }
 
+export type UpdateCodeServerConfigPayload = {
+  port: number;
+  https_enabled: boolean;
+  tls_mode: "ferryman" | "selfsigned" | "custom";
+  custom_cert_path: string;
+  custom_key_path: string;
+};
+
+export async function updateCodeServerConfig(token: string, payload: UpdateCodeServerConfigPayload) {
+  return request<{
+    codeserver_port: number;
+    https_enabled: boolean;
+    tls_mode: "ferryman" | "selfsigned" | "custom";
+    custom_cert_path: string;
+    custom_key_path: string;
+    scheme: "http" | "https";
+    detail: string;
+  }>(
+    "/api/codeserver/config",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+    token
+  );
+}
+
 export async function upsertTunnelMapping(token: string, payload: UpsertTunnelMappingPayload) {
   return request<{ mapping: TunnelMappingState; updated: boolean }>(
     "/api/tunnel/mapping/upsert",

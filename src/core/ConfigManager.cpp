@@ -249,6 +249,21 @@ bool ConfigManager::LoadFromDisk(const std::filesystem::path& path) {
       config_.tls_cert_file = ResolveConfiguredPath(path, value);
     } else if (key == "tls_key_file") {
       config_.tls_key_file = ResolveConfiguredPath(path, value);
+    } else if (key == "codeserver_port") {
+      config_.codeserver_port = ParseInt(value, config_.codeserver_port);
+      config_.has_codeserver_port = true;
+    } else if (key == "codeserver_https_enabled") {
+      config_.codeserver_https_enabled = ParseBool(value, config_.codeserver_https_enabled);
+      config_.has_codeserver_https_enabled = true;
+    } else if (key == "codeserver_https_mode") {
+      config_.codeserver_https_mode = ToLower(Trim(value));
+      config_.has_codeserver_https_mode = true;
+    } else if (key == "codeserver_https_cert_file") {
+      config_.codeserver_https_cert_file = ResolveConfiguredPath(path, value);
+      config_.has_codeserver_https_cert_file = true;
+    } else if (key == "codeserver_https_key_file") {
+      config_.codeserver_https_key_file = ResolveConfiguredPath(path, value);
+      config_.has_codeserver_https_key_file = true;
     } else if (key == "ws_port") {
       config_.ws_port = ParseInt(value, config_.ws_port);
     } else if (key == "tunnel_proxy_host") {
@@ -272,6 +287,14 @@ bool ConfigManager::LoadFromDisk(const std::filesystem::path& path) {
   if (config_.tunnel_proxy_port <= 0 || config_.tunnel_proxy_port > 65535) {
     config_.tunnel_proxy_port = 17000;
   }
+  if (config_.codeserver_port <= 0 || config_.codeserver_port > 65535) {
+    config_.codeserver_port = 13337;
+  }
+  if (config_.codeserver_https_mode != "ferryman" &&
+      config_.codeserver_https_mode != "selfsigned" &&
+      config_.codeserver_https_mode != "custom") {
+    config_.codeserver_https_mode = "ferryman";
+  }
   // WebSocket and HTTP now share one listener/port.
   config_.ws_port = config_.http_port;
   return true;
@@ -291,6 +314,11 @@ bool ConfigManager::WriteDefaultConfig(const std::filesystem::path& path, const 
   file << "https_port=18443\n";
   file << "tls_cert_file=\n";
   file << "tls_key_file=\n";
+  file << "codeserver_port=13337\n";
+  file << "codeserver_https_enabled=true\n";
+  file << "codeserver_https_mode=ferryman\n";
+  file << "codeserver_https_cert_file=\n";
+  file << "codeserver_https_key_file=\n";
   file << "ws_port=18080\n";
   file << "tunnel_proxy_host=\n";
   file << "tunnel_proxy_port=17000\n";

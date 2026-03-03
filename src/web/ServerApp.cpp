@@ -39,6 +39,7 @@ constexpr int kNativeScaleDefaultPercent = 75;
 constexpr int kNativeBitrateMinBps = 500'000;
 constexpr int kNativeBitrateMaxBps = 12'000'000;
 constexpr int kNativeBitrateDefaultBps = 3'000'000;
+constexpr int kDefaultCodeServerPort = 13337;
 
 constexpr uint32_t kNativeBinaryMagic = 0x314D5246U;  // "FRM1" little-endian
 constexpr uint8_t kNativeBinaryCodecJpeg = 1;
@@ -54,6 +55,10 @@ constexpr int kDockurrCreateLogWaitSeconds = 90;
 std::string JsonString(const std::optional<json>& payload, const char* key, const std::string& fallback);
 bool JsonBool(const std::optional<json>& payload, const char* key, bool fallback);
 int JsonInt(const std::optional<json>& payload, const char* key, int fallback);
+std::string ShellEscapeForCommand(const std::string& value);
+bool FileExistsAndNonEmpty(const std::filesystem::path& path);
+bool EnsureTlsCertificateFiles(const core::AppConfig& config, std::filesystem::path* crt_file,
+                               std::filesystem::path* key_file, std::string* error);
 
 std::string ToLower(std::string value) {
   std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
@@ -181,6 +186,13 @@ std::string RunCommandCapture(const std::string& command) {
   return output;
 }
 
+int RunCommandNoCapture(const std::string& command) {
+  if (command.empty()) {
+    return -1;
+  }
+  return std::system(command.c_str());
+}
+
 std::string HostOsTag() {
 #if defined(__linux__)
   return "linux";
@@ -214,6 +226,362 @@ bool DetectDockerInstalled() {
 
 bool DetectCodeServerInstalled() {
   return CommandExists("code-server");
+}
+
+enum class CodeServerTlsMode {
+  kFerryman,
+  kSelfSigned,
+  kCustom,
+};
+
+struct CodeServerRuntimeOptions {
+  bool https_enabled = false;
+  std::vector<std::string> start_args;
+  std::string scheme = "http";
+  std::string summary = "http";
+};
+
+std::string NormalizeCodeServerTlsMode(std::string value, const std::string& fallback = "ferryman") {
+  value = ToLower(util::Trim(value));
+  if (value == "self-signed" || value == "self_signed") {
+    value = "selfsigned";
+  }
+  if (value == "ferryman" || value == "selfsigned" || value == "custom") {
+    return value;
+  }
+  return NormalizeCodeServerTlsMode(fallback, "ferryman");
+}
+
+int NormalizePort(int port, int fallback = kDefaultCodeServerPort) {
+  if (port <= 0 || port > 65535) {
+    return fallback;
+  }
+  return port;
+}
+
+std::filesystem::path CodeServerPortFilePath() {
+  return HomeDirectoryPath() / ".ferryman" / "codeserver_port";
+}
+
+std::filesystem::path CodeServerHttpsEnabledFilePath() {
+  return HomeDirectoryPath() / ".ferryman" / "codeserver_https_enabled";
+}
+
+std::filesystem::path CodeServerTlsModeFilePath() {
+  return HomeDirectoryPath() / ".ferryman" / "codeserver_https_mode";
+}
+
+std::filesystem::path CodeServerTlsCustomCertFilePath() {
+  return HomeDirectoryPath() / ".ferryman" / "codeserver_https_cert_file";
+}
+
+std::filesystem::path CodeServerTlsCustomKeyFilePath() {
+  return HomeDirectoryPath() / ".ferryman" / "codeserver_https_key_file";
+}
+
+std::string LoadSingleLineFileTrimmed(const std::filesystem::path& path) {
+  std::ifstream in(path);
+  if (!in.is_open()) {
+    return "";
+  }
+  std::string line;
+  std::getline(in, line);
+  return util::Trim(line);
+}
+
+std::filesystem::path ResolveCodeServerStoredPath(const std::string& raw) {
+  const std::string trimmed = util::Trim(raw);
+  if (trimmed.empty()) {
+    return {};
+  }
+#if !defined(_WIN32)
+  if (trimmed[0] == '~') {
+    if (trimmed.size() == 1) {
+      return HomeDirectoryPath();
+    }
+    if (trimmed[1] == '/' || trimmed[1] == '\\') {
+      return HomeDirectoryPath() / trimmed.substr(2);
+    }
+  }
+#endif
+  std::filesystem::path path(trimmed);
+  if (path.is_relative()) {
+    return HomeDirectoryPath() / path;
+  }
+  return path;
+}
+
+bool LoadCodeServerHttpsEnabled(const core::AppConfig& config) {
+  if (config.has_codeserver_https_enabled) {
+    return config.codeserver_https_enabled;
+  }
+  const std::string raw = LoadSingleLineFileTrimmed(CodeServerHttpsEnabledFilePath());
+  if (raw.empty()) {
+    return true;
+  }
+  return ParseBool(raw, true);
+}
+
+CodeServerTlsMode LoadCodeServerTlsMode(const core::AppConfig& config) {
+  const std::string normalized = config.has_codeserver_https_mode
+                                     ? NormalizeCodeServerTlsMode(config.codeserver_https_mode)
+                                     : NormalizeCodeServerTlsMode(LoadSingleLineFileTrimmed(CodeServerTlsModeFilePath()));
+  if (normalized == "custom") {
+    return CodeServerTlsMode::kCustom;
+  }
+  if (normalized == "selfsigned") {
+    return CodeServerTlsMode::kSelfSigned;
+  }
+  return CodeServerTlsMode::kFerryman;
+}
+
+std::string CodeServerTlsModeToString(CodeServerTlsMode mode) {
+  switch (mode) {
+    case CodeServerTlsMode::kCustom:
+      return "custom";
+    case CodeServerTlsMode::kSelfSigned:
+      return "selfsigned";
+    case CodeServerTlsMode::kFerryman:
+    default:
+      return "ferryman";
+  }
+}
+
+std::filesystem::path LoadCodeServerCustomCertPath(const core::AppConfig& config) {
+  if (config.has_codeserver_https_cert_file) {
+    return config.codeserver_https_cert_file;
+  }
+  return ResolveCodeServerStoredPath(LoadSingleLineFileTrimmed(CodeServerTlsCustomCertFilePath()));
+}
+
+std::filesystem::path LoadCodeServerCustomKeyPath(const core::AppConfig& config) {
+  if (config.has_codeserver_https_key_file) {
+    return config.codeserver_https_key_file;
+  }
+  return ResolveCodeServerStoredPath(LoadSingleLineFileTrimmed(CodeServerTlsCustomKeyFilePath()));
+}
+
+CodeServerRuntimeOptions ResolveCodeServerRuntimeOptions(const core::AppConfig& config) {
+  CodeServerRuntimeOptions options;
+  options.https_enabled = LoadCodeServerHttpsEnabled(config);
+  options.scheme = options.https_enabled ? "https" : "http";
+  if (!options.https_enabled) {
+    options.summary = "http (https disabled)";
+    return options;
+  }
+
+  const CodeServerTlsMode mode = LoadCodeServerTlsMode(config);
+  if (mode == CodeServerTlsMode::kCustom) {
+    const std::filesystem::path cert_path = LoadCodeServerCustomCertPath(config);
+    const std::filesystem::path key_path = LoadCodeServerCustomKeyPath(config);
+    if (!cert_path.empty() && !key_path.empty() && FileExistsAndNonEmpty(cert_path) && FileExistsAndNonEmpty(key_path)) {
+      options.start_args = {"--cert", cert_path.string(), "--cert-key", key_path.string()};
+      options.summary = "https mode=custom cert=" + cert_path.string() + " key=" + key_path.string();
+      return options;
+    }
+    options.start_args = {"--cert"};
+    options.summary = "https mode=custom but cert/key invalid, fallback=self-signed";
+    return options;
+  }
+
+  if (mode == CodeServerTlsMode::kSelfSigned) {
+    options.start_args = {"--cert"};
+    options.summary = "https mode=self-signed";
+    return options;
+  }
+
+  std::filesystem::path ferryman_crt;
+  std::filesystem::path ferryman_key;
+  std::string tls_error;
+  if (EnsureTlsCertificateFiles(config, &ferryman_crt, &ferryman_key, &tls_error)) {
+    options.start_args = {"--cert", ferryman_crt.string(), "--cert-key", ferryman_key.string()};
+    options.summary = "https mode=ferryman cert=" + ferryman_crt.string() + " key=" + ferryman_key.string();
+    return options;
+  }
+
+  options.start_args = {"--cert"};
+  options.summary = "https mode=ferryman cert unavailable, fallback=self-signed (" +
+                    (tls_error.empty() ? std::string("unknown error") : tls_error) + ")";
+  return options;
+}
+
+int LoadCodeServerPort(const core::AppConfig& config) {
+  if (config.has_codeserver_port && config.codeserver_port > 0 && config.codeserver_port <= 65535) {
+    return config.codeserver_port;
+  }
+  const std::filesystem::path port_file = CodeServerPortFilePath();
+  std::ifstream in(port_file);
+  if (!in.is_open()) {
+    return kDefaultCodeServerPort;
+  }
+  std::string line;
+  std::getline(in, line);
+  return NormalizePort(ParseInt(util::Trim(line), kDefaultCodeServerPort), kDefaultCodeServerPort);
+}
+
+bool CodeServerHealthProbeSupported() {
+#if defined(_WIN32)
+  return true;
+#else
+  return CommandExists("curl") || CommandExists("wget");
+#endif
+}
+
+bool ProbeCodeServerHealth(int port, bool https_enabled) {
+  const int safe_port = NormalizePort(port, kDefaultCodeServerPort);
+  const std::string scheme = https_enabled ? "https" : "http";
+#if defined(_WIN32)
+  const std::string command =
+      "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "
+      "\"" + (https_enabled ? std::string("[System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true };")
+                            : std::string()) +
+      "$ErrorActionPreference='SilentlyContinue';"
+      "try {"
+      "$r=Invoke-WebRequest -UseBasicParsing -Uri '" + scheme + "://127.0.0.1:" +
+      std::to_string(safe_port) +
+      "/healthz' -TimeoutSec 2;"
+      "if ($r.StatusCode -ge 200 -and $r.StatusCode -lt 400) { Write-Output '__ok__' }"
+      "} catch {}\"";
+  const std::string out = TrimAsciiWhitespace(RunCommandCapture(command));
+  return out == "__ok__";
+#else
+  if (CommandExists("curl")) {
+    const std::string command = "curl " + std::string(https_enabled ? "-k " : "") +
+                                "-fsS --noproxy '*' --connect-timeout 1 --max-time 2 \"" + scheme +
+                                "://127.0.0.1:" + std::to_string(safe_port) + "/healthz\" >/dev/null 2>&1 && echo __ok__";
+    const std::string out = TrimAsciiWhitespace(RunCommandCapture(command));
+    if (out == "__ok__") {
+      return true;
+    }
+  }
+  if (CommandExists("wget")) {
+    const std::string command = "wget --no-proxy " + std::string(https_enabled ? "--no-check-certificate " : "") +
+                                "-q -T 2 -O - \"" + scheme + "://127.0.0.1:" + std::to_string(safe_port) +
+                                "/healthz\" >/dev/null 2>&1 && echo __ok__";
+    const std::string out = TrimAsciiWhitespace(RunCommandCapture(command));
+    if (out == "__ok__") {
+      return true;
+    }
+  }
+  return false;
+#endif
+}
+
+std::string PowerShellSingleQuoteEscape(const std::string& value) {
+  std::string escaped;
+  escaped.reserve(value.size() + 8);
+  for (char ch : value) {
+    if (ch == '\'') {
+      escaped += "''";
+      continue;
+    }
+    escaped.push_back(ch);
+  }
+  return escaped;
+}
+
+std::string BuildCodeServerStartCommand(int port, const std::vector<std::string>& extra_args) {
+  const int safe_port = NormalizePort(port, kDefaultCodeServerPort);
+#if defined(_WIN32)
+  std::string args_literal = "'--bind-addr','0.0.0.0:" + std::to_string(safe_port) + "','--auth','none'";
+  for (const auto& arg : extra_args) {
+    args_literal += ",'" + PowerShellSingleQuoteEscape(arg) + "'";
+  }
+  return "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "
+         "\"$ErrorActionPreference='Stop';"
+         "$exe=(Get-Command code-server -ErrorAction Stop).Source;"
+         "$args=@(" +
+         args_literal +
+         ");"
+         "Start-Process -FilePath $exe -ArgumentList $args -WindowStyle Hidden\"";
+#else
+  std::string command = "mkdir -p \"$HOME/.ferryman/logs\" && nohup code-server --bind-addr 0.0.0.0:" +
+                        std::to_string(safe_port) + " --auth none";
+  for (const auto& arg : extra_args) {
+    command += " " + ShellEscapeForCommand(arg);
+  }
+  command += " > \"$HOME/.ferryman/logs/codeserver.log\" 2>&1 &";
+  return command;
+#endif
+}
+
+std::string BuildCodeServerStopCommand(int port) {
+  const int safe_port = NormalizePort(port, kDefaultCodeServerPort);
+#if defined(_WIN32)
+  return "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "
+         "\"$ErrorActionPreference='SilentlyContinue';"
+         "$pattern='--bind-addr\\s+0\\.0\\.0\\.0:" +
+         std::to_string(safe_port) +
+         "';"
+         "$procs=Get-CimInstance Win32_Process | Where-Object {"
+         "$_.Name -match 'code-server' -and $_.CommandLine -match $pattern"
+         "};"
+         "foreach($p in $procs){"
+         "Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue"
+         "}\"";
+#else
+  return "if command -v pkill >/dev/null 2>&1; then "
+         "pkill -f " +
+         ShellEscapeForCommand("code-server.*--bind-addr 0.0.0.0:" + std::to_string(safe_port)) +
+         " >/dev/null 2>&1 || true; fi";
+#endif
+}
+
+void StopCodeServerProcess(int port) {
+  const std::string stop_command = BuildCodeServerStopCommand(port);
+  if (stop_command.empty()) {
+    return;
+  }
+  RunCommandNoCapture(stop_command);
+}
+
+bool EnsureCodeServerRunning(const core::AppConfig& config, int port, std::string* detail, bool force_restart = false) {
+  const int safe_port = NormalizePort(port, kDefaultCodeServerPort);
+  const CodeServerRuntimeOptions runtime = ResolveCodeServerRuntimeOptions(config);
+  const bool can_probe = CodeServerHealthProbeSupported();
+
+  if (!force_restart && can_probe && ProbeCodeServerHealth(safe_port, runtime.https_enabled)) {
+    if (detail != nullptr) {
+      *detail = "already running at " + runtime.scheme + "://127.0.0.1:" + std::to_string(safe_port) +
+                " (" + runtime.summary + ")";
+    }
+    return true;
+  }
+
+  const std::string start_command = BuildCodeServerStartCommand(safe_port, runtime.start_args);
+  if (start_command.empty()) {
+    if (detail != nullptr) {
+      *detail = "unable to build startup command";
+    }
+    return false;
+  }
+
+  StopCodeServerProcess(safe_port);
+  RunCommandNoCapture(start_command);
+
+  if (!can_probe) {
+    if (detail != nullptr) {
+      *detail = "startup command issued (no health probe available, " + runtime.summary + ")";
+    }
+    return true;
+  }
+
+  for (int attempt = 0; attempt < 8; ++attempt) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    if (ProbeCodeServerHealth(safe_port, runtime.https_enabled)) {
+      if (detail != nullptr) {
+        *detail = "started at " + runtime.scheme + "://127.0.0.1:" + std::to_string(safe_port) +
+                  " (" + runtime.summary + ")";
+      }
+      return true;
+    }
+  }
+
+  if (detail != nullptr) {
+    *detail = "startup command issued but health check failed at " + runtime.scheme + "://127.0.0.1:" +
+              std::to_string(safe_port) + " (" + runtime.summary + ")";
+  }
+  return false;
 }
 
 bool DockerErrorLooksDaemonInactive(const std::string& error) {
@@ -441,6 +809,22 @@ bool PersistTlsPathsToConfig(const core::AppConfig& config, const std::filesyste
                             {
                                 {"tls_cert_file", NormalizePathForIni(crt_path)},
                                 {"tls_key_file", NormalizePathForIni(key_path)},
+                            },
+                            error);
+}
+
+bool PersistCodeServerConfigToDisk(const core::AppConfig& config, int port, bool https_enabled,
+                                   const std::string& tls_mode, const std::filesystem::path& cert_path,
+                                   const std::filesystem::path& key_path, std::string* error) {
+  return UpsertConfigValues(config.config_path,
+                            {
+                                {"codeserver_port", std::to_string(NormalizePort(port, kDefaultCodeServerPort))},
+                                {"codeserver_https_enabled", https_enabled ? "true" : "false"},
+                                {"codeserver_https_mode", NormalizeCodeServerTlsMode(tls_mode)},
+                                {"codeserver_https_cert_file",
+                                 cert_path.empty() ? std::string() : NormalizePathForIni(cert_path)},
+                                {"codeserver_https_key_file",
+                                 key_path.empty() ? std::string() : NormalizePathForIni(key_path)},
                             },
                             error);
 }
@@ -1196,6 +1580,13 @@ bool ServerApp::Start() {
     server_start_message += ", https=disabled, wss=disabled";
   }
   audit_logger_.AppendSystem("info", "server.start", server_start_message);
+
+  if (DetectCodeServerInstalled()) {
+    const int code_server_port = LoadCodeServerPort(config_);
+    std::string startup_detail;
+    const bool ensured = EnsureCodeServerRunning(config_, code_server_port, &startup_detail);
+    audit_logger_.AppendSystem(ensured ? "info" : "warn", "codeserver.startup", startup_detail);
+  }
   return true;
 #endif
 }
@@ -1411,6 +1802,10 @@ bool ServerApp::RegisterHttpRoutes() {
 
   http_service_.POST("/api/screen/upload/cancel", [this](HttpRequest* req, HttpResponse* resp) {
     return HandleScreenUploadCancel(req, resp);
+  });
+
+  http_service_.POST("/api/codeserver/config", [this](HttpRequest* req, HttpResponse* resp) {
+    return HandleCodeServerConfigUpdate(req, resp);
   });
 
   http_service_.GET("/api/tunnel/state", [this](HttpRequest* req, HttpResponse* resp) {
@@ -2755,6 +3150,144 @@ int ServerApp::HandleScreenUploadCancel(HttpRequest* req, HttpResponse* resp) {
   return Json(resp, 200, api::Success({
                              {"transfer_id", transfer_id, false},
                              {"cancelled", found ? "true" : "false", true},
+                         }));
+}
+
+int ServerApp::HandleCodeServerConfigUpdate(HttpRequest* req, HttpResponse* resp) {
+  auto session = RequireSession(req, resp);
+  if (!session.has_value()) {
+    return resp->status_code;
+  }
+  if (!DetectCodeServerInstalled()) {
+    return Json(resp, 400, api::Error("code-server is not installed", "codeserver_not_installed"));
+  }
+
+  const auto payload = ParseJsonOrNull(req->body);
+  const auto payload_has = [&payload](const char* key) -> bool {
+    return payload.has_value() && payload->is_object() && payload->contains(key);
+  };
+
+  const std::string port_query = QueryOf(req, "port");
+  const std::string alt_port_query = QueryOf(req, "codeserver_port");
+  const int requested_port = JsonInt(payload, "port",
+                                     JsonInt(payload, "codeserver_port",
+                                             ParseInt(port_query.empty() ? alt_port_query : port_query, 0)));
+
+  const std::string https_query = QueryOf(req, "https_enabled");
+  const bool has_requested_https_enabled = payload_has("https_enabled") || !https_query.empty();
+  const bool requested_https_enabled = JsonBool(payload, "https_enabled", ParseBool(https_query, true));
+
+  const std::string tls_mode_query = QueryOf(req, "tls_mode");
+  const std::string alt_tls_mode_query = QueryOf(req, "codeserver_https_mode");
+  const bool has_requested_tls_mode =
+      payload_has("tls_mode") || payload_has("codeserver_https_mode") || !tls_mode_query.empty() ||
+      !alt_tls_mode_query.empty();
+  const std::string requested_tls_mode = JsonString(
+      payload, "tls_mode",
+      JsonString(payload, "codeserver_https_mode", tls_mode_query.empty() ? alt_tls_mode_query : tls_mode_query));
+
+  const std::string cert_query = QueryOf(req, "custom_cert_path");
+  const std::string alt_cert_query = QueryOf(req, "codeserver_https_cert_file");
+  const bool has_requested_cert_path =
+      payload_has("custom_cert_path") || payload_has("codeserver_https_cert_file") || !cert_query.empty() ||
+      !alt_cert_query.empty();
+  const std::string requested_cert_path = util::Trim(
+      JsonString(payload, "custom_cert_path",
+                 JsonString(payload, "codeserver_https_cert_file", cert_query.empty() ? alt_cert_query : cert_query)));
+
+  const std::string key_query = QueryOf(req, "custom_key_path");
+  const std::string alt_key_query = QueryOf(req, "codeserver_https_key_file");
+  const bool has_requested_key_path =
+      payload_has("custom_key_path") || payload_has("codeserver_https_key_file") || !key_query.empty() ||
+      !alt_key_query.empty();
+  const std::string requested_key_path = util::Trim(
+      JsonString(payload, "custom_key_path",
+                 JsonString(payload, "codeserver_https_key_file", key_query.empty() ? alt_key_query : key_query)));
+
+  core::AppConfig current_config;
+  {
+    std::lock_guard<std::mutex> lock(codeserver_mu_);
+    current_config = config_;
+  }
+
+  const int current_port = LoadCodeServerPort(current_config);
+  const bool current_https_enabled = LoadCodeServerHttpsEnabled(current_config);
+  const std::string current_tls_mode = CodeServerTlsModeToString(LoadCodeServerTlsMode(current_config));
+  const std::filesystem::path current_cert_path = LoadCodeServerCustomCertPath(current_config);
+  const std::filesystem::path current_key_path = LoadCodeServerCustomKeyPath(current_config);
+
+  const int next_port = requested_port > 0 ? requested_port : current_port;
+  if (next_port <= 0 || next_port > 65535) {
+    return Json(resp, 400, api::Error("codeserver port is invalid"));
+  }
+
+  const bool next_https_enabled = has_requested_https_enabled ? requested_https_enabled : current_https_enabled;
+  const std::string next_tls_mode =
+      has_requested_tls_mode ? NormalizeCodeServerTlsMode(requested_tls_mode, current_tls_mode) : current_tls_mode;
+  const std::filesystem::path next_cert_path =
+      has_requested_cert_path ? ResolveCodeServerStoredPath(requested_cert_path) : current_cert_path;
+  const std::filesystem::path next_key_path =
+      has_requested_key_path ? ResolveCodeServerStoredPath(requested_key_path) : current_key_path;
+
+  if (next_https_enabled && next_tls_mode == "custom") {
+    if (next_cert_path.empty() || next_key_path.empty()) {
+      return Json(resp, 400, api::Error("custom cert mode requires cert and key paths"));
+    }
+    if (!FileExistsAndNonEmpty(next_cert_path) || !FileExistsAndNonEmpty(next_key_path)) {
+      return Json(resp, 400, api::Error("custom cert/key not found or empty", "invalid_custom_cert_paths"));
+    }
+  }
+
+  core::AppConfig runtime_config = current_config;
+  runtime_config.codeserver_port = next_port;
+  runtime_config.has_codeserver_port = true;
+  runtime_config.codeserver_https_enabled = next_https_enabled;
+  runtime_config.has_codeserver_https_enabled = true;
+  runtime_config.codeserver_https_mode = next_tls_mode;
+  runtime_config.has_codeserver_https_mode = true;
+  runtime_config.codeserver_https_cert_file = next_cert_path;
+  runtime_config.has_codeserver_https_cert_file = true;
+  runtime_config.codeserver_https_key_file = next_key_path;
+  runtime_config.has_codeserver_https_key_file = true;
+
+  std::string persist_error;
+  if (!PersistCodeServerConfigToDisk(runtime_config, next_port, next_https_enabled, next_tls_mode, next_cert_path,
+                                     next_key_path, &persist_error)) {
+    return Json(resp, 500,
+                api::Error(persist_error.empty() ? "failed to persist code-server config" : persist_error));
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(codeserver_mu_);
+    config_.codeserver_port = runtime_config.codeserver_port;
+    config_.has_codeserver_port = runtime_config.has_codeserver_port;
+    config_.codeserver_https_enabled = runtime_config.codeserver_https_enabled;
+    config_.has_codeserver_https_enabled = runtime_config.has_codeserver_https_enabled;
+    config_.codeserver_https_mode = runtime_config.codeserver_https_mode;
+    config_.has_codeserver_https_mode = runtime_config.has_codeserver_https_mode;
+    config_.codeserver_https_cert_file = runtime_config.codeserver_https_cert_file;
+    config_.has_codeserver_https_cert_file = runtime_config.has_codeserver_https_cert_file;
+    config_.codeserver_https_key_file = runtime_config.codeserver_https_key_file;
+    config_.has_codeserver_https_key_file = runtime_config.has_codeserver_https_key_file;
+  }
+
+  std::string startup_detail;
+  const bool ensured = EnsureCodeServerRunning(runtime_config, next_port, &startup_detail, true);
+  audit_logger_.Append(session->token, ensured ? "codeserver.config.update" : "codeserver.config.update.failed",
+                       startup_detail);
+  if (!ensured) {
+    return Json(resp, 500,
+                api::Error("failed to restart code-server: " + startup_detail, "codeserver_restart_failed"));
+  }
+
+  return Json(resp, 200, api::Success({
+                             {"codeserver_port", std::to_string(next_port), true},
+                             {"https_enabled", next_https_enabled ? "true" : "false", true},
+                             {"tls_mode", next_tls_mode, false},
+                             {"custom_cert_path", next_cert_path.string(), false},
+                             {"custom_key_path", next_key_path.string(), false},
+                             {"scheme", next_https_enabled ? "https" : "http", false},
+                             {"detail", startup_detail, false},
                          }));
 }
 
