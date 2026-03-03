@@ -23,6 +23,7 @@ After startup it runs a lightweight local HTTP/WebSocket server and serves an em
 - WebRTC signaling + native screen streaming and remote input injection
 - Docker container management (lifecycle/metrics/logs/files)
 - Dockurr VM management (create/start/stop/restart/logs/inspect)
+- built-in code-server panel (install/start/restart, port + TLS mode config, embedded IDE view)
 - built-in tunnel mapping panel (FerrymanProxy integration)
 - realtime device monitor dashboard (CPU/GPU/memory/disk)
 
@@ -57,6 +58,10 @@ The project keeps frontend and backend in one repository, uses explicit HTTP/Web
   - container list + start/stop/restart
   - CPU/memory/network/block I/O metrics and process view
   - inspect/logs and in-container file list/read/write/upload/download
+- **code-server panel**:
+  - detect host install state and support one-click install from UI
+  - launch/restart `code-server` with configurable port and HTTP/HTTPS
+  - TLS modes: `ferryman`, `selfsigned`, `custom`; runtime log: `~/.ferryman/logs/codeserver.log`
 - **Tunnel (NAT traversal) panel**:
   - FerrymanProxy host/port/token configuration
   - mapping CRUD (`tcp`/`udp`) with enable/disable + online test
@@ -227,6 +232,11 @@ https_port=18443
 tls_cert_file=
 tls_key_file=
 ws_port=18080
+codeserver_port=13337
+codeserver_https_enabled=true
+codeserver_https_mode=ferryman
+codeserver_https_cert_file=
+codeserver_https_key_file=
 tunnel_proxy_host=
 tunnel_proxy_port=17000
 tunnel_proxy_token=
@@ -240,6 +250,7 @@ Note:
 - If `tls_cert_file`/`tls_key_file` are empty, Ferryman auto-generates `~/.ferryman/cert/server.crt` and `~/.ferryman/cert/server.key` on first HTTPS startup.
 - Auto-generated certificate paths are written back into `~/.ferryman/config.ini` (`tls_cert_file` / `tls_key_file`).
 - Ferryman also initializes `~/.ferryman/logs/` and reserves `audit.log` path for audit output.
+- `codeserver_port/codeserver_https_enabled/codeserver_https_mode/codeserver_https_cert_file/codeserver_https_key_file` are used by the built-in code-server panel.
 - `tunnel_proxy_host/tunnel_proxy_port/tunnel_proxy_token/tunnel_mappings_json` are used by the built-in tunnel panel for NAT traversal settings.
 
 ## FerrymanProxy (Linux)
@@ -301,6 +312,7 @@ sudo systemctl status ferryman-proxy
 | `GET` | `/api/tasks/list` | List tasks |
 | `GET` | `/api/tasks/get` | Task detail/output |
 | `GET` | `/api/logs/tail` | Tail runtime audit logs |
+| `POST` | `/api/codeserver/config` | Update code-server port/TLS config, persist, and restart |
 | `GET` | `/api/dockurr/list` | List Dockurr VMs |
 | `POST` | `/api/dockurr/create` | Create VM (windows/macos, version/ram/disk/persist/name) |
 | `POST` | `/api/dockurr/start` | Start VM |

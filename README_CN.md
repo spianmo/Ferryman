@@ -23,6 +23,7 @@ Ferryman 是一个面向局域网场景的**单进程、单二进制远程访问
 - WebRTC 信令 + 原生屏幕流 + 远程输入回注
 - Docker 容器管理（生命周期/指标/日志/文件）
 - Dockurr 虚拟机管理（创建/启停/重启/日志/详情）
+- 内置 code-server 面板（安装/启动/重启、端口与 TLS 模式配置、内嵌 IDE 视图）
 - 内网穿透映射面板（FerrymanProxy 集成）
 - 设备实时监控（CPU/GPU/内存/磁盘）
 
@@ -57,6 +58,10 @@ Ferryman 是一个面向局域网场景的**单进程、单二进制远程访问
   - 容器列表 + 启停/重启
   - CPU/内存/网络/磁盘 I/O 指标与进程视图
   - inspect/日志与容器内文件浏览/读写/上传/下载
+- **code-server 面板**：
+  - 检测主机安装状态并支持 UI 一键安装
+  - 按可配置端口与 HTTP/HTTPS 模式启动/重启 `code-server`
+  - TLS 模式：`ferryman`、`selfsigned`、`custom`；运行日志：`~/.ferryman/logs/codeserver.log`
 - **内网穿透能力**：
   - FerrymanProxy 的 host/port/token 配置
   - `tcp`/`udp` 映射的新增、更新、删除、启用/禁用、在线测试
@@ -225,6 +230,11 @@ https_port=18443
 tls_cert_file=
 tls_key_file=
 ws_port=18080
+codeserver_port=13337
+codeserver_https_enabled=true
+codeserver_https_mode=ferryman
+codeserver_https_cert_file=
+codeserver_https_key_file=
 tunnel_proxy_host=
 tunnel_proxy_port=17000
 tunnel_proxy_token=
@@ -238,6 +248,7 @@ tunnel_mappings_json=[]
 - 当 `tls_cert_file`/`tls_key_file` 为空时，首次启用 HTTPS 会自动生成 `~/.ferryman/cert/server.crt` 与 `~/.ferryman/cert/server.key`。
 - 自动生成后的证书路径会回写到 `~/.ferryman/config.ini` 的 `tls_cert_file` / `tls_key_file`。
 - 启动时会初始化 `~/.ferryman/logs/`，并预留 `audit.log` 路径。
+- `codeserver_port/codeserver_https_enabled/codeserver_https_mode/codeserver_https_cert_file/codeserver_https_key_file` 用于内置 code-server 面板。
 - `tunnel_proxy_host/tunnel_proxy_port/tunnel_proxy_token/tunnel_mappings_json` 用于内网穿透配置（由前端“内网穿透”面板维护）。
 
 ## FerrymanProxy（Linux）
@@ -299,6 +310,7 @@ sudo systemctl status ferryman-proxy
 | `GET` | `/api/tasks/list` | 任务列表 |
 | `GET` | `/api/tasks/get` | 任务详情/输出 |
 | `GET` | `/api/logs/tail` | 拉取运行日志 |
+| `POST` | `/api/codeserver/config` | 更新 code-server 端口/TLS 配置并持久化后重启 |
 | `GET` | `/api/dockurr/list` | 查询 Dockurr 虚拟机列表 |
 | `POST` | `/api/dockurr/create` | 创建虚拟机（windows/macos、版本/内存/磁盘/持久化/名称） |
 | `POST` | `/api/dockurr/start` | 启动虚拟机 |
