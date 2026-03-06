@@ -24,6 +24,7 @@ Ferryman 是一个面向局域网场景的**单进程、单二进制远程访问
 - Docker 容器管理（生命周期/指标/日志/文件）
 - Dockurr 虚拟机管理（创建/启停/重启/日志/详情）
 - 内置 code-server 面板（安装/启动/重启、端口与 TLS 模式配置、内嵌 IDE 视图）
+- 内置 CodeAgent 面板（hapi 兼容前端 + C++ 后端 Runner）
 - 内网穿透映射面板（FerrymanProxy 集成）
 - 设备实时监控（CPU/GPU/内存/磁盘）
 
@@ -62,6 +63,11 @@ Ferryman 是一个面向局域网场景的**单进程、单二进制远程访问
   - 检测主机安装状态并支持 UI 一键安装
   - 按可配置端口与 HTTP/HTTPS 模式启动/重启 `code-server`
   - TLS 模式：`ferryman`、`selfsigned`、`custom`；运行日志：`~/.ferryman/logs/codeserver.log`
+- **CodeAgent 面板（hapi 兼容）**：
+  - C++ 后端实现 hapi Web API 兼容接口（`/api/auth`、`/api/sessions`、`/api/events`、`/api/machines` 等）
+  - 支持 Claude/Codex/Cursor/Gemini/OpenCode 命令模板调用
+  - 提供 Runner/会话状态跟踪与远程图形化控制
+  - 前端已并入 Ferryman UI（`#/codeagent`），直接渲染（非 iframe），与 code-server 运行时完全解耦
 - **内网穿透能力**：
   - FerrymanProxy 的 host/port/token 配置
   - `tcp`/`udp` 映射的新增、更新、删除、启用/禁用、在线测试
@@ -114,6 +120,12 @@ Ferryman (single process)
   |- WebRtcSignalingService
   `- ScreenService + VideoEncoder (ffmpeg)
 ```
+
+## CodeAgent 集成说明
+
+- Ferryman UI 新增独立 CodeAgent 页签（`#/codeagent`）。
+- CodeAgent 后端逻辑完全由 C++ 实现（`CodeAgentManager` + `ServerApp` 路由），并与 CodeServer 模块并行运行、互不依赖。
+- 仓库内拷贝的 hapi 前端源码已并入 `frontend/src/codeagent*`，与 Ferryman 前端统一构建。
 
 ## 仓库结构
 

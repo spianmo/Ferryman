@@ -20,7 +20,8 @@ class PtyManager {
 
   void SetOutputCallback(OutputCallback callback);
   std::optional<std::string> CreateTerminal(const std::string& owner_token, int cols, int rows,
-                                            std::string* error);
+                                            std::string* error,
+                                            const std::string& working_directory = "");
   bool WriteInput(const std::string& owner_token, const std::string& terminal_id, const std::string& data,
                   std::string* error);
   bool Resize(const std::string& owner_token, const std::string& terminal_id, int cols, int rows,

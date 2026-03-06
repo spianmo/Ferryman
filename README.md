@@ -24,6 +24,7 @@ After startup it runs a lightweight local HTTP/WebSocket server and serves an em
 - Docker container management (lifecycle/metrics/logs/files)
 - Dockurr VM management (create/start/stop/restart/logs/inspect)
 - built-in code-server panel (install/start/restart, port + TLS mode config, embedded IDE view)
+- built-in CodeAgent panel (hapi-compatible web UI + C++ backend runner)
 - built-in tunnel mapping panel (FerrymanProxy integration)
 - realtime device monitor dashboard (CPU/GPU/memory/disk)
 
@@ -62,6 +63,11 @@ The project keeps frontend and backend in one repository, uses explicit HTTP/Web
   - detect host install state and support one-click install from UI
   - launch/restart `code-server` with configurable port and HTTP/HTTPS
   - TLS modes: `ferryman`, `selfsigned`, `custom`; runtime log: `~/.ferryman/logs/codeserver.log`
+- **CodeAgent panel (hapi-compatible)**:
+  - C++ backend endpoint set compatible with hapi web API (`/api/auth`, `/api/sessions`, `/api/events`, `/api/machines`, etc.)
+  - supports Claude/Codex/Cursor/Gemini/OpenCode command templates
+  - runner/session tracking and remote browser control from Ferryman UI
+  - frontend is merged into Ferryman UI (`#/codeagent`) and rendered directly (no iframe), independent from code-server runtime
 - **Tunnel (NAT traversal) panel**:
   - FerrymanProxy host/port/token configuration
   - mapping CRUD (`tcp`/`udp`) with enable/disable + online test
@@ -114,6 +120,12 @@ Ferryman (single process)
   |- WebRtcSignalingService
   `- ScreenService + VideoEncoder (ffmpeg)
 ```
+
+## CodeAgent Integration
+
+- The CodeAgent module is a standalone panel in Ferryman UI (`#/codeagent`).
+- The CodeAgent backend is fully implemented in C++ (`CodeAgentManager` + HTTP handlers in `ServerApp`) and runs in parallel with code-server without shared process/state coupling.
+- Copied hapi frontend source is merged into `frontend/src/codeagent*` and built together with Ferryman UI.
 
 ## Repository Layout
 

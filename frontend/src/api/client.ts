@@ -565,6 +565,162 @@ export async function updateCodeServerConfig(token: string, payload: UpdateCodeS
   );
 }
 
+export async function getCodeAgentRunnerState(token: string) {
+  return request<{ state: Record<string, unknown> }>(
+    "/api/codeagent/runner/state",
+    { method: "GET" },
+    token
+  );
+}
+
+type CodeAgentRequestOptions = {
+  method?: "GET" | "POST" | "PATCH" | "DELETE";
+  body?: string;
+  token: string;
+};
+
+async function codeAgentRequest<T>(
+  path: string,
+  options: CodeAgentRequestOptions
+): Promise<ApiResponse<T>> {
+  const headers = new Headers();
+  headers.set("X-Session-Token", options.token);
+  if (options.body !== undefined) {
+    headers.set("Content-Type", "application/json");
+  }
+
+  const response = await fetch(`${apiBase()}${path}`, {
+    method: options.method ?? "GET",
+    headers,
+    body: options.body,
+    credentials: "include",
+  });
+  const text = await response.text();
+  try {
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    if (typeof parsed.ok === "boolean") {
+      return parsed as ApiResponse<T>;
+    }
+    return {
+      ok: response.ok,
+      ...(parsed as T),
+    } as ApiResponse<T>;
+  } catch {
+    return {
+      ok: false,
+      error: text || `HTTP ${response.status}`,
+      code: "invalid_json",
+    } as ApiResponse<T>;
+  }
+}
+
+export async function codeAgentListMachines(token: string) {
+  return codeAgentRequest<{ machines: Array<Record<string, unknown>> }>("/api/machines", { token });
+}
+
+export async function codeAgentListSessions(token: string) {
+  return codeAgentRequest<{ sessions: Array<Record<string, unknown>> }>("/api/sessions", { token });
+}
+
+export async function codeAgentGetSession(token: string, sessionId: string) {
+  return codeAgentRequest<{ session: Record<string, unknown> }>(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+    token,
+  });
+}
+
+export async function codeAgentGetMessages(token: string, sessionId: string, limit = 100) {
+  return codeAgentRequest<{
+    messages: Array<Record<string, unknown>>;
+    page: Record<string, unknown>;
+  }>(`/api/sessions/${encodeURIComponent(sessionId)}/messages?limit=${limit}`, { token });
+}
+
+export async function codeAgentSendMessage(token: string, sessionId: string, text: string) {
+  return codeAgentRequest<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
+    token,
+    method: "POST",
+    body: JSON.stringify({ text }),
+  });
+}
+
+export async function codeAgentSpawnSession(
+  token: string,
+  machineId: string,
+  payload: {
+    directory: string;
+    agent: "claude" | "codex" | "cursor" | "gemini" | "opencode";
+    model?: string;
+    yolo?: boolean;
+  }
+) {
+  return codeAgentRequest<{ type: "success" | "error"; sessionId?: string; message?: string }>(
+    `/api/machines/${encodeURIComponent(machineId)}/spawn`,
+    {
+      token,
+      method: "POST",
+      body: JSON.stringify(payload),
+    }
+  );
+}
+
+export async function codeAgentArchiveSession(token: string, sessionId: string) {
+  return codeAgentRequest<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(sessionId)}/archive`, {
+    token,
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function codeAgentAbortSession(token: string, sessionId: string) {
+  return codeAgentRequest<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(sessionId)}/abort`, {
+    token,
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function codeAgentResumeSession(token: string, sessionId: string) {
+  return codeAgentRequest<{ type: "success" | "error"; sessionId?: string; message?: string }>(
+    `/api/sessions/${encodeURIComponent(sessionId)}/resume`,
+    {
+      token,
+      method: "POST",
+      body: JSON.stringify({}),
+    }
+  );
+}
+
+export async function codeAgentRenameSession(token: string, sessionId: string, name: string) {
+  return codeAgentRequest<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+    token,
+    method: "PATCH",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function codeAgentDeleteSession(token: string, sessionId: string) {
+  return codeAgentRequest<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+    token,
+    method: "DELETE",
+  });
+}
+
+export async function codeAgentSetPermissionMode(token: string, sessionId: string, mode: string) {
+  return codeAgentRequest<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(sessionId)}/permission-mode`, {
+    token,
+    method: "POST",
+    body: JSON.stringify({ mode }),
+  });
+}
+
+export async function codeAgentSetModelMode(token: string, sessionId: string, model: string) {
+  return codeAgentRequest<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(sessionId)}/model`, {
+    token,
+    method: "POST",
+    body: JSON.stringify({ model }),
+  });
+}
+
 export async function upsertTunnelMapping(token: string, payload: UpsertTunnelMappingPayload) {
   return request<{ mapping: TunnelMappingState; updated: boolean }>(
     "/api/tunnel/mapping/upsert",

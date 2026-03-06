@@ -1,6 +1,9 @@
 import React, { createContext, useContext, useMemo, useState } from "react";
+import codeagentEn from "./codeagent/lib/locales/en";
+import codeagentZhCN from "./codeagent/lib/locales/zh-CN";
 
 export type Lang = "zh-CN" | "en";
+export const CODEAGENT_I18N_PREFIX = "ca.";
 
 type Dict = Record<string, string>;
 
@@ -13,6 +16,7 @@ const DICTS: Record<Lang, Dict> = {
     "nav.dockurr": "Dockurr",
     "nav.docker": "Docker",
     "nav.codeserver": "Code Server",
+    "nav.codeagent": "CodeAgent",
     "nav.screen": "Screen",
     "nav.monitor": "Monitor",
     "nav.tunnel": "Tunnel",
@@ -195,6 +199,34 @@ const DICTS: Record<Lang, Dict> = {
     "codeserver.exit_fullscreen": "Exit fullscreen",
     "codeserver.fullscreen_failed": "Failed to enter fullscreen.",
     "codeserver.fullscreen_unsupported": "Fullscreen is not supported in this browser.",
+
+    "codeagent.title": "CodeAgent",
+    "codeagent.subtitle": "HAPI-style coding workspace integrated directly in Ferryman.",
+    "codeagent.runner_running": "Runner running",
+    "codeagent.runner_unknown": "Runner unknown",
+    "codeagent.loading": "Loading…",
+    "codeagent.new_session": "New Session",
+    "codeagent.spawn_dir_placeholder": "Project directory, e.g. /Users/me/project",
+    "codeagent.spawn": "Spawn",
+    "codeagent.machine": "Machine",
+    "codeagent.sessions": "Sessions",
+    "codeagent.thinking": "Thinking…",
+    "codeagent.empty_sessions": "No sessions yet. Create one to start coding.",
+    "codeagent.select_session": "Select a session",
+    "codeagent.empty_messages": "No messages yet.",
+    "codeagent.message_placeholder": "Ask the coding agent...",
+    "codeagent.abort": "Abort",
+    "codeagent.rename": "Rename",
+    "codeagent.delete": "Delete",
+    "codeagent.archive": "Archive",
+    "codeagent.rename_prompt": "Rename session",
+    "codeagent.delete_confirm": "Delete session {name}?",
+    "codeagent.spawn_need_dir": "Please enter a project directory.",
+    "codeagent.spawn_need_machine": "No runner machine is available.",
+    "codeagent.time_just_now": "just now",
+    "codeagent.time_minutes_ago": "{n}m ago",
+    "codeagent.time_hours_ago": "{n}h ago",
+    "codeagent.time_days_ago": "{n}d ago",
 
     "terminal.title": "Terminal",
     "terminal.status": "Status",
@@ -412,6 +444,7 @@ const DICTS: Record<Lang, Dict> = {
     "nav.dockurr": "Dockurr",
     "nav.docker": "Docker",
     "nav.codeserver": "Code Server",
+    "nav.codeagent": "CodeAgent",
     "nav.screen": "屏幕",
     "nav.monitor": "监控",
     "nav.tunnel": "内网穿透",
@@ -594,6 +627,34 @@ const DICTS: Record<Lang, Dict> = {
     "codeserver.exit_fullscreen": "退出全屏",
     "codeserver.fullscreen_failed": "进入全屏失败。",
     "codeserver.fullscreen_unsupported": "当前浏览器不支持全屏。",
+
+    "codeagent.title": "CodeAgent",
+    "codeagent.subtitle": "在 Ferryman 内直接集成 HAPI 风格编码工作台。",
+    "codeagent.runner_running": "Runner 运行中",
+    "codeagent.runner_unknown": "Runner 状态未知",
+    "codeagent.loading": "加载中…",
+    "codeagent.new_session": "新建会话",
+    "codeagent.spawn_dir_placeholder": "项目目录，例如 /Users/me/project",
+    "codeagent.spawn": "创建",
+    "codeagent.machine": "机器",
+    "codeagent.sessions": "会话列表",
+    "codeagent.thinking": "思考中…",
+    "codeagent.empty_sessions": "暂无会话，先创建一个开始编码。",
+    "codeagent.select_session": "请选择一个会话",
+    "codeagent.empty_messages": "还没有消息。",
+    "codeagent.message_placeholder": "向编码助手发送消息...",
+    "codeagent.abort": "中止",
+    "codeagent.rename": "重命名",
+    "codeagent.delete": "删除",
+    "codeagent.archive": "归档",
+    "codeagent.rename_prompt": "重命名会话",
+    "codeagent.delete_confirm": "确定删除会话 {name}？",
+    "codeagent.spawn_need_dir": "请先输入项目目录。",
+    "codeagent.spawn_need_machine": "当前没有可用 Runner 机器。",
+    "codeagent.time_just_now": "刚刚",
+    "codeagent.time_minutes_ago": "{n} 分钟前",
+    "codeagent.time_hours_ago": "{n} 小时前",
+    "codeagent.time_days_ago": "{n} 天前",
 
     "terminal.title": "远程终端",
     "terminal.status": "状态",
@@ -805,6 +866,20 @@ const DICTS: Record<Lang, Dict> = {
   },
 };
 
+function namespaceDict(dict: Dict, prefix: string): Dict {
+  return Object.fromEntries(
+    Object.entries(dict).map(([key, value]) => [`${prefix}${key}`, value]),
+  );
+}
+
+const CODEAGENT_DICTS: Record<Lang, Dict> = {
+  en: namespaceDict(codeagentEn as Dict, CODEAGENT_I18N_PREFIX),
+  "zh-CN": namespaceDict(codeagentZhCN as Dict, CODEAGENT_I18N_PREFIX),
+};
+
+Object.assign(DICTS.en, CODEAGENT_DICTS.en);
+Object.assign(DICTS["zh-CN"], CODEAGENT_DICTS["zh-CN"]);
+
 function detectLang(): Lang {
   const raw = (typeof navigator !== "undefined" ? navigator.language : "en").toLowerCase();
   if (raw.startsWith("zh")) return "zh-CN";
@@ -822,7 +897,7 @@ type I18nApi = {
   t: (key: string, vars?: Record<string, string | number>) => string;
 };
 
-const I18nContext = createContext<I18nApi | null>(null);
+export const I18nContext = createContext<I18nApi | null>(null);
 
 const STORAGE_KEY = "ferryman.lang";
 

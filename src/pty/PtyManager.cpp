@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
 #include <limits>
 #include <thread>
@@ -148,7 +149,21 @@ void PtyManager::SetOutputCallback(OutputCallback callback) {
 }
 
 std::optional<std::string> PtyManager::CreateTerminal(const std::string& owner_token, int cols, int rows,
-                                                      std::string* error) {
+                                                      std::string* error,
+                                                      const std::string& working_directory) {
+  std::string launch_directory;
+  if (!working_directory.empty()) {
+    std::error_code ec;
+    const std::filesystem::path candidate = std::filesystem::path(working_directory).lexically_normal();
+    if (!std::filesystem::exists(candidate, ec) || ec || !std::filesystem::is_directory(candidate, ec) || ec) {
+      if (error != nullptr) {
+        *error = "working directory is not accessible: " + candidate.string();
+      }
+      return std::nullopt;
+    }
+    launch_directory = candidate.string();
+  }
+
 #if defined(_WIN32)
   cols = std::clamp(cols > 0 ? cols : 120, 1, 400);
   rows = std::clamp(rows > 0 ? rows : 30, 1, 200);
@@ -241,12 +256,14 @@ std::optional<std::string> PtyManager::CreateTerminal(const std::string& owner_t
                                 ? std::string(shell_env)
                                 : std::string("C:\\Windows\\System32\\cmd.exe");
   std::wstring shell_w = Utf8ToWide(shell);
+  std::wstring launch_directory_w = Utf8ToWide(launch_directory);
+  LPCWSTR current_directory = launch_directory.empty() ? nullptr : launch_directory_w.c_str();
 
   STARTUPINFOEXW startup_info{};
   startup_info.StartupInfo.cb = sizeof(startup_info);
   startup_info.lpAttributeList = attr_list;
   if (!::CreateProcessW(shell_w.c_str(), nullptr, nullptr, nullptr, FALSE,
-                        EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr,
+                        EXTENDED_STARTUPINFO_PRESENT, nullptr, current_directory,
                         &startup_info.StartupInfo, &process_info)) {
     if (error != nullptr) {
       *error = "CreateProcessW failed: " + WinErrorToString(::GetLastError());
@@ -310,6 +327,9 @@ std::optional<std::string> PtyManager::CreateTerminal(const std::string& owner_t
   }
 
   if (pid == 0) {
+    if (!launch_directory.empty()) {
+      (void)::chdir(launch_directory.c_str());
+    }
     const char* shell = std::getenv("SHELL");
     if (shell == nullptr || shell[0] == '\0') {
       shell = "/bin/bash";

@@ -33,4 +33,25 @@
     object-fit: contain;
     border-radius: 0;
   }
+
+  .codeagent-markdown a {
+    @apply text-sky-600 underline dark:text-sky-300;
+  }
+
+  .codeagent-markdown ul,
+  .codeagent-markdown ol {
+    @apply my-2 pl-5;
+  }
+
+  .codeagent-markdown code {
+    @apply rounded bg-slate-200/70 px-1 py-0.5 text-[0.92em] dark:bg-neutral-700/70;
+  }
+
+  .codeagent-markdown pre {
+    @apply overflow-x-auto rounded-xl bg-slate-900 p-2 text-slate-100 dark:bg-neutral-950;
+  }
+
+  .codeagent-markdown pre code {
+    @apply bg-transparent p-0;
+  }
 }

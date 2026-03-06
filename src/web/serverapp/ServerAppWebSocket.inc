@@ -1,0 +1,1601 @@
+void ServerApp::SendToWs(std::uintptr_t channel_key, const std::string& payload) {
+  WebSocketChannelPtr channel;
+  {
+    std::lock_guard<std::mutex> lock(ws_mu_);
+    auto it = ws_clients_.find(channel_key);
+    if (it == ws_clients_.end()) {
+      return;
+    }
+    channel = it->second.channel;
+  }
+  if (channel) {
+    channel->send(payload);
+  }
+}
+
+ServerApp::NativeCaptureDemand ServerApp::CollectNativeCaptureDemandLocked() const {
+  NativeCaptureDemand demand;
+  std::unordered_map<std::string, size_t> source_counts;
+  for (const auto& [_, client] : ws_clients_) {
+    if (client.channel_type != "webrtc" || !client.native_stream_subscribed || !client.channel) {
+      continue;
+    }
+    demand.subscriber_count += 1;
+    demand.fps = std::max(demand.fps, std::clamp(client.native_stream_fps, kNativeCaptureMinFps,
+                                                 kNativeCaptureMaxFps));
+    if (client.native_stream_codec == "av1") {
+      demand.want_av1 = true;
+    } else if (client.native_stream_codec == "vp9") {
+      demand.want_vp9 = true;
+    } else if (client.native_stream_codec == "vp8") {
+      demand.want_vp8 = true;
+    } else if (client.native_stream_codec == "h265") {
+      demand.want_h265 = true;
+    } else if (client.native_stream_codec == "h264") {
+      demand.want_h264 = true;
+    } else {
+      demand.want_jpeg = true;
+    }
+    demand.scale_percent =
+        std::max(demand.scale_percent, std::clamp(client.native_stream_scale_percent, kNativeScaleMinPercent,
+                                                  kNativeScaleMaxPercent));
+    demand.video_bitrate_bps =
+        std::max(demand.video_bitrate_bps,
+                 std::clamp(client.native_stream_video_bitrate_bps, kNativeBitrateMinBps, kNativeBitrateMaxBps));
+    source_counts[client.native_stream_source_id] += 1;
+  }
+
+  size_t best_source_votes = 0;
+  for (const auto& [source_id, votes] : source_counts) {
+    if (votes > best_source_votes || (votes == best_source_votes && source_id < demand.source_id)) {
+      demand.source_id = source_id;
+      best_source_votes = votes;
+    }
+  }
+  return demand;
+}
+
+void ServerApp::RefreshNativeCaptureState(const std::string& actor_session_token) {
+  const auto append_capture_log = [this, &actor_session_token](const std::string& level,
+                                                                const std::string& detail) {
+    if (actor_session_token.empty()) {
+      audit_logger_.AppendSystem(level, "screen.capture", detail);
+      return;
+    }
+    audit_logger_.AppendWithLevel(level, actor_session_token, "screen.capture", detail);
+  };
+
+  NativeCaptureDemand demand;
+  {
+    std::lock_guard<std::mutex> lock(ws_mu_);
+    demand = CollectNativeCaptureDemandLocked();
+  }
+
+  screen_service_.SetEncodingTargets(demand.want_jpeg, demand.want_h264, demand.want_h265, demand.want_vp8,
+                                     demand.want_vp9, demand.want_av1);
+
+  if (demand.subscriber_count == 0) {
+    if (screen_service_.IsCapturing()) {
+      screen_service_.StopCapture();
+      append_capture_log("info", "native capture stopped (no subscribers)");
+    }
+    active_capture_fps_ = 0;
+    active_capture_scale_percent_ = kNativeScaleDefaultPercent;
+    active_capture_video_bitrate_bps_ = kNativeBitrateDefaultBps;
+    return;
+  }
+
+  const int target_fps = std::clamp(demand.fps > 0 ? demand.fps : kNativeCaptureFps, kNativeCaptureMinFps,
+                                    kNativeCaptureMaxFps);
+  const int target_scale_percent =
+      std::clamp(demand.scale_percent > 0 ? demand.scale_percent : kNativeScaleDefaultPercent,
+                 kNativeScaleMinPercent, kNativeScaleMaxPercent);
+  const int target_video_bitrate_bps =
+      std::clamp(demand.video_bitrate_bps > 0 ? demand.video_bitrate_bps : kNativeBitrateDefaultBps,
+                 kNativeBitrateMinBps, kNativeBitrateMaxBps);
+  std::string source_error;
+  const std::string target_source_id = screen_service_.NormalizeCaptureSourceId(demand.source_id, &source_error);
+  if (target_source_id.empty()) {
+    if (screen_service_.IsCapturing()) {
+      screen_service_.StopCapture();
+    }
+    active_capture_fps_ = 0;
+    append_capture_log("warn", source_error.empty() ? "no capture source available" : source_error);
+    return;
+  }
+
+  screen_service_.SetEncodingProfile(target_scale_percent, target_video_bitrate_bps);
+  active_capture_scale_percent_ = target_scale_percent;
+  active_capture_video_bitrate_bps_ = target_video_bitrate_bps;
+
+  const std::string active_source_id = screen_service_.ActiveCaptureSourceId();
+  if (screen_service_.IsCapturing() && active_capture_fps_ == target_fps && active_source_id == target_source_id) {
+    return;
+  }
+
+  if (screen_service_.IsCapturing()) {
+    screen_service_.StopCapture();
+    active_capture_fps_ = 0;
+  }
+
+  std::string screen_error;
+  if (!screen_service_.StartCapture(target_fps, target_source_id, &screen_error)) {
+    std::cerr << "[ferryman] native screen capture unavailable: " << screen_error << '\n';
+    append_capture_log("warn", screen_error);
+    return;
+  }
+  active_capture_fps_ = target_fps;
+  const std::string running_source_id = screen_service_.ActiveCaptureSourceId();
+
+  append_capture_log("info",
+                     "native capture started (subscribers=" +
+                         std::to_string(demand.subscriber_count) +
+                         ", fps=" + std::to_string(target_fps) +
+                         ", scale=" + std::to_string(target_scale_percent) +
+                         ", bitrate=" + std::to_string(target_video_bitrate_bps) +
+                         ", source_id=" + (running_source_id.empty() ? target_source_id : running_source_id) + ")");
+}
+
+void ServerApp::SyncNativeSubscribersToActiveSource() {
+  const std::string active_source_id = screen_service_.ActiveCaptureSourceId();
+  if (active_source_id.empty()) {
+    return;
+  }
+
+  const int effective_fps = active_capture_fps_.load();
+  const int effective_scale_percent = active_capture_scale_percent_.load();
+  const int effective_video_bitrate_bps = active_capture_video_bitrate_bps_.load();
+
+  struct UpdateTarget {
+    WebSocketChannelPtr channel;
+    std::string codec;
+  };
+  std::vector<UpdateTarget> targets;
+  {
+    std::lock_guard<std::mutex> lock(ws_mu_);
+    for (auto& [_, client] : ws_clients_) {
+      if (client.channel_type != "webrtc" || !client.native_stream_subscribed || !client.channel) {
+        continue;
+      }
+      if (client.native_stream_source_id == active_source_id) {
+        continue;
+      }
+      client.native_stream_source_id = active_source_id;
+      targets.push_back({client.channel, client.native_stream_codec});
+    }
+  }
+  if (targets.empty()) {
+    return;
+  }
+
+  const std::string resolution_tier = NativeResolutionTierFromScale(effective_scale_percent);
+  const std::string bitrate_tier = NativeBitrateTierFromBps(effective_video_bitrate_bps);
+  for (auto& target : targets) {
+    target.channel->send(api::Success({
+        {"event", "native_subscribed", false},
+        {"capture_running", screen_service_.IsCapturing() ? "true" : "false", true},
+        {"codec", target.codec, false},
+        {"source_id", active_source_id, false},
+        {"fps", std::to_string(effective_fps > 0 ? effective_fps : kNativeCaptureFps), true},
+        {"resolution_tier", resolution_tier, false},
+        {"scale_percent", std::to_string(effective_scale_percent), true},
+        {"bitrate_tier", bitrate_tier, false},
+        {"bitrate_bps", std::to_string(effective_video_bitrate_bps), true},
+        {"transport", "ws-binary", false},
+    }));
+  }
+}
+
+void ServerApp::HandleWsOpen(const WebSocketChannelPtr& channel, const HttpRequestPtr& req) {
+  const std::uintptr_t key = reinterpret_cast<std::uintptr_t>(channel.get());
+  std::string ws_path = req->path;
+  const size_t qpos = ws_path.find('?');
+  if (qpos != std::string::npos) {
+    ws_path = ws_path.substr(0, qpos);
+  }
+
+  std::string channel_type;
+  if (ws_path == "/ws/terminal") {
+    channel_type = "terminal";
+  } else if (ws_path == "/ws/codeagent/terminal") {
+    channel_type = "codeagent_terminal";
+  } else if (ws_path == "/ws/codeagent/events") {
+    channel_type = "codeagent_events";
+  } else if (ws_path == "/ws/webrtc") {
+    channel_type = "webrtc";
+  } else if (ws_path == "/ws/logs") {
+    channel_type = "logs";
+  } else if (ws_path == "/ws/dockurr") {
+    channel_type = "dockurr";
+  } else if (ws_path == "/ws/monitor") {
+    channel_type = "monitor";
+  } else if (ws_path == "/ws/tunnel") {
+    channel_type = "tunnel";
+  } else {
+    audit_logger_.AppendSystem("warn", "ws.open.reject", "unknown path: " + req->path);
+    channel->send(api::Error("unknown websocket path"));
+    channel->close();
+    return;
+  }
+
+  std::string token;
+  auto token_it = req->query_params.find("token");
+  if (token_it != req->query_params.end()) {
+    token = token_it->second;
+  }
+  if (token.empty()) {
+    token = util::Trim(HeaderOf(req.get(), "X-Session-Token"));
+  }
+  if (token.empty()) {
+    token = util::Trim(HeaderOf(req.get(), "x-session-token"));
+  }
+  if (token.empty()) {
+    std::string cookie = HeaderOf(req.get(), "Cookie");
+    if (cookie.empty()) {
+      cookie = HeaderOf(req.get(), "cookie");
+    }
+    token = util::Trim(CookieValue(cookie, "ferryman_session_token"));
+  }
+
+  WsClient client;
+  client.channel_type = channel_type;
+  client.channel = channel;
+  if (channel_type == "codeagent_terminal" || channel_type == "codeagent_events") {
+    auto session = session_manager_.GetSession(token);
+    if (!session.has_value()) {
+      audit_logger_.AppendSystem("warn", "ws.open.reject", "unauthorized codeagent token on " + req->path);
+      channel->send(api::Error("unauthorized", "unauthorized"));
+      channel->close();
+      return;
+    }
+    session_manager_.Touch(token);
+    client.session_token = token;
+    client.codeagent_namespace = "default";
+    if (channel_type == "codeagent_events") {
+      auto it = req->query_params.find("all");
+      client.codeagent_events_all = it != req->query_params.end() ? ParseBool(it->second, false) : false;
+
+      it = req->query_params.find("sessionId");
+      if (it != req->query_params.end()) {
+        client.codeagent_events_session_id = util::Trim(it->second);
+      }
+
+      it = req->query_params.find("machineId");
+      if (it != req->query_params.end()) {
+        client.codeagent_events_machine_id = util::Trim(it->second);
+      }
+
+      it = req->query_params.find("visibility");
+      if (it != req->query_params.end()) {
+        const std::string visibility = util::Trim(it->second);
+        if (!visibility.empty()) {
+          client.codeagent_events_visibility = visibility;
+        }
+      }
+
+      client.codeagent_events_cursor_key = "codeagent-events-ws-" + util::RandomHex(18);
+    }
+  } else {
+    auto session = session_manager_.GetSession(token);
+    if (!session.has_value()) {
+      audit_logger_.AppendSystem("warn", "ws.open.reject", "unauthorized token on " + req->path);
+      channel->send(api::Error("unauthorized", "unauthorized"));
+      channel->close();
+      return;
+    }
+    client.session_token = token;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(ws_mu_);
+    ws_clients_[key] = client;
+  }
+
+  audit_logger_.Append(token, "ws.open", channel_type);
+  channel->send(api::Success({
+      {"event", "connected", false},
+      {"channel", channel_type, false},
+  }));
+
+  if (channel_type == "logs") {
+    const std::string snapshot = api::Success({
+        {"event", "logs_snapshot", false},
+        {"items", audit_logger_.Tail(300), true},
+    });
+    channel->send(snapshot);
+  } else if (channel_type == "dockurr") {
+    std::string error;
+    const auto vms = dockurr_manager_.ListVms(&error);
+    if (!error.empty()) {
+      channel->send(api::Success({
+          {"event", "dockurr_error", false},
+          {"error", error, false},
+      }));
+    } else {
+      channel->send(BuildDockurrSnapshotPayload(vms));
+    }
+  } else if (channel_type == "monitor") {
+    channel->send(api::Success({
+        {"event", "monitor_snapshot", false},
+        {"snapshot", system_monitor_.SnapshotJson(), true},
+    }));
+  } else if (channel_type == "tunnel") {
+    channel->send(BuildTunnelSnapshotPayload(tunnel_manager_.Snapshot()));
+  } else if (channel_type == "codeagent_events") {
+    StartCodeAgentEventsWsLoop(key);
+  }
+}
+
+void ServerApp::StartCodeAgentEventsWsLoop(std::uintptr_t channel_key) {
+  std::thread([this, channel_key]() {
+    const std::string subscription_id = "sub-" + util::RandomHex(12);
+    std::int64_t last_heartbeat_at_ms = 0;
+    bool announced_connected = false;
+
+    while (running_.load()) {
+      WsClient client;
+      {
+        std::lock_guard<std::mutex> lock(ws_mu_);
+        auto it = ws_clients_.find(channel_key);
+        if (it == ws_clients_.end() || it->second.channel_type != "codeagent_events") {
+          break;
+        }
+        client = it->second;
+      }
+
+      if (!announced_connected) {
+        announced_connected = true;
+        SendToWs(channel_key, json{{"type", "connection-changed"},
+                                   {"data", {{"status", "connected"}, {"subscriptionId", subscription_id}}}}
+                                   .dump());
+      }
+
+      codeagent::EventQuery query;
+      query.all = client.codeagent_events_all;
+      query.session_id = client.codeagent_events_session_id;
+      query.machine_id = client.codeagent_events_machine_id;
+
+      const std::string cursor_key =
+          client.codeagent_events_cursor_key.empty() ? client.session_token : client.codeagent_events_cursor_key;
+      json drained =
+          codeagent_manager_.DrainEventsForToken(cursor_key, client.codeagent_namespace, query,
+                                                 client.codeagent_events_visibility, /*wait_ms=*/10000);
+      const json events = drained.value("events", json::array());
+
+      if (events.is_array() && !events.empty()) {
+        for (const auto& event : events) {
+          SendToWs(channel_key, event.dump());
+        }
+        continue;
+      }
+
+      const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::system_clock::now().time_since_epoch())
+                              .count();
+      if (last_heartbeat_at_ms == 0 || now_ms - last_heartbeat_at_ms >= 15000) {
+        last_heartbeat_at_ms = now_ms;
+        SendToWs(channel_key, json{{"type", "heartbeat"}, {"data", {{"timestamp", now_ms}}}}.dump());
+      }
+    }
+  }).detach();
+}
+
+void ServerApp::HandleWsMessage(const WebSocketChannelPtr& channel, const std::string& message) {
+  const std::uintptr_t key = reinterpret_cast<std::uintptr_t>(channel.get());
+  std::string channel_type;
+  {
+    std::lock_guard<std::mutex> lock(ws_mu_);
+    auto it = ws_clients_.find(key);
+    if (it == ws_clients_.end()) {
+      return;
+    }
+    channel_type = it->second.channel_type;
+  }
+
+  if (channel_type == "terminal") {
+    HandleTerminalWsMessage(key, message);
+  } else if (channel_type == "codeagent_terminal") {
+    HandleCodeAgentTerminalWsMessage(key, message);
+  } else if (channel_type == "codeagent_events") {
+    // CodeAgent events channel is server-push only.
+    return;
+  } else if (channel_type == "webrtc") {
+    HandleWebRtcWsMessage(key, message);
+  } else if (channel_type == "logs") {
+    HandleLogsWsMessage(key, message);
+  } else if (channel_type == "dockurr") {
+    HandleDockurrWsMessage(key, message);
+  } else if (channel_type == "monitor") {
+    HandleMonitorWsMessage(key, message);
+  } else if (channel_type == "tunnel") {
+    HandleTunnelWsMessage(key, message);
+  } else {
+    audit_logger_.AppendSystem("warn", "ws.message.reject", "unknown channel type");
+  }
+}
+
+void ServerApp::HandleWsClose(const WebSocketChannelPtr& channel) {
+  const std::uintptr_t key = reinterpret_cast<std::uintptr_t>(channel.get());
+  WsClient client;
+  bool found = false;
+  bool should_refresh_capture = false;
+
+  {
+    std::lock_guard<std::mutex> lock(ws_mu_);
+    auto it = ws_clients_.find(key);
+    if (it != ws_clients_.end()) {
+      client = it->second;
+      should_refresh_capture = client.channel_type == "webrtc" && client.native_stream_subscribed;
+      ws_clients_.erase(it);
+      found = true;
+    }
+  }
+
+  if (!found) {
+    return;
+  }
+
+  if ((client.channel_type == "terminal" || client.channel_type == "codeagent_terminal") &&
+      !client.terminal_id.empty()) {
+    std::string error;
+    pty_manager_.CloseTerminal(client.session_token, client.terminal_id, &error);
+  }
+
+  if (client.channel_type == "webrtc") {
+    signaling_service_.Leave(key);
+  }
+
+  if (should_refresh_capture) {
+    RefreshNativeCaptureState(client.session_token);
+  }
+
+  audit_logger_.Append(client.session_token, "ws.close", client.channel_type);
+}
+
+void ServerApp::HandleTerminalWsMessage(std::uintptr_t channel_key, const std::string& message) {
+  const auto payload = ParseJsonOrNull(message);
+  if (!payload.has_value() || !payload->is_object()) {
+    audit_logger_.AppendSystem("warn", "terminal.ws.invalid", "invalid json payload");
+    SendToWs(channel_key, api::Error("invalid json payload"));
+    return;
+  }
+  const std::string action = JsonString(payload, "action");
+
+  WsClient client;
+  {
+    std::lock_guard<std::mutex> lock(ws_mu_);
+    auto it = ws_clients_.find(channel_key);
+    if (it == ws_clients_.end()) {
+      return;
+    }
+    client = it->second;
+  }
+
+  auto session = session_manager_.GetSession(client.session_token);
+  if (!session.has_value()) {
+    audit_logger_.Append(client.session_token, "terminal.ws.reject", "session expired");
+    SendToWs(channel_key, api::Error("session expired", "unauthorized"));
+    return;
+  }
+
+  if (action == "open") {
+    audit_logger_.Append(client.session_token, "terminal.open.request",
+                         "cols=" + std::to_string(JsonInt(payload, "cols", 120)) +
+                             ", rows=" + std::to_string(JsonInt(payload, "rows", 30)));
+
+    std::string error;
+    auto terminal_id = pty_manager_.CreateTerminal(client.session_token,
+                                                   JsonInt(payload, "cols", 120),
+                                                   JsonInt(payload, "rows", 30),
+                                                   &error);
+    if (!terminal_id.has_value()) {
+      audit_logger_.Append(client.session_token, "terminal.open.error",
+                           error.empty() ? "failed to create terminal" : error);
+      SendToWs(channel_key, api::Error(error.empty() ? "failed to create terminal" : error));
+      return;
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(ws_mu_);
+      auto it = ws_clients_.find(channel_key);
+      if (it != ws_clients_.end()) {
+        it->second.terminal_id = *terminal_id;
+      }
+    }
+
+    audit_logger_.Append(client.session_token, "terminal.open", *terminal_id);
+    SendToWs(channel_key, api::Success({
+        {"event", "terminal_open", false},
+        {"terminal_id", *terminal_id, false},
+    }));
+    return;
+  }
+
+  if (action == "attach") {
+    const std::string terminal_id = JsonString(payload, "terminal_id");
+    const auto terminals = pty_manager_.ListTerminals(client.session_token);
+    if (std::find(terminals.begin(), terminals.end(), terminal_id) == terminals.end()) {
+      audit_logger_.Append(client.session_token, "terminal.attach.error", "terminal not found: " + terminal_id);
+      SendToWs(channel_key, api::Error("terminal not found", "not_found"));
+      return;
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(ws_mu_);
+      auto it = ws_clients_.find(channel_key);
+      if (it != ws_clients_.end()) {
+        it->second.terminal_id = terminal_id;
+      }
+    }
+
+    SendToWs(channel_key, api::Success({
+        {"event", "terminal_attached", false},
+        {"terminal_id", terminal_id, false},
+    }));
+    return;
+  }
+
+  std::string terminal_id = client.terminal_id;
+  if (payload->contains("terminal_id")) {
+    terminal_id = JsonString(payload, "terminal_id");
+  }
+  if (terminal_id.empty()) {
+    audit_logger_.Append(client.session_token, "terminal.ws.reject", "terminal is not attached");
+    SendToWs(channel_key, api::Error("terminal is not attached"));
+    return;
+  }
+
+  if (action == "input") {
+    const std::string encoded = JsonString(payload, "data");
+    const std::string data = util::Base64Decode(encoded);
+    std::string error;
+    if (!pty_manager_.WriteInput(client.session_token, terminal_id, data, &error)) {
+      audit_logger_.Append(client.session_token, "terminal.input.error",
+                           error.empty() ? "write failed" : error);
+      SendToWs(channel_key, api::Error(error.empty() ? "write failed" : error));
+      return;
+    }
+    return;
+  }
+
+  if (action == "resize") {
+    std::string error;
+    if (!pty_manager_.Resize(client.session_token, terminal_id,
+                             JsonInt(payload, "cols", 120),
+                             JsonInt(payload, "rows", 30),
+                             &error)) {
+      audit_logger_.Append(client.session_token, "terminal.resize.error",
+                           error.empty() ? "resize failed" : error);
+      SendToWs(channel_key, api::Error(error.empty() ? "resize failed" : error));
+      return;
+    }
+    return;
+  }
+
+  if (action == "close") {
+    std::string error;
+    if (!pty_manager_.CloseTerminal(client.session_token, terminal_id, &error)) {
+      audit_logger_.Append(client.session_token, "terminal.close.error",
+                           error.empty() ? "close failed" : error);
+      SendToWs(channel_key, api::Error(error.empty() ? "close failed" : error));
+      return;
+    }
+    {
+      std::lock_guard<std::mutex> lock(ws_mu_);
+      auto it = ws_clients_.find(channel_key);
+      if (it != ws_clients_.end()) {
+        it->second.terminal_id.clear();
+      }
+    }
+    SendToWs(channel_key, api::Success({
+        {"event", "terminal_closed", false},
+        {"terminal_id", terminal_id, false},
+    }));
+    return;
+  }
+
+  audit_logger_.Append(client.session_token, "terminal.ws.invalid_action", action);
+  SendToWs(channel_key, api::Error("unknown terminal action"));
+}
+
+void ServerApp::HandleCodeAgentTerminalWsMessage(std::uintptr_t channel_key, const std::string& message) {
+  const auto payload = ParseJsonOrNull(message);
+  if (!payload.has_value() || !payload->is_object()) {
+    audit_logger_.AppendSystem("warn", "codeagent.terminal.ws.invalid", "invalid json payload");
+    SendToWs(channel_key, api::Error("invalid json payload"));
+    return;
+  }
+
+  std::string action = JsonString(payload, "action");
+  if (action.empty()) {
+    action = JsonString(payload, "event");
+  }
+
+  WsClient client;
+  {
+    std::lock_guard<std::mutex> lock(ws_mu_);
+    auto it = ws_clients_.find(channel_key);
+    if (it == ws_clients_.end()) {
+      return;
+    }
+    client = it->second;
+  }
+
+  std::string ns = client.codeagent_namespace;
+  auto session = session_manager_.GetSession(client.session_token);
+  if (!session.has_value()) {
+    audit_logger_.Append(client.session_token, "codeagent.terminal.ws.reject", "token expired");
+    SendToWs(channel_key, api::Error("session expired", "unauthorized"));
+    return;
+  }
+  session_manager_.Touch(client.session_token);
+  ns = "default";
+
+  const auto json_string_any = [&payload](const char* key_a, const char* key_b,
+                                          const std::string& fallback = "") {
+    std::string value = JsonString(payload, key_a);
+    if (!value.empty()) {
+      return value;
+    }
+    return JsonString(payload, key_b, fallback);
+  };
+
+  if (action == "open") {
+    std::string session_id = json_string_any("session_id", "sessionId");
+    if (session_id.empty()) {
+      session_id = client.codeagent_session_id;
+    }
+    if (session_id.empty()) {
+      SendToWs(channel_key, api::Error("missing session_id"));
+      return;
+    }
+
+    const auto session_path = codeagent_manager_.ResolveSessionPath(ns, session_id);
+    if (!session_path.has_value()) {
+      SendToWs(channel_key, api::Error("session not found", "not_found"));
+      return;
+    }
+
+    if (!client.terminal_id.empty()) {
+      std::string close_error;
+      (void)pty_manager_.CloseTerminal(client.session_token, client.terminal_id, &close_error);
+    }
+
+    const int cols = JsonInt(payload, "cols", 120);
+    const int rows = JsonInt(payload, "rows", 30);
+    std::string error;
+    auto terminal_id =
+        pty_manager_.CreateTerminal(client.session_token, cols, rows, &error, session_path->string());
+    if (!terminal_id.has_value()) {
+      SendToWs(channel_key, api::Error(error.empty() ? "failed to create terminal" : error));
+      return;
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(ws_mu_);
+      auto it = ws_clients_.find(channel_key);
+      if (it != ws_clients_.end()) {
+        it->second.codeagent_namespace = ns;
+        it->second.codeagent_session_id = session_id;
+        it->second.terminal_id = *terminal_id;
+      }
+    }
+
+    SendToWs(channel_key, api::Success({
+        {"event", "terminal_open", false},
+        {"terminal_id", *terminal_id, false},
+        {"session_id", session_id, false},
+    }));
+    return;
+  }
+
+  std::string terminal_id = client.terminal_id;
+  std::string payload_terminal_id = json_string_any("terminal_id", "terminalId");
+  if (!payload_terminal_id.empty()) {
+    terminal_id = payload_terminal_id;
+  }
+  if (terminal_id.empty()) {
+    SendToWs(channel_key, api::Error("terminal is not attached"));
+    return;
+  }
+
+  if (action == "input" || action == "write") {
+    const std::string encoded = JsonString(payload, "data");
+    const std::string data = util::Base64Decode(encoded);
+    std::string error;
+    if (!pty_manager_.WriteInput(client.session_token, terminal_id, data, &error)) {
+      SendToWs(channel_key, api::Error(error.empty() ? "write failed" : error));
+      return;
+    }
+    return;
+  }
+
+  if (action == "resize") {
+    std::string error;
+    if (!pty_manager_.Resize(client.session_token, terminal_id,
+                             JsonInt(payload, "cols", 120),
+                             JsonInt(payload, "rows", 30),
+                             &error)) {
+      SendToWs(channel_key, api::Error(error.empty() ? "resize failed" : error));
+      return;
+    }
+    return;
+  }
+
+  if (action == "close") {
+    std::string error;
+    if (!pty_manager_.CloseTerminal(client.session_token, terminal_id, &error)) {
+      SendToWs(channel_key, api::Error(error.empty() ? "close failed" : error));
+      return;
+    }
+    {
+      std::lock_guard<std::mutex> lock(ws_mu_);
+      auto it = ws_clients_.find(channel_key);
+      if (it != ws_clients_.end()) {
+        it->second.terminal_id.clear();
+      }
+    }
+    SendToWs(channel_key, api::Success({
+        {"event", "terminal_closed", false},
+        {"terminal_id", terminal_id, false},
+    }));
+    return;
+  }
+
+  SendToWs(channel_key, api::Error("unknown terminal action"));
+}
+
+void ServerApp::BroadcastTerminalOutput(const std::string& terminal_id, const std::string& chunk) {
+  std::vector<WebSocketChannelPtr> channels;
+  {
+    std::lock_guard<std::mutex> lock(ws_mu_);
+    for (const auto& [_, client] : ws_clients_) {
+      if ((client.channel_type == "terminal" || client.channel_type == "codeagent_terminal") &&
+          client.terminal_id == terminal_id && client.channel) {
+        channels.push_back(client.channel);
+      }
+    }
+  }
+
+  if (channels.empty()) {
+    return;
+  }
+
+  const std::string payload = api::Success({
+      {"event", "terminal_output", false},
+      {"terminal_id", terminal_id, false},
+      {"data", util::Base64Encode(chunk), false},
+  });
+
+  for (auto& channel : channels) {
+    channel->send(payload);
+  }
+}
+
+void ServerApp::BroadcastLogEntry(const std::string& serialized_entry) {
+  std::vector<WebSocketChannelPtr> channels;
+  {
+    std::lock_guard<std::mutex> lock(ws_mu_);
+    for (const auto& [_, client] : ws_clients_) {
+      if (client.channel_type == "logs" && client.channel) {
+        channels.push_back(client.channel);
+      }
+    }
+  }
+
+  if (channels.empty()) {
+    return;
+  }
+
+  const std::string payload = api::Success({
+      {"event", "log_entry", false},
+      {"item", serialized_entry, true},
+  });
+  for (auto& channel : channels) {
+    channel->send(payload);
+  }
+}
+
+void ServerApp::BroadcastNativeFrames() {
+  uint64_t last_sequence = 0;
+  auto next_source_health_check = std::chrono::steady_clock::now();
+  while (running_) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= next_source_health_check) {
+      RefreshNativeCaptureState();
+      SyncNativeSubscribersToActiveSource();
+      next_source_health_check = now + std::chrono::seconds(1);
+    }
+
+    auto frame = screen_service_.LatestFrame();
+    if (!frame.has_value() || frame->sequence == last_sequence) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(24));
+      continue;
+    }
+    last_sequence = frame->sequence;
+
+    struct Target {
+      WebSocketChannelPtr channel;
+      std::string codec;
+    };
+    std::vector<Target> targets;
+    {
+      std::lock_guard<std::mutex> lock(ws_mu_);
+      for (const auto& [_, client] : ws_clients_) {
+        if (client.channel_type == "webrtc" && client.native_stream_subscribed && client.channel) {
+          targets.push_back({client.channel, client.native_stream_codec});
+        }
+      }
+    }
+    if (targets.empty()) {
+      continue;
+    }
+
+    const bool has_h264 = !frame->h264_bytes.empty();
+    const bool has_h265 = !frame->h265_bytes.empty();
+    const bool has_vp8 = !frame->vp8_bytes.empty();
+    const bool has_vp9 = !frame->vp9_bytes.empty();
+    const bool has_av1 = !frame->av1_bytes.empty();
+    const bool has_jpeg = !frame->jpeg_bytes.empty();
+    if (!has_h264 && !has_h265 && !has_vp8 && !has_vp9 && !has_av1 && !has_jpeg) {
+      continue;
+    }
+
+    const std::string h264_payload = has_h264
+        ? BuildNativeBinaryFramePacket(kNativeBinaryCodecH264, frame->h264_keyframe, frame->sequence,
+                                       frame->captured_at_ms, frame->width, frame->height, frame->h264_bytes)
+        : "";
+    const std::string h265_payload = has_h265
+        ? BuildNativeBinaryFramePacket(kNativeBinaryCodecH265, frame->h265_keyframe, frame->sequence,
+                                       frame->captured_at_ms, frame->width, frame->height, frame->h265_bytes)
+        : "";
+    const std::string vp8_payload = has_vp8
+        ? BuildNativeBinaryFramePacket(kNativeBinaryCodecVP8, frame->vp8_keyframe, frame->sequence,
+                                       frame->captured_at_ms, frame->width, frame->height, frame->vp8_bytes)
+        : "";
+    const std::string vp9_payload = has_vp9
+        ? BuildNativeBinaryFramePacket(kNativeBinaryCodecVP9, frame->vp9_keyframe, frame->sequence,
+                                       frame->captured_at_ms, frame->width, frame->height, frame->vp9_bytes)
+        : "";
+    const std::string av1_payload = has_av1
+        ? BuildNativeBinaryFramePacket(kNativeBinaryCodecAV1, frame->av1_keyframe, frame->sequence,
+                                       frame->captured_at_ms, frame->width, frame->height, frame->av1_bytes)
+        : "";
+    const std::string jpeg_payload = has_jpeg
+        ? BuildNativeBinaryFramePacket(kNativeBinaryCodecJpeg, false, frame->sequence,
+                                       frame->captured_at_ms, frame->width, frame->height, frame->jpeg_bytes)
+        : "";
+
+    for (auto& target : targets) {
+      if (target.codec == "av1" && !av1_payload.empty()) {
+        target.channel->send(av1_payload, WS_OPCODE_BINARY);
+        continue;
+      }
+      if (target.codec == "vp9" && !vp9_payload.empty()) {
+        target.channel->send(vp9_payload, WS_OPCODE_BINARY);
+        continue;
+      }
+      if (target.codec == "vp8" && !vp8_payload.empty()) {
+        target.channel->send(vp8_payload, WS_OPCODE_BINARY);
+        continue;
+      }
+      if (target.codec == "h265" && !h265_payload.empty()) {
+        target.channel->send(h265_payload, WS_OPCODE_BINARY);
+        continue;
+      }
+      if (target.codec == "h264" && !h264_payload.empty()) {
+        target.channel->send(h264_payload, WS_OPCODE_BINARY);
+        continue;
+      }
+      if (!jpeg_payload.empty()) {
+        target.channel->send(jpeg_payload, WS_OPCODE_BINARY);
+      }
+    }
+  }
+}
+
+void ServerApp::BroadcastDockurrSnapshots() {
+  std::string last_snapshot_payload;
+  std::string last_error;
+  while (running_) {
+    std::vector<std::uintptr_t> channels;
+    {
+      std::lock_guard<std::mutex> lock(ws_mu_);
+      channels.reserve(ws_clients_.size());
+      for (const auto& [channel_key, client] : ws_clients_) {
+        if (client.channel_type == "dockurr" && client.channel) {
+          channels.push_back(channel_key);
+        }
+      }
+    }
+
+    if (channels.empty()) {
+      last_snapshot_payload.clear();
+      last_error.clear();
+      std::this_thread::sleep_for(std::chrono::milliseconds(kDockurrSnapshotIntervalMs));
+      continue;
+    }
+
+    std::string list_error;
+    const auto vms = dockurr_manager_.ListVms(&list_error);
+    if (!list_error.empty()) {
+      if (list_error != last_error) {
+        const std::string payload = api::Success({
+            {"event", "dockurr_error", false},
+            {"error", list_error, false},
+        });
+        const std::string log_payload =
+            BuildDockurrRuntimeLogPayload("error", "list", "snapshot failed: " + list_error);
+        for (const auto& channel_key : channels) {
+          SendToWs(channel_key, payload);
+          SendToWs(channel_key, log_payload);
+        }
+        last_error = list_error;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(kDockurrSnapshotIntervalMs));
+      continue;
+    }
+
+    const std::string payload = BuildDockurrSnapshotPayload(vms);
+    if (payload != last_snapshot_payload) {
+      for (const auto& channel_key : channels) {
+        SendToWs(channel_key, payload);
+      }
+      last_snapshot_payload = payload;
+    }
+    last_error.clear();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(kDockurrSnapshotIntervalMs));
+  }
+}
+
+void ServerApp::BroadcastMonitorSnapshots() {
+  while (running_) {
+    std::vector<std::uintptr_t> channels;
+    {
+      std::lock_guard<std::mutex> lock(ws_mu_);
+      channels.reserve(ws_clients_.size());
+      for (const auto& [channel_key, client] : ws_clients_) {
+        if (client.channel_type == "monitor" && client.channel) {
+          channels.push_back(channel_key);
+        }
+      }
+    }
+
+    if (channels.empty()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(kMonitorSnapshotIntervalMs));
+      continue;
+    }
+
+    const std::string payload = api::Success({
+        {"event", "monitor_snapshot", false},
+        {"snapshot", system_monitor_.SnapshotJson(), true},
+    });
+    for (const auto& channel_key : channels) {
+      SendToWs(channel_key, payload);
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(kMonitorSnapshotIntervalMs));
+  }
+}
+
+void ServerApp::BroadcastTunnelSnapshots() {
+  std::vector<std::uintptr_t> channels;
+  {
+    std::lock_guard<std::mutex> lock(ws_mu_);
+    channels.reserve(ws_clients_.size());
+    for (const auto& [channel_key, client] : ws_clients_) {
+      if (client.channel_type == "tunnel" && client.channel) {
+        channels.push_back(channel_key);
+      }
+    }
+  }
+
+  if (channels.empty()) {
+    return;
+  }
+
+  const std::string payload = BuildTunnelSnapshotPayload(tunnel_manager_.Snapshot());
+  for (const auto& channel_key : channels) {
+    SendToWs(channel_key, payload);
+  }
+}
+
+void ServerApp::HandleWebRtcWsMessage(std::uintptr_t channel_key, const std::string& message) {
+  const auto payload = ParseJsonOrNull(message);
+  if (!payload.has_value() || !payload->is_object()) {
+    audit_logger_.AppendSystem("warn", "webrtc.ws.invalid", "invalid json payload");
+    SendToWs(channel_key, api::Error("invalid json payload"));
+    return;
+  }
+  const std::string action = JsonString(payload, "action");
+
+  WsClient client;
+  {
+    std::lock_guard<std::mutex> lock(ws_mu_);
+    auto it = ws_clients_.find(channel_key);
+    if (it == ws_clients_.end()) {
+      return;
+    }
+    client = it->second;
+  }
+
+  auto session = session_manager_.GetSession(client.session_token);
+  if (!session.has_value()) {
+    audit_logger_.Append(client.session_token, "webrtc.ws.reject", "session expired");
+    SendToWs(channel_key, api::Error("session expired", "unauthorized"));
+    return;
+  }
+  (void)session;
+
+  if (action == "join") {
+    const std::string room_id = JsonString(payload, "room_id");
+    auto peer = signaling_service_.JoinRoom(channel_key, client.session_token, room_id);
+    if (!peer.has_value()) {
+      SendToWs(channel_key, api::Error("room_id is required"));
+      return;
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(ws_mu_);
+      auto it = ws_clients_.find(channel_key);
+      if (it != ws_clients_.end()) {
+        it->second.room_id = peer->room_id;
+        it->second.peer_id = peer->peer_id;
+      }
+    }
+
+    const auto peers = signaling_service_.PeersInRoom(peer->room_id);
+    std::vector<std::string> peer_ids;
+    std::vector<std::uintptr_t> notify_channels;
+    for (const auto& item : peers) {
+      if (item.peer_id != peer->peer_id) {
+        peer_ids.push_back('"' + util::JsonEscape(item.peer_id) + '"');
+        auto target = signaling_service_.FindChannelByPeerId(item.peer_id);
+        if (target.has_value()) {
+          notify_channels.push_back(*target);
+        }
+      }
+    }
+
+    SendToWs(channel_key, api::Success({
+        {"event", "joined", false},
+        {"room_id", peer->room_id, false},
+        {"peer_id", peer->peer_id, false},
+        {"peers", JsonArray(peer_ids), true},
+    }));
+
+    const std::string join_notice = api::Success({
+        {"event", "peer_join", false},
+        {"peer_id", peer->peer_id, false},
+    });
+    for (const auto& target_channel : notify_channels) {
+      SendToWs(target_channel, join_notice);
+    }
+
+    audit_logger_.Append(client.session_token, "webrtc.join", room_id);
+    return;
+  }
+
+  if (action == "signal") {
+    const auto sender = signaling_service_.GetPeer(channel_key);
+    if (!sender.has_value()) {
+      SendToWs(channel_key, api::Error("join room first"));
+      return;
+    }
+
+    const std::string signal_type = JsonString(payload, "signal_type");
+    std::string signal_payload = JsonString(payload, "payload");
+    if (payload->contains("payload") && !(*payload)["payload"].is_string()) {
+      signal_payload = (*payload)["payload"].dump();
+    }
+    const std::string target_peer_id = JsonString(payload, "target_peer_id");
+
+    std::vector<std::uintptr_t> targets;
+    if (!target_peer_id.empty()) {
+      auto target = signaling_service_.FindChannelByPeerId(target_peer_id);
+      if (target.has_value()) {
+        targets.push_back(*target);
+      }
+    } else {
+      for (const auto& peer : signaling_service_.PeersInRoom(sender->room_id)) {
+        if (peer.peer_id == sender->peer_id) {
+          continue;
+        }
+        auto target = signaling_service_.FindChannelByPeerId(peer.peer_id);
+        if (target.has_value()) {
+          targets.push_back(*target);
+        }
+      }
+    }
+
+    const std::string forwarded = api::Success({
+        {"event", "signal", false},
+        {"from_peer_id", sender->peer_id, false},
+        {"signal_type", signal_type, false},
+        {"payload", signal_payload, false},
+    });
+    for (const auto& target : targets) {
+      SendToWs(target, forwarded);
+    }
+    return;
+  }
+
+  if (action == "native_subscribe") {
+    const std::string requested_codec = JsonString(payload, "codec");
+    const std::string requested_source_id = JsonString(payload, "source_id");
+    const bool wants_av1 = requested_codec == "av1";
+    const bool wants_vp9 = requested_codec == "vp9";
+    const bool wants_vp8 = requested_codec == "vp8";
+    const bool wants_h265 = requested_codec == "h265";
+    const bool wants_h264 = requested_codec == "h264";
+    std::string negotiated_codec = "jpeg";
+    if (wants_av1 && screen_service_.SupportsAV1()) {
+      negotiated_codec = "av1";
+    } else if (wants_vp9 && screen_service_.SupportsVP9()) {
+      negotiated_codec = "vp9";
+    } else if (wants_vp8 && screen_service_.SupportsVP8()) {
+      negotiated_codec = "vp8";
+    } else if (wants_h265 && screen_service_.SupportsH265()) {
+      negotiated_codec = "h265";
+    } else if (wants_h264 && screen_service_.SupportsH264()) {
+      negotiated_codec = "h264";
+    }
+    const int requested_fps =
+        std::clamp(JsonInt(payload, "fps", kNativeCaptureFps), kNativeCaptureMinFps, kNativeCaptureMaxFps);
+    const int requested_scale_percent = ParseNativeScalePercent(
+        JsonString(payload, "resolution_tier"),
+        std::clamp(JsonInt(payload, "scale_percent", kNativeScaleDefaultPercent),
+                   kNativeScaleMinPercent, kNativeScaleMaxPercent));
+    const int requested_video_bitrate_bps = ParseNativeBitrateBps(
+        JsonString(payload, "bitrate_tier"),
+        std::clamp(JsonInt(payload, "bitrate_bps", kNativeBitrateDefaultBps),
+                   kNativeBitrateMinBps, kNativeBitrateMaxBps));
+    std::string source_error;
+    const std::string normalized_source_id =
+        screen_service_.NormalizeCaptureSourceId(requested_source_id, &source_error);
+    if (normalized_source_id.empty()) {
+      SendToWs(channel_key,
+               api::Error(source_error.empty() ? "no capture source available" : source_error));
+      return;
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(ws_mu_);
+      auto it = ws_clients_.find(channel_key);
+      if (it != ws_clients_.end()) {
+        it->second.native_stream_subscribed = true;
+        it->second.native_stream_codec = negotiated_codec;
+        it->second.native_stream_source_id = normalized_source_id;
+        it->second.native_stream_fps = requested_fps;
+        it->second.native_stream_scale_percent = requested_scale_percent;
+        it->second.native_stream_video_bitrate_bps = requested_video_bitrate_bps;
+      }
+    }
+
+    RefreshNativeCaptureState(client.session_token);
+    const int effective_fps = active_capture_fps_.load();
+    const int effective_scale_percent = active_capture_scale_percent_.load();
+    const int effective_video_bitrate_bps = active_capture_video_bitrate_bps_.load();
+    const std::string effective_source_id = [this, &normalized_source_id]() {
+      const std::string active = screen_service_.ActiveCaptureSourceId();
+      return active.empty() ? normalized_source_id : active;
+    }();
+
+    SendToWs(channel_key, api::Success({
+        {"event", "native_subscribed", false},
+        {"capture_running", screen_service_.IsCapturing() ? "true" : "false", true},
+        {"codec", negotiated_codec, false},
+        {"source_id", effective_source_id, false},
+        {"fps", std::to_string(effective_fps > 0 ? effective_fps : requested_fps), true},
+        {"resolution_tier", NativeResolutionTierFromScale(effective_scale_percent), false},
+        {"scale_percent", std::to_string(effective_scale_percent), true},
+        {"bitrate_tier", NativeBitrateTierFromBps(effective_video_bitrate_bps), false},
+        {"bitrate_bps", std::to_string(effective_video_bitrate_bps), true},
+        {"transport", "ws-binary", false},
+    }));
+    return;
+  }
+
+  if (action == "native_unsubscribe") {
+    {
+      std::lock_guard<std::mutex> lock(ws_mu_);
+      auto it = ws_clients_.find(channel_key);
+      if (it != ws_clients_.end()) {
+        it->second.native_stream_subscribed = false;
+        it->second.native_stream_source_id.clear();
+      }
+    }
+
+    RefreshNativeCaptureState(client.session_token);
+
+    SendToWs(channel_key, api::Success({
+        {"event", "native_unsubscribed", false},
+    }));
+    return;
+  }
+
+  if (action == "input_event") {
+    const std::string type = JsonString(payload, "type");
+    std::string event_payload = JsonString(payload, "payload");
+    if (payload->contains("payload") && !(*payload)["payload"].is_string()) {
+      event_payload = (*payload)["payload"].dump();
+    }
+
+    std::string error;
+    if (!screen_service_.InjectInputEvent(client.session_token, {type, event_payload}, &error)) {
+      SendToWs(channel_key, api::Error(error, "forbidden"));
+      return;
+    }
+
+    audit_logger_.Append(client.session_token, "screen.input.ws", type);
+    SendToWs(channel_key, api::Success({
+        {"event", "input_ack", false},
+        {"message", error, false},
+    }));
+    return;
+  }
+
+  SendToWs(channel_key, api::Error("unknown webrtc action"));
+  audit_logger_.Append(client.session_token, "webrtc.ws.invalid_action", action);
+}
+
+void ServerApp::HandleLogsWsMessage(std::uintptr_t channel_key, const std::string& message) {
+  const auto payload = ParseJsonOrNull(message);
+  if (!payload.has_value() || !payload->is_object()) {
+    SendToWs(channel_key, api::Error("invalid json payload"));
+    return;
+  }
+
+  WsClient client;
+  {
+    std::lock_guard<std::mutex> lock(ws_mu_);
+    auto it = ws_clients_.find(channel_key);
+    if (it == ws_clients_.end()) {
+      return;
+    }
+    client = it->second;
+  }
+
+  auto session = session_manager_.GetSession(client.session_token);
+  if (!session.has_value()) {
+    SendToWs(channel_key, api::Error("session expired", "unauthorized"));
+    return;
+  }
+  (void)session;
+
+  const std::string action = JsonString(payload, "action", "tail");
+  if (action == "tail" || action == "snapshot") {
+    const int lines = std::clamp(JsonInt(payload, "lines", 300), 1, 2000);
+    SendToWs(channel_key, api::Success({
+        {"event", "logs_snapshot", false},
+        {"items", audit_logger_.Tail(static_cast<size_t>(lines)), true},
+    }));
+    return;
+  }
+
+  SendToWs(channel_key, api::Error("unknown logs action"));
+}
+
+void ServerApp::HandleDockurrWsMessage(std::uintptr_t channel_key, const std::string& message) {
+  const auto payload = ParseJsonOrNull(message);
+  if (!payload.has_value() || !payload->is_object()) {
+    SendToWs(channel_key, api::Error("invalid json payload"));
+    return;
+  }
+
+  WsClient client;
+  {
+    std::lock_guard<std::mutex> lock(ws_mu_);
+    auto it = ws_clients_.find(channel_key);
+    if (it == ws_clients_.end()) {
+      return;
+    }
+    client = it->second;
+  }
+
+  auto session = session_manager_.GetSession(client.session_token);
+  if (!session.has_value()) {
+    SendToWs(channel_key, api::Error("session expired", "unauthorized"));
+    return;
+  }
+  (void)session;
+
+  const std::string action = JsonString(payload, "action", "list");
+  const std::string request_id = JsonString(payload, "request_id");
+  const auto send_runtime_log =
+      [this, channel_key, &request_id](const std::string& level, const std::string& action_name,
+                                       const std::string& detail) {
+        SendToWs(channel_key, BuildDockurrRuntimeLogPayload(level, action_name, detail, request_id));
+      };
+
+  const auto send_action_result =
+      [this, channel_key, &action, &request_id](bool success, const std::string& error,
+                                                const std::vector<util::JsonField>& extra_fields = {}) {
+        std::vector<util::JsonField> fields{
+            {"event", "dockurr_action_result", false},
+            {"action", action, false},
+            {"request_id", request_id, false},
+            {"success", success ? "true" : "false", true},
+        };
+        if (!error.empty()) {
+          fields.push_back({"error", error, false});
+        }
+        fields.insert(fields.end(), extra_fields.begin(), extra_fields.end());
+        SendToWs(channel_key, api::Success(fields));
+      };
+
+  if (action == "list" || action == "snapshot") {
+    std::string error;
+    const auto vms = dockurr_manager_.ListVms(&error);
+    if (!error.empty()) {
+      send_runtime_log("error", action, error);
+      send_action_result(false, error);
+      return;
+    }
+    SendToWs(channel_key, BuildDockurrSnapshotPayload(vms));
+    send_runtime_log("info", action, "snapshot updated (" + std::to_string(vms.size()) + " vm)");
+    send_action_result(true, "");
+    return;
+  }
+
+  if (action == "start" || action == "stop" || action == "restart" || action == "delete" || action == "logs" ||
+      action == "inspect") {
+    const std::string name = JsonString(payload, "name");
+    if (name.empty()) {
+      send_runtime_log("error", action, "name is required");
+      send_action_result(false, "name is required");
+      return;
+    }
+
+    send_runtime_log("info", action, "executing for vm: " + name);
+    std::string error;
+    if (action == "start") {
+      if (!dockurr_manager_.StartVm(name, &error)) {
+        send_runtime_log("error", action, error);
+        send_action_result(false, error);
+        return;
+      }
+      audit_logger_.Append(client.session_token, "dockurr.start", name);
+      send_runtime_log("info", action, "vm started: " + name);
+      send_action_result(true, "", {{"name", name, false}});
+    } else if (action == "stop") {
+      if (!dockurr_manager_.StopVm(name, &error)) {
+        send_runtime_log("error", action, error);
+        send_action_result(false, error);
+        return;
+      }
+      audit_logger_.Append(client.session_token, "dockurr.stop", name);
+      send_runtime_log("info", action, "vm stopped: " + name);
+      send_action_result(true, "", {{"name", name, false}});
+    } else if (action == "restart") {
+      if (!dockurr_manager_.RestartVm(name, &error)) {
+        send_runtime_log("error", action, error);
+        send_action_result(false, error);
+        return;
+      }
+      audit_logger_.Append(client.session_token, "dockurr.restart", name);
+      send_runtime_log("info", action, "vm restarted: " + name);
+      send_action_result(true, "", {{"name", name, false}});
+    } else if (action == "delete") {
+      if (!dockurr_manager_.DeleteVm(name, &error)) {
+        send_runtime_log("error", action, error);
+        send_action_result(false, error);
+        return;
+      }
+      audit_logger_.Append(client.session_token, "dockurr.delete", name);
+      send_runtime_log("info", action, "vm deleted: " + name);
+      send_action_result(true, "", {{"name", name, false}});
+    } else if (action == "logs") {
+      const int tail = std::clamp(JsonInt(payload, "tail", 50), 1, 500);
+      std::string logs;
+      if (!dockurr_manager_.GetLogs(name, tail, &logs, &error)) {
+        send_runtime_log("error", action, error);
+        send_action_result(false, error);
+        return;
+      }
+      send_runtime_log("info", action, "fetched " + std::to_string(tail) + " lines for " + name);
+      send_action_result(true, "", {
+                                      {"name", name, false},
+                                      {"logs", logs, false},
+                                  });
+    } else {
+      std::string inspect;
+      if (!dockurr_manager_.InspectVm(name, &inspect, &error)) {
+        send_runtime_log("error", action, error);
+        send_action_result(false, error);
+        return;
+      }
+      send_runtime_log("info", action, "inspect loaded for " + name);
+      send_action_result(true, "", {
+                                      {"name", name, false},
+                                      {"inspect", inspect, false},
+                                  });
+    }
+
+    std::string list_error;
+    const auto vms = dockurr_manager_.ListVms(&list_error);
+    if (list_error.empty()) {
+      SendToWs(channel_key, BuildDockurrSnapshotPayload(vms));
+    } else {
+      send_runtime_log("warn", action, "post-action snapshot failed: " + list_error);
+    }
+    return;
+  }
+
+  if (action == "create") {
+    dockurr::CreateVmRequest create_request;
+    create_request.os = ToLower(JsonString(payload, "os"));
+    create_request.version = JsonString(payload, "version");
+    create_request.ram_size = JsonString(payload, "ram", JsonString(payload, "ram_size", "4G"));
+    create_request.disk_size = JsonString(payload, "disk", JsonString(payload, "disk_size", "64G"));
+    create_request.name = JsonString(payload, "name");
+    create_request.persistent = JsonBool(payload, "persist", JsonBool(payload, "persistent", false));
+    if (create_request.os.empty()) {
+      send_runtime_log("error", action, "os is required");
+      send_action_result(false, "os is required");
+      return;
+    }
+
+    send_runtime_log("info", action,
+                     "accepted request: os=" + create_request.os + ", version=" + create_request.version +
+                         ", ram=" + create_request.ram_size +
+                         ", disk=" + create_request.disk_size +
+                         ", persist=" + (create_request.persistent ? "true" : "false"));
+    send_action_result(true, "", {
+                                     {"accepted", "true", true},
+                                 });
+
+    std::thread([this, channel_key, request_id, create_request, session_token = client.session_token]() {
+      const auto emit_runtime_log = [this, channel_key, request_id](const std::string& level,
+                                                                     const std::string& action_name,
+                                                                     const std::string& detail) {
+        SendToWs(channel_key, BuildDockurrRuntimeLogPayload(level, action_name, detail, request_id));
+      };
+      const auto emit_startup_line = [this, channel_key, &request_id](const std::string& line) {
+        SendToWs(channel_key, api::Success({
+                                 {"event", "dockurr_startup_log", false},
+                                 {"ts", util::UtcNowIso8601(), false},
+                                 {"request_id", request_id, false},
+                                 {"line", line, false},
+                             }));
+      };
+
+      dockurr::VmInfo vm;
+      std::string create_error;
+      const bool created = dockurr_manager_.CreateVmWithStartupLogs(
+          create_request, kDockurrCreateLogWaitSeconds,
+          [emit_startup_line, emit_runtime_log](const std::string& line) {
+            emit_startup_line(line);
+            emit_runtime_log("info", "create.startup", line);
+          },
+          &vm, &create_error);
+      if (!created) {
+        emit_runtime_log("error", "create", create_error);
+        SendToWs(channel_key, api::Success({
+                                 {"event", "dockurr_action_result", false},
+                                 {"action", "create", false},
+                                 {"request_id", request_id, false},
+                                 {"success", "false", true},
+                                 {"error", create_error, false},
+                             }));
+      } else {
+        audit_logger_.Append(session_token, "dockurr.create",
+                             vm.name + " (" + create_request.os + " " + create_request.version + ")");
+        emit_runtime_log("info", "create",
+                         "vm created: " + vm.name + ", novnc_port=" +
+                             (vm.novnc_port.empty() ? "pending" : vm.novnc_port));
+        SendToWs(channel_key, api::Success({
+                                 {"event", "dockurr_action_result", false},
+                                 {"action", "create", false},
+                                 {"request_id", request_id, false},
+                                 {"success", "true", true},
+                                 {"accepted", "false", true},
+                                 {"vm", SerializeDockurrVm(vm), true},
+                             }));
+      }
+
+      std::string list_error;
+      const auto vms = dockurr_manager_.ListVms(&list_error);
+      if (list_error.empty()) {
+        SendToWs(channel_key, BuildDockurrSnapshotPayload(vms));
+      } else {
+        emit_runtime_log("warn", "create", "post-create snapshot failed: " + list_error);
+      }
+
+      SendToWs(channel_key, api::Success({
+                               {"event", "dockurr_startup_done", false},
+                               {"ts", util::UtcNowIso8601(), false},
+                               {"request_id", request_id, false},
+                               {"success", created ? "true" : "false", true},
+                           }));
+    }).detach();
+    return;
+  }
+
+  send_runtime_log("error", action, "unknown dockurr action");
+  send_action_result(false, "unknown dockurr action");
+}
+
+void ServerApp::HandleMonitorWsMessage(std::uintptr_t channel_key, const std::string& message) {
+  const auto payload = ParseJsonOrNull(message);
+  if (!payload.has_value() || !payload->is_object()) {
+    SendToWs(channel_key, api::Error("invalid json payload"));
+    return;
+  }
+
+  WsClient client;
+  {
+    std::lock_guard<std::mutex> lock(ws_mu_);
+    auto it = ws_clients_.find(channel_key);
+    if (it == ws_clients_.end()) {
+      return;
+    }
+    client = it->second;
+  }
+
+  auto session = session_manager_.GetSession(client.session_token);
+  if (!session.has_value()) {
+    SendToWs(channel_key, api::Error("session expired", "unauthorized"));
+    return;
+  }
+  (void)session;
+
+  const std::string action = JsonString(payload, "action", "snapshot");
+  if (action == "snapshot" || action == "refresh") {
+    SendToWs(channel_key, api::Success({
+        {"event", "monitor_snapshot", false},
+        {"snapshot", system_monitor_.SnapshotJson(), true},
+    }));
+    return;
+  }
+
+  if (action == "ping") {
+    SendToWs(channel_key, api::Success({
+        {"event", "monitor_pong", false},
+    }));
+    return;
+  }
+
+  SendToWs(channel_key, api::Error("unknown monitor action"));
+}
+
+void ServerApp::HandleTunnelWsMessage(std::uintptr_t channel_key, const std::string& message) {
+  const auto payload = ParseJsonOrNull(message);
+  if (!payload.has_value() || !payload->is_object()) {
+    SendToWs(channel_key, api::Error("invalid json payload"));
+    return;
+  }
+
+  WsClient client;
+  {
+    std::lock_guard<std::mutex> lock(ws_mu_);
+    auto it = ws_clients_.find(channel_key);
+    if (it == ws_clients_.end()) {
+      return;
+    }
+    client = it->second;
+  }
+
+  auto session = session_manager_.GetSession(client.session_token);
+  if (!session.has_value()) {
+    SendToWs(channel_key, api::Error("session expired", "unauthorized"));
+    return;
+  }
+  (void)session;
+
+  const std::string action = JsonString(payload, "action", "snapshot");
+  if (action == "snapshot" || action == "refresh") {
+    SendToWs(channel_key, BuildTunnelSnapshotPayload(tunnel_manager_.Snapshot()));
+    return;
+  }
+
+  if (action == "ping") {
+    SendToWs(channel_key, api::Success({
+        {"event", "tunnel_pong", false},
+    }));
+    return;
+  }
+
+  SendToWs(channel_key, api::Error("unknown tunnel action"));
+}

@@ -21,6 +21,7 @@ import {
 
 import { getSessionMe, login, UNAUTHORIZED_EVENT } from "./api/client";
 import { useI18n } from "./i18n";
+import CodeAgentPage from "./pages/CodeAgentPage";
 import CodeServerPage from "./pages/CodeServerPage";
 import DockerPage from "./pages/DockerPage";
 import FilesPage from "./pages/FilesPage";
@@ -43,6 +44,7 @@ type TabKey =
   | "dockurr"
   | "docker"
   | "codeserver"
+  | "codeagent"
   | "screen"
   | "monitor"
   | "tunnel"
@@ -59,6 +61,7 @@ const navItems: NavItem[] = [
   { key: "tunnel", labelKey: "nav.tunnel", icon: <FiGlobe /> },
   { key: "docker", labelKey: "nav.docker", icon: <FiBox /> },
   { key: "codeserver", labelKey: "nav.codeserver", icon: <FiCode /> },
+  { key: "codeagent", labelKey: "nav.codeagent", icon: <FiCode /> },
   { key: "files", labelKey: "nav.files", icon: <FiFolder /> },
   { key: "terminal", labelKey: "nav.terminal", icon: <FiTerminal /> },
   { key: "tasks", labelKey: "nav.tasks", icon: <FiCommand /> },
@@ -68,6 +71,7 @@ const navItems: NavItem[] = [
 ];
 
 const SESSION_KEY = "ferryman.session";
+const SESSION_COOKIE_KEY = "ferryman_session_token";
 const SIDEBAR_COLLAPSED_KEY = "ferryman.sidebar.collapsed";
 const DEFAULT_TAB: TabKey = "monitor";
 
@@ -78,6 +82,7 @@ const VALID_TABS: TabKey[] = [
   "dockurr",
   "docker",
   "codeserver",
+  "codeagent",
   "screen",
   "monitor",
   "tunnel",
@@ -123,11 +128,33 @@ function saveSession(session: SessionInfo | null) {
   localStorage.setItem(SESSION_KEY, JSON.stringify(session));
 }
 
+function syncSessionCookie(session: SessionInfo | null) {
+  if (typeof document === "undefined") return;
+  if (!session?.token) {
+    document.cookie = `${SESSION_COOKIE_KEY}=; Path=/; Max-Age=0; SameSite=Lax`;
+    return;
+  }
+  const secure = typeof window !== "undefined" && window.location.protocol === "https:" ? "; Secure" : "";
+  document.cookie = `${SESSION_COOKIE_KEY}=${encodeURIComponent(session.token)}; Path=/; SameSite=Lax${secure}`;
+}
+
+function syncCodeAgentSessionToken(session: SessionInfo | null) {
+  if (typeof window === "undefined") return;
+  const target = window as Window & { __FERRYMAN_SESSION_TOKEN__?: string };
+  if (!session?.token) {
+    delete target.__FERRYMAN_SESSION_TOKEN__;
+    return;
+  }
+  target.__FERRYMAN_SESSION_TOKEN__ = session.token;
+}
+
 export default function App() {
   const { t, lang, setLang } = useI18n();
   const { theme, toggle: toggleTheme } = useTheme();
 
   const [session, setSession] = useState<SessionInfo | null>(() => loadStoredSession());
+  syncSessionCookie(session);
+  syncCodeAgentSessionToken(session);
   const [activeTab, setActiveTab] = useState<TabKey>(() => {
     if (typeof window === "undefined") return DEFAULT_TAB;
     return tabFromHash(window.location.hash) ?? DEFAULT_TAB;
@@ -164,6 +191,8 @@ export default function App() {
     } else {
       setSessionEnv(DEFAULT_SESSION_ENV);
     }
+    syncSessionCookie(session);
+    syncCodeAgentSessionToken(session);
   }, [session]);
 
   useEffect(() => {
@@ -298,6 +327,8 @@ export default function App() {
             codeServerInstalled={sessionEnv.codeserver_installed}
           />
         );
+      case "codeagent":
+        return <CodeAgentPage session={session} />;
       case "screen":
         return <ScreenPage session={session} />;
       case "monitor":

@@ -11,6 +11,7 @@
     {
       "name": "ffmpeg",
       "features": ["x264", "x265", "vpx"]
-    }
+    },
+    "sqlite3"
   ]
 }

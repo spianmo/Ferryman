@@ -14,7 +14,13 @@
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
-    "noFallthroughCasesInSwitch": true
+    "noFallthroughCasesInSwitch": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/codeagent/*"],
+      "@hapi/protocol": ["src/codeagent-protocol/index.ts"],
+      "@hapi/protocol/*": ["src/codeagent-protocol/*"]
+    }
   },
   "include": ["src"]
 }
