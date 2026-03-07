@@ -220,7 +220,7 @@ int ServerApp::HandleLogsTail(HttpRequest* req, HttpResponse* resp) {
 
   const int lines = ParseInt(QueryOf(req, "lines"), 200);
   return Json(resp, 200, api::Success({
-                             {"items", audit_logger_.Tail(static_cast<size_t>(std::max(1, lines))), true},
+                             {"items", audit_logger_.Tail(static_cast<size_t>((std::max)(1, lines))), true},
                          }));
 }
 

@@ -21,8 +21,8 @@ ServerApp::NativeCaptureDemand ServerApp::CollectNativeCaptureDemandLocked() con
       continue;
     }
     demand.subscriber_count += 1;
-    demand.fps = std::max(demand.fps, std::clamp(client.native_stream_fps, kNativeCaptureMinFps,
-                                                 kNativeCaptureMaxFps));
+    demand.fps = (std::max)(demand.fps, std::clamp(client.native_stream_fps, kNativeCaptureMinFps,
+                                                   kNativeCaptureMaxFps));
     if (client.native_stream_codec == "av1") {
       demand.want_av1 = true;
     } else if (client.native_stream_codec == "vp9") {
@@ -37,11 +37,11 @@ ServerApp::NativeCaptureDemand ServerApp::CollectNativeCaptureDemandLocked() con
       demand.want_jpeg = true;
     }
     demand.scale_percent =
-        std::max(demand.scale_percent, std::clamp(client.native_stream_scale_percent, kNativeScaleMinPercent,
-                                                  kNativeScaleMaxPercent));
+        (std::max)(demand.scale_percent, std::clamp(client.native_stream_scale_percent, kNativeScaleMinPercent,
+                                                    kNativeScaleMaxPercent));
     demand.video_bitrate_bps =
-        std::max(demand.video_bitrate_bps,
-                 std::clamp(client.native_stream_video_bitrate_bps, kNativeBitrateMinBps, kNativeBitrateMaxBps));
+        (std::max)(demand.video_bitrate_bps,
+                   std::clamp(client.native_stream_video_bitrate_bps, kNativeBitrateMinBps, kNativeBitrateMaxBps));
     source_counts[client.native_stream_source_id] += 1;
   }
 

@@ -1502,8 +1502,8 @@ std::string BuildNativeBinaryFramePacket(uint8_t codec, bool keyframe, uint64_t 
   packet.push_back('\0');
   AppendUint64Le(&packet, sequence);
   AppendUint64Le(&packet, static_cast<uint64_t>(captured_at_ms));
-  AppendUint32Le(&packet, static_cast<uint32_t>(std::max(width, 0)));
-  AppendUint32Le(&packet, static_cast<uint32_t>(std::max(height, 0)));
+  AppendUint32Le(&packet, static_cast<uint32_t>((std::max)(width, 0)));
+  AppendUint32Le(&packet, static_cast<uint32_t>((std::max)(height, 0)));
   AppendUint32Le(&packet, static_cast<uint32_t>(payload_bytes.size()));
   packet.append(payload_bytes);
   return packet;
