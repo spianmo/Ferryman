@@ -185,7 +185,7 @@ int ServerApp::HandleCodeAgentSessionSendMessage(HttpRequest* req, HttpResponse*
   }
 
   std::string error;
-  if (!codeagent_application_service_.SendMessage(*ns, session_id, text, local_id, attachments, &error)) {
+  if (!codeagent_application_service_.SendSessionMessage(*ns, session_id, text, local_id, attachments, &error)) {
     return Json(resp, 400, json{{"error", error.empty() ? "failed to send message" : error}}.dump());
   }
   return Json(resp, 200, json{{"ok", true}}.dump());

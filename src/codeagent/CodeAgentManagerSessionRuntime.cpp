@@ -457,9 +457,9 @@ bool CodeAgentManager::SetModelReasoningEffort(const std::string& ns, const std:
   return true;
 }
 
-bool CodeAgentManager::SendMessage(const std::string& ns, const std::string& session_id, const std::string& text,
-                                   const std::string& local_id, const nlohmann::json& attachments,
-                                   std::string* error) {
+bool CodeAgentManager::SendSessionMessage(const std::string& ns, const std::string& session_id,
+                                          const std::string& text, const std::string& local_id,
+                                          const nlohmann::json& attachments, std::string* error) {
   if (util::Trim(text).empty() && (!attachments.is_array() || attachments.empty())) {
     if (error != nullptr) {
       *error = "message requires text or attachments";

@@ -52,9 +52,9 @@ class CodeAgentApplicationService {
     return codeagent_manager_.CheckPathsExist(ns, paths, exists, error);
   }
 
-  bool SendMessage(const std::string& ns, const std::string& session_id, const std::string& text,
-                   const std::string& local_id, const nlohmann::json& attachments, std::string* error) {
-    return codeagent_manager_.SendMessage(ns, session_id, text, local_id, attachments, error);
+  bool SendSessionMessage(const std::string& ns, const std::string& session_id, const std::string& text,
+                          const std::string& local_id, const nlohmann::json& attachments, std::string* error) {
+    return codeagent_manager_.SendSessionMessage(ns, session_id, text, local_id, attachments, error);
   }
 
   bool ResumeSession(const std::string& ns, const std::string& session_id, std::string* error) {

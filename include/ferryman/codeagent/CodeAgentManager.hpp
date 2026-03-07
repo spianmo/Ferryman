@@ -57,8 +57,8 @@ class CodeAgentManager {
   bool CheckPathsExist(const std::string& ns, const std::vector<std::string>& paths,
                        nlohmann::json* exists, std::string* error) const;
 
-  bool SendMessage(const std::string& ns, const std::string& session_id, const std::string& text,
-                   const std::string& local_id, const nlohmann::json& attachments, std::string* error);
+  bool SendSessionMessage(const std::string& ns, const std::string& session_id, const std::string& text,
+                          const std::string& local_id, const nlohmann::json& attachments, std::string* error);
   bool ResumeSession(const std::string& ns, const std::string& session_id, std::string* error);
   bool AbortSession(const std::string& ns, const std::string& session_id, std::string* error);
   bool ArchiveSession(const std::string& ns, const std::string& session_id, std::string* error);

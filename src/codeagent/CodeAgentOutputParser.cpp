@@ -884,9 +884,9 @@ bool HandleNotificationJson(const std::string& method, const nlohmann::json& par
         if (output.has_value()) {
           event["output"] = *output;
         }
-        auto stderr = JsonFirstString(item, {"stderr"});
-        if (stderr.has_value()) {
-          event["stderr"] = *stderr;
+        auto stderr_text = JsonFirstString(item, {"stderr"});
+        if (stderr_text.has_value()) {
+          event["stderr"] = *stderr_text;
         }
         auto error = JsonFirstString(item, {"error"});
         if (error.has_value()) {
@@ -921,14 +921,14 @@ bool HandleNotificationJson(const std::string& method, const nlohmann::json& par
           event["auto_approved"] = *auto_approved;
         }
       } else {
-        auto stdout = JsonFirstString(item, {"stdout", "output"});
-        auto stderr = JsonFirstString(item, {"stderr"});
+        auto stdout_text = JsonFirstString(item, {"stdout", "output"});
+        auto stderr_text = JsonFirstString(item, {"stderr"});
         auto success = JsonFirstBool(item, {"success", "ok", "applied"});
-        if (stdout.has_value()) {
-          event["stdout"] = *stdout;
+        if (stdout_text.has_value()) {
+          event["stdout"] = *stdout_text;
         }
-        if (stderr.has_value()) {
-          event["stderr"] = *stderr;
+        if (stderr_text.has_value()) {
+          event["stderr"] = *stderr_text;
         }
         event["success"] = success.value_or(false);
       }
