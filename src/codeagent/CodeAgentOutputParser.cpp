@@ -662,6 +662,89 @@ bool HandleNotificationJson(const std::string& method, const nlohmann::json& par
     return true;
   }
 
+  if (method == "item/commandExecution/requestApproval") {
+    const std::string call_id = ExtractItemId(params).value_or(MakeCallId());
+    nlohmann::json input = nlohmann::json::object();
+
+    auto command_it = params.find("command");
+    if (command_it != params.end()) {
+      auto command = ExtractCommand(*command_it);
+      if (command.has_value()) {
+        input["command"] = *command;
+      } else {
+        input["command"] = *command_it;
+      }
+    } else {
+      auto args_it = params.find("args");
+      if (args_it != params.end()) {
+        auto command = ExtractCommand(*args_it);
+        if (command.has_value()) {
+          input["command"] = *command;
+        } else {
+          input["command"] = *args_it;
+        }
+      }
+    }
+
+    auto reason = JsonFirstString(params, {"reason", "message"});
+    if (reason.has_value()) {
+      input["message"] = *reason;
+    }
+    auto cwd = JsonFirstString(params, {"cwd", "workingDirectory", "working_directory"});
+    if (cwd.has_value()) {
+      input["cwd"] = *cwd;
+    }
+    input["approval_request"] = true;
+
+    out_bodies->push_back(CodexToolCallBody("CodexBash", call_id, input));
+    return true;
+  }
+
+  if (method == "item/fileChange/requestApproval") {
+    const std::string call_id = ExtractItemId(params).value_or(MakeCallId());
+    nlohmann::json input = nlohmann::json::object();
+
+    auto reason = JsonFirstString(params, {"reason", "message"});
+    if (reason.has_value()) {
+      input["message"] = *reason;
+    }
+    auto grant_root = JsonFirstString(params, {"grantRoot", "grant_root"});
+    if (grant_root.has_value()) {
+      input["grantRoot"] = *grant_root;
+    }
+
+    auto changes_it = params.find("changes");
+    if (changes_it != params.end()) {
+      input["changes"] = ExtractChanges(*changes_it);
+    } else {
+      auto change_it = params.find("change");
+      if (change_it != params.end()) {
+        input["changes"] = ExtractChanges(*change_it);
+      } else {
+        auto diff_it = params.find("diff");
+        if (diff_it != params.end()) {
+          input["changes"] = ExtractChanges(*diff_it);
+        }
+      }
+    }
+
+    input["approval_request"] = true;
+
+    out_bodies->push_back(CodexToolCallBody("CodexPatch", call_id, input));
+    return true;
+  }
+
+  if (method == "item/tool/requestUserInput") {
+    const std::string call_id = ExtractItemId(params).value_or(MakeCallId());
+    nlohmann::json input = params;
+    input.erase("itemId");
+    input.erase("item_id");
+    input.erase("id");
+    input["approval_request"] = true;
+    out_bodies->push_back(CodexToolCallBody("request_user_input", call_id, input));
+    return true;
+  }
+
   if (method == "item/commandExecution/outputDelta") {
     auto item_id = ExtractItemId(params);
     auto delta = JsonFirstString(params, {"delta", "text", "output", "stdout"});
@@ -1326,9 +1409,11 @@ bool ParseAgentOutputJson(const nlohmann::json& payload, AgentOutputParseState* 
   if (type == "patch_apply_begin") {
     const std::string call_id = ExtractCallId(payload).value_or(MakeCallId());
     nlohmann::json input = {
-        {"auto_approved", JsonFirstBool(payload, {"auto_approved", "autoApproved"}).value_or(false)},
         {"changes", ExtractChanges(payload.value("changes", nlohmann::json::object()))},
     };
+    if (auto auto_approved = JsonFirstBool(payload, {"auto_approved", "autoApproved"}); auto_approved.has_value()) {
+      input["auto_approved"] = *auto_approved;
+    }
     state->patch_meta[call_id] = input;
     out_bodies->push_back(CodexToolCallBody("CodexPatch", call_id, input));
     return true;

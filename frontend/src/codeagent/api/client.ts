@@ -325,8 +325,8 @@ export class ApiClient {
     async approvePermission(
         sessionId: string,
         requestId: string,
-        modeOrOptions?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | {
-            mode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan'
+        modeOrOptions?: PermissionMode | {
+            mode?: PermissionMode
             allowTools?: string[]
             decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort'
             answers?: Record<string, string[]> | Record<string, { answers: string[] }>

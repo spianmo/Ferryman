@@ -117,6 +117,7 @@ class CodeAgentManager {
     bool title_initialized = false;
     nlohmann::json agent_state_requests = nlohmann::json::object();
     nlohmann::json agent_state_completed_requests = nlohmann::json::object();
+    std::unordered_set<std::string> permission_allow_tools;
     std::unordered_set<std::string> suppressed_permission_call_ids;
     std::uint64_t generation = 0;
     std::vector<MessageRecord> messages;
@@ -155,14 +156,20 @@ class CodeAgentManager {
   void PushEventLocked(const std::string& ns, const nlohmann::json& payload,
                        const std::string& session_id = "", const std::string& machine_id = "");
 
-  void StartAgentRun(const std::string& session_id, std::uint64_t generation, std::string prompt);
-  std::string ExecuteAgentCommand(const SessionRecord& session, const std::string& prompt, int* exit_code,
+  void StartAgentRun(const std::string& session_id, std::uint64_t generation, std::string prompt,
+                     std::string continuation_context = {});
+  std::string ExecuteAgentCommand(const SessionRecord& session, const std::string& prompt,
+                                  const std::string& continuation_context, int* exit_code,
                                   const std::function<void(std::string_view)>& on_chunk) const;
-  std::string BuildAgentCommand(const SessionRecord& session, const std::string& prompt) const;
+  std::string BuildConversationPrompt(const SessionRecord& session, const std::string& prompt,
+                                      const std::string& continuation_context) const;
+  std::string BuildAgentCommand(const SessionRecord& session, const std::string& prompt,
+                                const std::string& continuation_context) const;
   bool EmitCodexBodyMessage(const std::string& session_id, std::uint64_t generation, const nlohmann::json& body,
                             std::string* summary_text);
   bool AppendAssistantStreamChunk(const std::string& session_id, std::uint64_t generation,
                                   const std::string& message_id, std::string_view chunk);
+  void ContinueSessionWithInternalContext(const std::string& session_id, std::string continuation_context);
   void RestoreStateLocked();
   void PersistStateLocked();
 

@@ -356,6 +356,192 @@ bool IsKnownPermissionDecision(std::string_view decision) {
   return decision == "approved" || decision == "approved_for_session" || decision == "denied" || decision == "abort";
 }
 
+bool IsBashLikeToolName(std::string_view name) {
+  const std::string normalized = ToLower(util::Trim(std::string(name)));
+  return normalized == "bash" || normalized == "codexbash";
+}
+
+bool IsEditLikeToolName(std::string_view name) {
+  const std::string normalized = ToLower(util::Trim(std::string(name)));
+  if (normalized.empty()) {
+    return false;
+  }
+  static constexpr std::array<std::string_view, 8> kEditHints = {
+      "edit",
+      "write",
+      "patch",
+      "create",
+      "delete",
+      "remove",
+      "replace",
+      "multiedit",
+  };
+  for (std::string_view hint : kEditHints) {
+    if (normalized.find(hint) != std::string::npos) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::optional<std::string> ReadToolCommand(const nlohmann::json& input) {
+  if (!input.is_object()) {
+    return std::nullopt;
+  }
+  auto command = JsonFirstString(input, {"command", "cmd"});
+  if (!command.has_value()) {
+    return std::nullopt;
+  }
+  const std::string normalized = util::Trim(*command);
+  if (normalized.empty()) {
+    return std::nullopt;
+  }
+  return normalized;
+}
+
+std::optional<std::string> BuildPermissionToolIdentifier(const std::string& tool_name, const nlohmann::json& input) {
+  const std::string normalized_tool = util::Trim(tool_name);
+  if (normalized_tool.empty()) {
+    return std::nullopt;
+  }
+  if (IsBashLikeToolName(normalized_tool)) {
+    if (auto command = ReadToolCommand(input); command.has_value()) {
+      return "Bash(" + *command + ")";
+    }
+    return std::string("Bash");
+  }
+  return normalized_tool;
+}
+
+void MergePermissionAllowTools(std::unordered_set<std::string>* target, const std::vector<std::string>& allow_tools) {
+  if (target == nullptr) {
+    return;
+  }
+  for (const auto& tool : allow_tools) {
+    const std::string normalized = util::Trim(tool);
+    if (!normalized.empty()) {
+      target->insert(normalized);
+    }
+  }
+}
+
+bool IsAllowToolPatternMatched(const std::string& allow_tool, const std::string& request_tool,
+                               const nlohmann::json& request_input) {
+  const std::string pattern = util::Trim(allow_tool);
+  if (pattern.empty()) {
+    return false;
+  }
+
+  if (pattern == "Bash" && IsBashLikeToolName(request_tool)) {
+    return true;
+  }
+
+  if (pattern.size() > 6 && pattern.rfind("Bash(", 0) == 0 && pattern.back() == ')') {
+    if (!IsBashLikeToolName(request_tool)) {
+      return false;
+    }
+    auto command = ReadToolCommand(request_input);
+    if (!command.has_value()) {
+      return false;
+    }
+
+    std::string body = pattern.substr(5, pattern.size() - 6);
+    if (body.size() > 2 && EndsWith(body, ":*")) {
+      body.resize(body.size() - 2);
+      return command->rfind(body, 0) == 0;
+    }
+    return *command == body;
+  }
+
+  return ToLower(pattern) == ToLower(util::Trim(request_tool));
+}
+
+bool IsPermissionAllowedForSession(const std::unordered_set<std::string>& allow_tools, const std::string& request_tool,
+                                   const nlohmann::json& request_input) {
+  if (allow_tools.empty()) {
+    return false;
+  }
+  for (const auto& allow_tool : allow_tools) {
+    if (IsAllowToolPatternMatched(allow_tool, request_tool, request_input)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::optional<std::string> ResolveAutoPermissionDecisionForMode(const std::string& permission_mode,
+                                                                const std::string& request_tool) {
+  const std::string mode = policy::NormalizePermissionModeValue(permission_mode);
+  if (mode == "yolo" || mode == "bypassPermissions") {
+    return std::string("approved_for_session");
+  }
+  if (mode == "safe-yolo") {
+    return std::string("approved");
+  }
+  if (mode == "acceptEdits" && IsEditLikeToolName(request_tool)) {
+    return std::string("approved");
+  }
+  return std::nullopt;
+}
+
+std::optional<std::string> ResolveAutoPermissionDecision(const std::unordered_set<std::string>& allow_tools,
+                                                         const std::string& permission_mode,
+                                                         const std::string& request_tool,
+                                                         const nlohmann::json& request_input) {
+  if (IsPermissionAllowedForSession(allow_tools, request_tool, request_input)) {
+    return std::string("approved_for_session");
+  }
+  return ResolveAutoPermissionDecisionForMode(permission_mode, request_tool);
+}
+
+bool HasAnsweredSelectorRequest(const nlohmann::json& completed_requests, const std::string& request_tool,
+                                const nlohmann::json& request_input) {
+  if (!completed_requests.is_object()) {
+    return false;
+  }
+
+  for (auto it = completed_requests.begin(); it != completed_requests.end(); ++it) {
+    if (!it->is_object()) {
+      continue;
+    }
+
+    const nlohmann::json& completed = *it;
+    if (util::Trim(completed.value("tool", std::string())) != util::Trim(request_tool)) {
+      continue;
+    }
+    if (completed.value("status", std::string()) != "approved") {
+      continue;
+    }
+
+    auto answers_it = completed.find("answers");
+    if (answers_it == completed.end() || !answers_it->is_object() || answers_it->empty()) {
+      continue;
+    }
+
+    auto arguments_it = completed.find("arguments");
+    const nlohmann::json completed_arguments =
+        arguments_it != completed.end() ? *arguments_it : nlohmann::json::object();
+    if (completed_arguments == request_input) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+nlohmann::json SerializePermissionAllowTools(const std::unordered_set<std::string>& allow_tools) {
+  nlohmann::json result = nlohmann::json::array();
+  if (allow_tools.empty()) {
+    return result;
+  }
+  std::vector<std::string> values(allow_tools.begin(), allow_tools.end());
+  std::sort(values.begin(), values.end());
+  for (const auto& value : values) {
+    result.push_back(value);
+  }
+  return result;
+}
+
 }  // namespace
 
 CodeAgentManager::CodeAgentManager(const core::AppConfig& config) {
@@ -574,6 +760,7 @@ nlohmann::json CodeAgentManager::BuildSessionJsonLocked(const SessionRecord& ses
       {"todos", nlohmann::json::array()},
       {"permissionMode", session.permission_mode},
       {"modelMode", session.model_mode},
+      {"permissionAllowTools", SerializePermissionAllowTools(session.permission_allow_tools)},
   };
   if (session.flavor == "codex" && !session.model_reasoning_effort.empty()) {
     result["reasoningEffort"] = session.model_reasoning_effort;
@@ -628,7 +815,7 @@ bool CodeAgentManager::ApprovePermissionRequest(const std::string& ns, const std
                                                 const std::string& decision, const nlohmann::json& answers,
                                                 std::string* error) {
   std::string followup_text;
-  bool should_send_followup = false;
+  bool should_continue = false;
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto session_opt = GetMutableSessionLocked(ns, session_id);
@@ -690,6 +877,19 @@ bool CodeAgentManager::ApprovePermissionRequest(const std::string& ns, const std
       return false;
     }
 
+    std::vector<std::string> effective_allow_tools;
+    effective_allow_tools.reserve(allow_tools.size());
+    std::unordered_set<std::string> allow_tool_dedup;
+    for (const auto& raw_tool : allow_tools) {
+      const std::string normalized_tool = util::Trim(raw_tool);
+      if (normalized_tool.empty()) {
+        continue;
+      }
+      if (allow_tool_dedup.insert(normalized_tool).second) {
+        effective_allow_tools.push_back(normalized_tool);
+      }
+    }
+
     nlohmann::json request = *request_it;
     session.agent_state_requests.erase(request_it);
 
@@ -699,9 +899,18 @@ bool CodeAgentManager::ApprovePermissionRequest(const std::string& ns, const std
 
     const std::int64_t now = NowMs();
     const std::string request_tool = request.value("tool", std::string("Tool"));
+    const nlohmann::json request_arguments = request.value("arguments", nlohmann::json::object());
+    if (normalized_decision == "approved_for_session" && effective_allow_tools.empty()) {
+      if (auto inferred = BuildPermissionToolIdentifier(request_tool, request_arguments); inferred.has_value()) {
+        effective_allow_tools.push_back(*inferred);
+      }
+    }
+    if (!effective_allow_tools.empty()) {
+      MergePermissionAllowTools(&session.permission_allow_tools, effective_allow_tools);
+    }
     nlohmann::json completed = {
         {"tool", request_tool},
-        {"arguments", request.value("arguments", nlohmann::json::object())},
+        {"arguments", request_arguments},
         {"createdAt", request.value("createdAt", now)},
         {"completedAt", now},
         {"status", "approved"},
@@ -709,8 +918,8 @@ bool CodeAgentManager::ApprovePermissionRequest(const std::string& ns, const std
     if (!normalized_mode.empty() && normalized_mode != "default") {
       completed["mode"] = normalized_mode;
     }
-    if (!allow_tools.empty()) {
-      completed["allowTools"] = allow_tools;
+    if (!effective_allow_tools.empty()) {
+      completed["allowTools"] = effective_allow_tools;
     }
     if (!normalized_decision.empty()) {
       completed["decision"] = normalized_decision;
@@ -743,20 +952,24 @@ bool CodeAgentManager::ApprovePermissionRequest(const std::string& ns, const std
     session.agent_state_completed_requests[normalized_request_id] = std::move(completed);
     session.updated_at_ms = now;
 
-    if (IsPermissionSelectorToolName(request_tool) || IsPermissionToolName(request_tool)) {
+    if (IsPermissionSelectorToolName(request_tool) || IsPermissionToolName(request_tool) ||
+        IsPermissionRequestInput(request_arguments)) {
       const auto safe_dump = [](const nlohmann::json& value) {
         return value.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
       };
       if (answers.is_object() && !answers.empty()) {
-        followup_text = "I answered the pending request " + request_tool + " with:\n" + safe_dump(answers) +
-                        "\nPlease continue.";
+        followup_text = "Pending request resolved.\nTool: " + request_tool +
+                        "\nDecision: approved\nAnswers: " + safe_dump(answers) +
+                        "\nTreat the answers as already-submitted user input and continue the same conversation.";
       } else if (!normalized_decision.empty()) {
-        followup_text = "I approved the pending request " + request_tool + " with decision: " + normalized_decision +
-                        ". Please continue.";
+        followup_text = "Pending request resolved.\nTool: " + request_tool +
+                        "\nDecision: " + normalized_decision +
+                        "\nContinue the same conversation with that approval already applied.";
       } else {
-        followup_text = "I approved the pending request " + request_tool + ". Please continue.";
+        followup_text = "Pending request resolved.\nTool: " + request_tool +
+                        "\nDecision: approved\nContinue the same conversation with that approval already applied.";
       }
-      should_send_followup = true;
+      should_continue = true;
     }
 
     PushEventLocked(ns,
@@ -773,9 +986,8 @@ bool CodeAgentManager::ApprovePermissionRequest(const std::string& ns, const std
     }
   }
 
-  if (should_send_followup && !followup_text.empty()) {
-    std::string followup_error;
-    SendMessage(ns, session_id, followup_text, "", nlohmann::json::array(), &followup_error);
+  if (should_continue && !followup_text.empty()) {
+    ContinueSessionWithInternalContext(session_id, std::move(followup_text));
   }
   return true;
 }
@@ -784,7 +996,7 @@ bool CodeAgentManager::DenyPermissionRequest(const std::string& ns, const std::s
                                              const std::string& request_id, const std::string& decision,
                                              std::string* error) {
   std::string followup_text;
-  bool should_send_followup = false;
+  bool should_continue = false;
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto session_opt = GetMutableSessionLocked(ns, session_id);
@@ -839,10 +1051,11 @@ bool CodeAgentManager::DenyPermissionRequest(const std::string& ns, const std::s
 
     const std::int64_t now = NowMs();
     const std::string request_tool = request.value("tool", std::string("Tool"));
+    const nlohmann::json request_arguments = request.value("arguments", nlohmann::json::object());
     const std::string deny_reason = normalized_decision == "abort" ? "Aborted by user" : "Denied by user";
     nlohmann::json completed = {
         {"tool", request_tool},
-        {"arguments", request.value("arguments", nlohmann::json::object())},
+        {"arguments", request_arguments},
         {"createdAt", request.value("createdAt", now)},
         {"completedAt", now},
         {"status", "denied"},
@@ -855,11 +1068,13 @@ bool CodeAgentManager::DenyPermissionRequest(const std::string& ns, const std::s
     session.agent_state_completed_requests[normalized_request_id] = std::move(completed);
     session.updated_at_ms = now;
 
-    if (IsPermissionSelectorToolName(request_tool) || IsPermissionToolName(request_tool)) {
+    if (IsPermissionSelectorToolName(request_tool) || IsPermissionToolName(request_tool) ||
+        IsPermissionRequestInput(request_arguments)) {
       const std::string decision_text = normalized_decision.empty() ? std::string("denied") : normalized_decision;
-      followup_text = "I denied the pending request " + request_tool + " with decision: " + decision_text +
-                      ". " + deny_reason + ". Please continue with an alternative approach.";
-      should_send_followup = true;
+      followup_text = "Pending request resolved.\nTool: " + request_tool + "\nDecision: " + decision_text +
+                      "\nReason: " + deny_reason +
+                      "\nContinue the same conversation and take an alternative approach if appropriate.";
+      should_continue = true;
     }
 
     PushEventLocked(ns,
@@ -876,9 +1091,8 @@ bool CodeAgentManager::DenyPermissionRequest(const std::string& ns, const std::s
     }
   }
 
-  if (should_send_followup && !followup_text.empty()) {
-    std::string followup_error;
-    SendMessage(ns, session_id, followup_text, "", nlohmann::json::array(), &followup_error);
+  if (should_continue && !followup_text.empty()) {
+    ContinueSessionWithInternalContext(session_id, std::move(followup_text));
   }
   return true;
 }
@@ -1034,9 +1248,11 @@ bool CodeAgentManager::EmitCodexBodyMessage(const std::string& session_id, std::
 
     bool should_track_permission = false;
     if (tool_name.has_value() && !tool_name->empty()) {
+      const bool explicit_permission_request = IsPermissionRequestInput(input);
       if (IsPermissionSelectorToolName(*tool_name)) {
         should_track_permission = true;
-      } else if (IsPermissionToolName(*tool_name) && IsPermissionRequestInput(input)) {
+      } else if (explicit_permission_request &&
+                 (IsPermissionToolName(*tool_name) || IsBashLikeToolName(*tool_name) || IsEditLikeToolName(*tool_name))) {
         should_track_permission = true;
       } else if (ToLower(*tool_name) == "codexpermission" || ToLower(*tool_name) == "codex_permission") {
         should_track_permission = true;
@@ -1054,56 +1270,86 @@ bool CodeAgentManager::EmitCodexBodyMessage(const std::string& session_id, std::
       const std::string request_tool = tool_name.value_or("Tool");
       const bool selector_request = IsPermissionSelectorToolName(request_tool);
 
-      bool has_other_selector_pending = false;
-      if (selector_request && session.agent_state_requests.is_object()) {
-        for (auto it = session.agent_state_requests.begin(); it != session.agent_state_requests.end(); ++it) {
-          if (it.key() == *call_id || !it.value().is_object()) {
-            continue;
-          }
-          const std::string pending_tool = it.value().value("tool", std::string("Tool"));
-          if (IsPermissionSelectorToolName(pending_tool)) {
-            has_other_selector_pending = true;
-            break;
-          }
-        }
-      }
-
-      if (has_other_selector_pending) {
+      if (selector_request &&
+          HasAnsweredSelectorRequest(session.agent_state_completed_requests, request_tool, input)) {
         session.suppressed_permission_call_ids.insert(*call_id);
         suppress_body_message = true;
       } else {
-        const std::int64_t now = NowMs();
-        session.agent_state_requests[*call_id] = {
-            {"tool", request_tool},
-            {"arguments", input},
-            {"createdAt", now},
-        };
-        session.agent_state_completed_requests.erase(*call_id);
-        session.updated_at_ms = std::max(session.updated_at_ms, now);
-        permission_state_changed = true;
-        should_publish_session_update = true;
-
-        if (selector_request) {
-          session.thinking = false;
-          session.generation += 1;
+        bool has_other_selector_pending = false;
+        if (selector_request && session.agent_state_requests.is_object()) {
+          for (auto it = session.agent_state_requests.begin(); it != session.agent_state_requests.end(); ++it) {
+            if (it.key() == *call_id || !it.value().is_object()) {
+              continue;
+            }
+            const std::string pending_tool = it.value().value("tool", std::string("Tool"));
+            if (IsPermissionSelectorToolName(pending_tool)) {
+              has_other_selector_pending = true;
+              break;
+            }
+          }
         }
 
-        const std::string short_title = selector_request ? "Input Needed" : "Permission Required";
-        const std::string short_body = selector_request ? "The agent is waiting for your selection."
-                                                        : "The agent is waiting for your approval.";
-        PushEventLocked(session.ns,
-                        {
-                            {"type", "toast"},
-                            {"namespace", session.ns},
-                            {"data",
-                             {
-                                 {"title", short_title},
-                                 {"body", short_body},
-                                 {"sessionId", session.id},
-                                 {"url", "/sessions/" + session.id},
-                             }},
-                        },
-                        session.id);
+        if (has_other_selector_pending) {
+          session.suppressed_permission_call_ids.insert(*call_id);
+          suppress_body_message = true;
+        } else {
+          const std::int64_t now = NowMs();
+          auto auto_decision =
+              selector_request ? std::optional<std::string>()
+                               : ResolveAutoPermissionDecision(session.permission_allow_tools, session.permission_mode,
+                                                               request_tool, input);
+          if (auto_decision.has_value()) {
+            nlohmann::json completed = {
+                {"tool", request_tool},
+                {"arguments", input},
+                {"createdAt", now},
+                {"completedAt", now},
+                {"status",
+                 *auto_decision == "approved" || *auto_decision == "approved_for_session" ? "approved" : "denied"},
+                {"decision", *auto_decision},
+            };
+            if (*auto_decision == "approved_for_session") {
+              if (auto inferred = BuildPermissionToolIdentifier(request_tool, input); inferred.has_value()) {
+                completed["allowTools"] = nlohmann::json::array({*inferred});
+                session.permission_allow_tools.insert(*inferred);
+              }
+            }
+            session.agent_state_completed_requests[*call_id] = std::move(completed);
+            session.updated_at_ms = std::max(session.updated_at_ms, now);
+            permission_state_changed = true;
+            should_publish_session_update = true;
+          } else {
+            session.agent_state_requests[*call_id] = {
+                {"tool", request_tool},
+                {"arguments", input},
+                {"createdAt", now},
+            };
+            session.agent_state_completed_requests.erase(*call_id);
+            session.updated_at_ms = std::max(session.updated_at_ms, now);
+            permission_state_changed = true;
+            should_publish_session_update = true;
+
+            session.thinking = false;
+            session.generation += 1;
+
+            const std::string short_title = selector_request ? "Input Needed" : "Permission Required";
+            const std::string short_body = selector_request ? "The agent is waiting for your selection."
+                                                            : "The agent is waiting for your approval.";
+            PushEventLocked(session.ns,
+                            {
+                                {"type", "toast"},
+                                {"namespace", session.ns},
+                                {"data",
+                                 {
+                                     {"title", short_title},
+                                     {"body", short_body},
+                                     {"sessionId", session.id},
+                                     {"url", "/sessions/" + session.id},
+                                 }},
+                            },
+                            session.id);
+          }
+        }
       }
     }
   } else if (body_type.has_value() && *body_type == "tool-call-result") {
@@ -1119,6 +1365,7 @@ bool CodeAgentManager::EmitCodexBodyMessage(const std::string& session_id, std::
         const nlohmann::json request = *request_it;
         const nlohmann::json* output = JsonObjectField(normalized, "output");
         const std::string request_tool = request.value("tool", std::string("Tool"));
+        const nlohmann::json request_arguments = request.value("arguments", nlohmann::json::object());
 
         std::string decision = ToLower(util::Trim(JsonFirstString(normalized, {"decision"}).value_or("")));
         if (decision.empty() && output != nullptr) {
@@ -1140,7 +1387,8 @@ bool CodeAgentManager::EmitCodexBodyMessage(const std::string& session_id, std::
         }
 
         if (decision.empty()) {
-          if (IsPermissionSelectorToolName(request_tool) || IsPermissionToolName(request_tool)) {
+          if (IsPermissionSelectorToolName(request_tool) || IsPermissionToolName(request_tool) ||
+              IsPermissionRequestInput(request_arguments)) {
             suppress_body_message = true;
           }
         }
@@ -1197,6 +1445,16 @@ bool CodeAgentManager::EmitCodexBodyMessage(const std::string& session_id, std::
             allow_tools = read_string_array(*output, {"allowTools", "allow_tools"});
           }
 
+          if (decision == "approved_for_session" && allow_tools.empty()) {
+            if (auto inferred = BuildPermissionToolIdentifier(request_tool, request_arguments);
+                inferred.has_value()) {
+              allow_tools.push_back(*inferred);
+            }
+          }
+          if (!allow_tools.empty() && (decision == "approved" || decision == "approved_for_session")) {
+            MergePermissionAllowTools(&session.permission_allow_tools, allow_tools);
+          }
+
           std::string reason =
               JsonFirstString(normalized, {"reason", "error", "message"}).value_or("");
           if (reason.empty() && output != nullptr) {
@@ -1220,7 +1478,7 @@ bool CodeAgentManager::EmitCodexBodyMessage(const std::string& session_id, std::
 
           nlohmann::json completed = {
               {"tool", request.value("tool", "Tool")},
-              {"arguments", request.value("arguments", nlohmann::json::object())},
+              {"arguments", request_arguments},
               {"createdAt", request.value("createdAt", now)},
               {"completedAt", now},
               {"status", decision == "approved" || decision == "approved_for_session" ? "approved" : "denied"},

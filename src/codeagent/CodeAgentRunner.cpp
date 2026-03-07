@@ -507,8 +507,10 @@ if __name__ == "__main__":
 
 }  // namespace
 
-void CodeAgentManager::StartAgentRun(const std::string& session_id, std::uint64_t generation, std::string prompt) {
-  std::thread([this, session_id, generation, prompt = std::move(prompt)]() {
+void CodeAgentManager::StartAgentRun(const std::string& session_id, std::uint64_t generation, std::string prompt,
+                                     std::string continuation_context) {
+  std::thread([this, session_id, generation, prompt = std::move(prompt),
+               continuation_context = std::move(continuation_context)]() {
     SessionRecord snapshot;
     {
       std::lock_guard<std::mutex> lock(mu_);
@@ -577,7 +579,7 @@ void CodeAgentManager::StartAgentRun(const std::string& session_id, std::uint64_
 
     int exit_code = -1;
     std::string output = ExecuteAgentCommand(
-        snapshot, prompt, &exit_code,
+        snapshot, prompt, continuation_context, &exit_code,
         [&line_buffer, &process_output_line](std::string_view chunk) {
           if (chunk.empty()) {
             return;
@@ -763,7 +765,260 @@ std::string CodeAgentManager::ShellEscape(const std::string& value) {
   return escaped;
 }
 
-std::string CodeAgentManager::BuildAgentCommand(const SessionRecord& session, const std::string& prompt) const {
+std::string CodeAgentManager::BuildConversationPrompt(const SessionRecord& session, const std::string& prompt,
+                                                      const std::string& continuation_context) const {
+  auto json_string = [](const nlohmann::json& value, std::initializer_list<const char*> keys) -> std::optional<std::string> {
+    if (!value.is_object()) {
+      return std::nullopt;
+    }
+    for (const char* key : keys) {
+      auto it = value.find(key);
+      if (it != value.end() && it->is_string()) {
+        const std::string text = util::Trim(it->get<std::string>());
+        if (!text.empty()) {
+          return text;
+        }
+      }
+    }
+    return std::nullopt;
+  };
+
+  auto json_field = [](const nlohmann::json& value, std::initializer_list<const char*> keys) -> const nlohmann::json* {
+    if (!value.is_object()) {
+      return nullptr;
+    }
+    for (const char* key : keys) {
+      auto it = value.find(key);
+      if (it != value.end()) {
+        return &(*it);
+      }
+    }
+    return nullptr;
+  };
+
+  auto truncate = [](std::string text, size_t max_chars) {
+    text = util::Trim(text);
+    if (text.size() <= max_chars) {
+      return text;
+    }
+    return text.substr(0, max_chars) + "...";
+  };
+
+  auto safe_dump = [&truncate](const nlohmann::json& value, size_t max_chars) {
+    return truncate(value.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace), max_chars);
+  };
+
+  auto attachment_suffix = [&json_string](const nlohmann::json& content) {
+    if (!content.is_object()) {
+      return std::string();
+    }
+    auto attachments_it = content.find("attachments");
+    if (attachments_it == content.end() || !attachments_it->is_array() || attachments_it->empty()) {
+      return std::string();
+    }
+
+    std::vector<std::string> names;
+    names.reserve(attachments_it->size());
+    for (const auto& attachment : *attachments_it) {
+      if (attachment.is_string()) {
+        const std::string name = util::Trim(attachment.get<std::string>());
+        if (!name.empty()) {
+          names.push_back(name);
+        }
+        continue;
+      }
+      if (!attachment.is_object()) {
+        continue;
+      }
+      auto name = json_string(attachment, {"name", "filename", "path", "url"});
+      if (name.has_value()) {
+        names.push_back(*name);
+      }
+    }
+
+    if (names.empty()) {
+      return std::string(" [attachments]");
+    }
+
+    constexpr size_t kMaxAttachmentNames = 3;
+    std::string suffix = " [attachments: ";
+    for (size_t index = 0; index < names.size() && index < kMaxAttachmentNames; ++index) {
+      if (index > 0) {
+        suffix += ", ";
+      }
+      suffix += names[index];
+    }
+    if (names.size() > kMaxAttachmentNames) {
+      suffix += ", ...";
+    }
+    suffix += "]";
+    return suffix;
+  };
+
+  auto serialize_codex_data = [&json_string, &json_field, &safe_dump, &truncate](const nlohmann::json& data) {
+    const std::string type = json_string(data, {"type"}).value_or("");
+    if (type == "message") {
+      return std::string("Assistant: ") + truncate(json_string(data, {"message", "text"}).value_or(""), 1200);
+    }
+    if (type == "tool-call") {
+      const std::string name = json_string(data, {"name", "tool", "toolName", "tool_name"}).value_or("Tool");
+      if (const nlohmann::json* input = json_field(data, {"input", "arguments"}); input != nullptr && !input->is_null()) {
+        return std::string("Assistant tool call ") + name + ": " + safe_dump(*input, 900);
+      }
+      return std::string("Assistant tool call ") + name;
+    }
+    if (type == "tool-call-result") {
+      const std::string name = json_string(data, {"name", "tool", "toolName", "tool_name"}).value_or("tool");
+      if (const nlohmann::json* output = json_field(data, {"output", "result"}); output != nullptr && !output->is_null()) {
+        return std::string("Assistant tool result ") + name + ": " + safe_dump(*output, 900);
+      }
+      return std::string("Assistant tool result ") + name;
+    }
+    if (type == "reasoning" || type == "token-count") {
+      return std::string();
+    }
+    return std::string();
+  };
+
+  auto serialize_message = [&](const nlohmann::json& message) {
+    if (!message.is_object()) {
+      return std::string();
+    }
+
+    const std::string role = json_string(message, {"role"}).value_or("");
+    const nlohmann::json* content = json_field(message, {"content"});
+    if (content == nullptr) {
+      return std::string();
+    }
+
+    if (role == "user") {
+      if (content->is_string()) {
+        return std::string("User: ") + truncate(content->get<std::string>(), 1200);
+      }
+      if (!content->is_object()) {
+        return std::string();
+      }
+
+      const std::string type = json_string(*content, {"type"}).value_or("");
+      if (type == "text" || type.empty()) {
+        const std::string text = json_string(*content, {"text", "message"}).value_or("");
+        const std::string suffix = attachment_suffix(*content);
+        if (text.empty()) {
+          return suffix.empty() ? std::string() : std::string("User: (sent attachments)") + suffix;
+        }
+        return std::string("User: ") + truncate(text, 1200) + suffix;
+      }
+
+      return std::string("User: ") + safe_dump(*content, 900);
+    }
+
+    if (role != "agent") {
+      return std::string();
+    }
+
+    if (content->is_string()) {
+      return std::string("Assistant: ") + truncate(content->get<std::string>(), 1200);
+    }
+    if (!content->is_object()) {
+      return std::string();
+    }
+
+    const std::string type = json_string(*content, {"type"}).value_or("");
+    if (type == "event") {
+      return std::string();
+    }
+    if (type == "codex") {
+      if (const nlohmann::json* data = json_field(*content, {"data"}); data != nullptr && data->is_object()) {
+        return serialize_codex_data(*data);
+      }
+      return std::string();
+    }
+
+    if (type == "text") {
+      return std::string("Assistant: ") + truncate(json_string(*content, {"text", "message"}).value_or(""), 1200);
+    }
+
+    return std::string();
+  };
+
+  const std::string trimmed_prompt = util::Trim(prompt);
+  const std::string trimmed_continuation = util::Trim(continuation_context);
+  const bool has_internal_update = !trimmed_continuation.empty();
+
+  std::string latest_entry;
+  if (!session.messages.empty()) {
+    latest_entry = serialize_message(session.messages.back().content);
+  }
+  if (latest_entry.empty()) {
+    latest_entry = trimmed_prompt.empty() ? std::string("User: (empty message)") : std::string("User: ") + trimmed_prompt;
+  }
+
+  if (!trimmed_prompt.empty() && trimmed_prompt.front() == '/') {
+    return prompt;
+  }
+
+  if (!has_internal_update && session.messages.size() <= 1) {
+    return trimmed_prompt.empty() ? latest_entry : prompt;
+  }
+
+  constexpr size_t kMaxHistoryEntries = 48;
+  constexpr size_t kMaxHistoryChars = 24000;
+  std::vector<std::string> history_entries;
+  history_entries.reserve(std::min(kMaxHistoryEntries, session.messages.size() - 1));
+
+  size_t consumed_chars = 0;
+  for (size_t index = session.messages.size() - 1; index > 0; --index) {
+    const std::string entry = serialize_message(session.messages[index - 1].content);
+    if (entry.empty()) {
+      continue;
+    }
+
+    const size_t next_chars = entry.size() + 2;
+    if (!history_entries.empty() && consumed_chars + next_chars > kMaxHistoryChars) {
+      break;
+    }
+
+    history_entries.push_back(entry);
+    consumed_chars += next_chars;
+    if (history_entries.size() >= kMaxHistoryEntries) {
+      break;
+    }
+  }
+
+  if (!has_internal_update && history_entries.empty()) {
+    return trimmed_prompt.empty() ? latest_entry : prompt;
+  }
+
+  std::reverse(history_entries.begin(), history_entries.end());
+
+  std::string combined;
+  combined.reserve(consumed_chars + latest_entry.size() + 512);
+  combined += "You are continuing the same Ferryman session. Use the earlier conversation below as context. ";
+  combined += "Do not say that the prior context is missing when it is present in the transcript.\n\n";
+  if (session.messages.size() - 1 > history_entries.size()) {
+    combined += "[Earlier conversation omitted for brevity]\n\n";
+  }
+  combined += "Conversation so far:\n";
+  for (const auto& entry : history_entries) {
+    combined += entry;
+    combined += "\n\n";
+  }
+  if (has_internal_update) {
+    combined += "Latest visible conversation entry:\n";
+    combined += latest_entry;
+    combined += "\n\nInternal session update (not shown to the user):\n";
+    combined += trimmed_continuation;
+    combined += "\n\nContinue the same conversation naturally. Treat the internal session update as already-applied tool approval or user input. Do not claim the user sent that internal update as a chat message, and do not ask them to repeat it.";
+  } else {
+    combined += "Latest user message:\n";
+    combined += latest_entry;
+    combined += "\n\nContinue the same conversation naturally and answer the latest user message.";
+  }
+  return combined;
+}
+
+std::string CodeAgentManager::BuildAgentCommand(const SessionRecord& session, const std::string& prompt,
+                                                const std::string& continuation_context) const {
   std::string cmd_template;
   if (session.flavor == "codex") {
     cmd_template = codex_cmd_template_;
@@ -777,7 +1032,8 @@ std::string CodeAgentManager::BuildAgentCommand(const SessionRecord& session, co
     cmd_template = claude_cmd_template_;
   }
 
-  const std::string escaped_prompt = ShellEscape(prompt);
+  const std::string effective_prompt = BuildConversationPrompt(session, prompt, continuation_context);
+  const std::string escaped_prompt = ShellEscape(effective_prompt);
   const std::string escaped_cwd = ShellEscape(session.path.string());
   std::string escaped_model = ShellEscape(session.model);
 
@@ -931,9 +1187,9 @@ std::string CodeAgentManager::ReadCommandOutput(const std::string& command, int*
 }
 
 std::string CodeAgentManager::ExecuteAgentCommand(const SessionRecord& session, const std::string& prompt,
-                                                  int* exit_code,
+                                                  const std::string& continuation_context, int* exit_code,
                                                   const std::function<void(std::string_view)>& on_chunk) const {
-  const std::string command = BuildAgentCommand(session, prompt) + " 2>&1";
+  const std::string command = BuildAgentCommand(session, prompt, continuation_context) + " 2>&1";
   return ReadCommandOutput(command, exit_code, on_chunk);
 }
 

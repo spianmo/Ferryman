@@ -149,9 +149,9 @@ export function reduceTimeline(
                         permission
                     })
 
-                    if (block.tool.state === 'pending') {
+                    if (block.tool.state !== 'pending' && block.tool.state !== 'completed' && block.tool.state !== 'error') {
                         block.tool.state = 'running'
-                        block.tool.startedAt = msg.createdAt
+                        block.tool.startedAt = block.tool.startedAt ?? msg.createdAt
                     }
 
                     if (c.name === 'Task' && !context.consumedGroupIds.has(msg.id)) {

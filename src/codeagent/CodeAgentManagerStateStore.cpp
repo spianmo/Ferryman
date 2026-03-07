@@ -303,6 +303,18 @@ void CodeAgentManager::RestoreStateLocked() {
     if (completed_it != raw_session.end() && completed_it->is_object()) {
       session.agent_state_completed_requests = *completed_it;
     }
+    auto allow_tools_it = raw_session.find("permissionAllowTools");
+    if (allow_tools_it != raw_session.end() && allow_tools_it->is_array()) {
+      for (const auto& item : *allow_tools_it) {
+        if (!item.is_string()) {
+          continue;
+        }
+        const std::string normalized = util::Trim(item.get<std::string>());
+        if (!normalized.empty()) {
+          session.permission_allow_tools.insert(normalized);
+        }
+      }
+    }
     const bool legacy_yolo = session.yolo;
     std::string normalized_permission_mode = policy::NormalizePermissionModeValue(session.permission_mode);
     if (normalized_permission_mode.empty()) {
@@ -439,8 +451,18 @@ void CodeAgentManager::PersistStateLocked() {
         {"agentStateCompletedRequests",
          session->agent_state_completed_requests.is_object() ? session->agent_state_completed_requests
                                                              : nlohmann::json::object()},
+        {"permissionAllowTools", nlohmann::json::array()},
         {"messages", nlohmann::json::array()},
     };
+
+    if (!session->permission_allow_tools.empty()) {
+      std::vector<std::string> allow_tools(session->permission_allow_tools.begin(),
+                                           session->permission_allow_tools.end());
+      std::sort(allow_tools.begin(), allow_tools.end());
+      for (const auto& tool : allow_tools) {
+        serialized["permissionAllowTools"].push_back(tool);
+      }
+    }
 
     for (const auto& message : session->messages) {
       serialized["messages"].push_back({

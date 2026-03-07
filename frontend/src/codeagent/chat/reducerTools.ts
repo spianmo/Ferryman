@@ -33,12 +33,21 @@ function stableInputSignature(input: unknown): string {
 export function getPermissions(agentState: AgentState | null | undefined): Map<string, PermissionEntry> {
     const map = new Map<string, PermissionEntry>()
     const dedupeBySignature = new Map<string, string>()
+    const answeredQuestionCompletedAtBySignature = new Map<string, number | null>()
 
     const completed = agentState?.completedRequests ?? null
     if (completed) {
         for (const [id, entry] of Object.entries(completed)) {
             const answers = entry.answers
             const hasAnswers = Boolean(answers && Object.keys(answers).length > 0)
+            const questionSignature = isQuestionToolName(entry.tool)
+                ? `${normalizeToolName(entry.tool)}::${stableInputSignature(entry.arguments)}`
+                : null
+
+            if (questionSignature && entry.status === 'approved' && hasAnswers) {
+                answeredQuestionCompletedAtBySignature.set(questionSignature, entry.completedAt ?? entry.createdAt ?? null)
+            }
+
             const shouldCollapse = isQuestionToolName(entry.tool)
                 && !hasAnswers
                 && (entry.status === 'denied' || entry.status === 'canceled')
@@ -81,6 +90,17 @@ export function getPermissions(agentState: AgentState | null | undefined): Map<s
             const signature = shouldCollapse
                 ? `${normalizeToolName(request.tool)}::${stableInputSignature(request.arguments)}`
                 : null
+            if (signature) {
+                const answeredAt = answeredQuestionCompletedAtBySignature.get(signature)
+                const requestCreatedAt = request.createdAt ?? null
+                const isRecentReplayDuplicate = answeredAt === null
+                    || requestCreatedAt === null
+                    || (requestCreatedAt >= answeredAt && requestCreatedAt - answeredAt <= 60_000)
+
+                if (answeredQuestionCompletedAtBySignature.has(signature) && isRecentReplayDuplicate) {
+                    continue
+                }
+            }
             if (signature) {
                 const previousId = dedupeBySignature.get(signature)
                 if (previousId) {
@@ -132,8 +152,14 @@ export function ensureToolBlock(
         }
         if (seed.permission) {
             existing.tool.permission = { ...existing.tool.permission, ...seed.permission }
-            if (existing.tool.state === 'running' && seed.permission.status === 'pending') {
+            if (seed.permission.status === 'pending' && existing.tool.state === 'running') {
                 existing.tool.state = 'pending'
+            } else if (seed.permission.status === 'approved') {
+                existing.tool.state = 'completed'
+                existing.tool.completedAt = seed.permission.completedAt ?? existing.tool.completedAt ?? seed.createdAt
+            } else if (seed.permission.status === 'denied' || seed.permission.status === 'canceled') {
+                existing.tool.state = 'error'
+                existing.tool.completedAt = seed.permission.completedAt ?? existing.tool.completedAt ?? seed.createdAt
             }
         }
         if (seed.name && (!isPlaceholderToolName(seed.name) || isPlaceholderToolName(existing.tool.name))) {
@@ -150,9 +176,11 @@ export function ensureToolBlock(
 
     const initialState: ChatToolCall['state'] = seed.permission?.status === 'pending'
         ? 'pending'
-        : seed.permission?.status === 'denied' || seed.permission?.status === 'canceled'
-            ? 'error'
-            : 'running'
+        : seed.permission?.status === 'approved'
+            ? 'completed'
+            : seed.permission?.status === 'denied' || seed.permission?.status === 'canceled'
+                ? 'error'
+                : 'running'
 
     const tool: ChatToolCall = {
         id,
@@ -161,7 +189,9 @@ export function ensureToolBlock(
         input: seed.input,
         createdAt: seed.createdAt,
         startedAt: initialState === 'running' ? seed.createdAt : null,
-        completedAt: null,
+        completedAt: initialState === 'completed' || initialState === 'error'
+            ? (seed.permission?.completedAt ?? seed.createdAt)
+            : null,
         description: seed.description,
         permission: seed.permission
     }
