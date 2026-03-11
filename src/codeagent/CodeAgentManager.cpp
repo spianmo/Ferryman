@@ -472,14 +472,15 @@ bool IsPermissionAllowedForSession(const std::unordered_set<std::string>& allow_
 std::optional<std::string> ResolveAutoPermissionDecisionForMode(const std::string& permission_mode,
                                                                 const std::string& request_tool) {
   const std::string mode = policy::NormalizePermissionModeValue(permission_mode);
-  if (mode == "yolo" || mode == "bypassPermissions") {
+  if (mode == "full-access" || mode == "yolo" || mode == "bypassPermissions" || mode == "force" ||
+      mode == "allow") {
     return std::string("approved_for_session");
   }
-  if (mode == "safe-yolo") {
+  if ((mode == "acceptEdits" || mode == "auto-edit") && IsEditLikeToolName(request_tool)) {
     return std::string("approved");
   }
-  if (mode == "acceptEdits" && IsEditLikeToolName(request_tool)) {
-    return std::string("approved");
+  if (mode == "deny") {
+    return std::string("denied");
   }
   return std::nullopt;
 }
@@ -558,7 +559,7 @@ CodeAgentManager::CodeAgentManager(const core::AppConfig& config) {
   claude_cmd_template_ =
       EnvOrDefault("FERRYMAN_CODEAGENT_CLAUDE_CMD", "claude --output-format stream-json --verbose -p {prompt}");
   codex_cmd_template_ = EnvOrDefault("FERRYMAN_CODEAGENT_CODEX_CMD", "codex exec --json {prompt}");
-  cursor_cmd_template_ = EnvOrDefault("FERRYMAN_CODEAGENT_CURSOR_CMD", "agent -p {prompt} --output-format stream-json --trust");
+  cursor_cmd_template_ = EnvOrDefault("FERRYMAN_CODEAGENT_CURSOR_CMD", "agent -p {prompt} --output-format stream-json");
   gemini_cmd_template_ = EnvOrDefault("FERRYMAN_CODEAGENT_GEMINI_CMD", "gemini -p {prompt}");
   opencode_cmd_template_ = EnvOrDefault("FERRYMAN_CODEAGENT_OPENCODE_CMD", "opencode {prompt}");
 
@@ -583,8 +584,21 @@ CodeAgentManager::CodeAgentManager(const core::AppConfig& config) {
 }
 
 CodeAgentManager::~CodeAgentManager() {
-  std::lock_guard<std::mutex> lock(mu_);
-  PersistStateLocked();
+  std::vector<std::shared_ptr<SessionRunnerState>> runners;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    PersistStateLocked();
+    runners.reserve(session_runners_.size());
+    for (auto& entry : session_runners_) {
+      if (entry.second) {
+        runners.push_back(entry.second);
+      }
+    }
+    session_runners_.clear();
+  }
+  for (const auto& runner : runners) {
+    StopSessionRunner(runner);
+  }
 }
 
 std::int64_t CodeAgentManager::NowMs() {
@@ -768,6 +782,28 @@ nlohmann::json CodeAgentManager::BuildSessionJsonLocked(const SessionRecord& ses
   return result;
 }
 
+void CodeAgentManager::ApplySessionRuntimeConfigLocked(SessionRecord& session,
+                                                       const std::optional<std::string>& permission_mode,
+                                                       const std::optional<std::string>& model_mode,
+                                                       const std::optional<std::string>& reasoning_effort) {
+  bool updated = false;
+  if (permission_mode.has_value()) {
+    session.permission_mode = *permission_mode;
+    updated = true;
+  }
+  if (model_mode.has_value()) {
+    session.model_mode = *model_mode;
+    updated = true;
+  }
+  if (reasoning_effort.has_value()) {
+    session.model_reasoning_effort = *reasoning_effort;
+    updated = true;
+  }
+  if (updated) {
+    session.updated_at_ms = NowMs();
+  }
+}
+
 std::optional<CodeAgentManager::SessionRecord*> CodeAgentManager::GetMutableSessionLocked(const std::string& ns,
                                                                                            const std::string& session_id) {
   auto it = sessions_by_id_.find(session_id);
@@ -842,6 +878,15 @@ bool CodeAgentManager::ApprovePermissionRequest(const std::string& ns, const std
       return false;
     }
 
+    bool handled = false;
+    if (ResolveSessionRunnerPermissionLocked(session, normalized_request_id, true, mode, allow_tools, decision, answers,
+                                             error, &handled)) {
+      return true;
+    }
+    if (handled) {
+      return false;
+    }
+
     if (!session.agent_state_requests.is_object()) {
       session.agent_state_requests = nlohmann::json::object();
     }
@@ -855,14 +900,8 @@ bool CodeAgentManager::ApprovePermissionRequest(const std::string& ns, const std
 
     const std::string trimmed_mode = util::Trim(mode);
     std::string normalized_mode =
-        trimmed_mode.empty() ? std::string() : policy::NormalizePermissionModeValue(trimmed_mode);
+        trimmed_mode.empty() ? std::string() : policy::CanonicalizePermissionModeForFlavor(trimmed_mode, session.flavor);
     if (!trimmed_mode.empty() && normalized_mode.empty()) {
-      if (error != nullptr) {
-        *error = "invalid permission mode for session flavor";
-      }
-      return false;
-    }
-    if (!normalized_mode.empty() && !policy::IsPermissionModeAllowedForFlavor(normalized_mode, session.flavor)) {
       if (error != nullptr) {
         *error = "invalid permission mode for session flavor";
       }
@@ -931,15 +970,7 @@ bool CodeAgentManager::ApprovePermissionRequest(const std::string& ns, const std
     const bool has_mode_override = !normalized_mode.empty();
     const bool mode_changed = has_mode_override && session.permission_mode != normalized_mode;
     if (has_mode_override) {
-      session.permission_mode = normalized_mode;
-      if (session.flavor == "claude") {
-        session.yolo = normalized_mode == "bypassPermissions";
-      } else if (policy::IsCodexOrGeminiFlavor(session.flavor) || session.flavor == "cursor" ||
-                 session.flavor == "opencode") {
-        session.yolo = normalized_mode == "yolo";
-      } else {
-        session.yolo = false;
-      }
+      ApplySessionRuntimeConfigLocked(session, normalized_mode);
       if (mode_changed) {
         EmitAgentEventMessageLocked(session,
                                     {
@@ -1020,6 +1051,15 @@ bool CodeAgentManager::DenyPermissionRequest(const std::string& ns, const std::s
       if (error != nullptr) {
         *error = "request not found";
       }
+      return false;
+    }
+
+    bool handled = false;
+    if (ResolveSessionRunnerPermissionLocked(session, normalized_request_id, false, std::string(), {}, decision,
+                                             nlohmann::json::object(), error, &handled)) {
+      return true;
+    }
+    if (handled) {
       return false;
     }
 
@@ -1526,17 +1566,20 @@ bool CodeAgentManager::EmitCodexBodyMessage(const std::string& session_id, std::
   }
 
   std::string resolved_title = title_change.has_value() ? util::Trim(*title_change) : "";
-  const bool has_title_change = has_title_signal && !resolved_title.empty() && !session.title_initialized;
+  const bool has_title_change = has_title_signal && !resolved_title.empty() && session.name != resolved_title;
   if (has_title_change) {
     EmitAgentEventMessageLocked(session,
                                 {
                                     {"type", "title-changed"},
                                     {"title", resolved_title},
                                 });
+  }
+
+  if (has_title_signal && !resolved_title.empty()) {
     session.title_initialized = true;
   }
 
-  if (has_title_change && session.name != resolved_title) {
+  if (has_title_change) {
     session.name = resolved_title;
     session.updated_at_ms = std::max(session.updated_at_ms, NowMs());
     should_publish_session_update = true;

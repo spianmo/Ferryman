@@ -6,10 +6,11 @@
 namespace ferryman::codeagent::policy {
 
 std::string NormalizePermissionModeValue(std::string mode);
+std::string CanonicalizePermissionModeForFlavor(std::string mode, std::string_view flavor);
+std::string DefaultPermissionModeForFlavor(std::string_view flavor);
 
 bool IsCodexOrGeminiFlavor(std::string_view flavor);
 bool IsPermissionModeAllowedForFlavor(std::string_view mode, std::string_view flavor);
-std::string ResolveSpawnPermissionMode(std::string_view flavor, bool yolo);
 
 bool IsKnownModelMode(std::string_view mode);
 bool IsModelModeAllowedForFlavor(std::string_view mode, std::string_view flavor);

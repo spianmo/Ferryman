@@ -41,6 +41,10 @@ export default {
   // Sessions page
   'sessions.count': '{n} 个会话，{m} 个项目',
   'sessions.new': '新建会话',
+  'sessions.empty.title': '未选择会话',
+  'sessions.empty.description': '请先从左侧选择一个会话，或新建一个会话。',
+  'sessions.missing.title': '会话不可用',
+  'sessions.missing.description': '该会话已被删除，或当前已不可用。',
 
   // Session list
   'session.item.path': '路径',
@@ -113,9 +117,6 @@ export default {
   'newSession.agent': '代理',
   'newSession.model': '模型',
   'newSession.model.optional': '可选',
-  'newSession.yolo': 'YOLO 模式',
-  'newSession.yolo.title': '跳过审批和沙箱',
-  'newSession.yolo.desc': '启动时使用危险的代理标志。',
   'newSession.create': '创建',
   'newSession.creating': '创建中…',
 

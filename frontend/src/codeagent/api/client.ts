@@ -1,3 +1,4 @@
+import { emitCodeAgentUnauthorized, normalizeUnauthorizedReason } from '@/lib/unauthorized'
 import type {
     AttachmentMetadata,
     AuthResponse,
@@ -34,15 +35,25 @@ type ApiClientOptions = {
 
 type ErrorPayload = {
     error?: unknown
+    code?: unknown
+}
+
+function parseErrorPayload(bodyText: string): ErrorPayload | null {
+    try {
+        return JSON.parse(bodyText) as ErrorPayload
+    } catch {
+        return null
+    }
 }
 
 function parseErrorCode(bodyText: string): string | undefined {
-    try {
-        const parsed = JSON.parse(bodyText) as ErrorPayload
-        return typeof parsed.error === 'string' ? parsed.error : undefined
-    } catch {
-        return undefined
-    }
+    const parsed = parseErrorPayload(bodyText)
+    return typeof parsed?.code === 'string' ? parsed.code : undefined
+}
+
+function parseErrorMessage(bodyText: string): string | undefined {
+    const parsed = parseErrorPayload(bodyText)
+    return typeof parsed?.error === 'string' ? parsed.error : undefined
 }
 
 export class ApiError extends Error {
@@ -116,12 +127,16 @@ export class ApiClient {
         if (res.status === 401) {
             if (attempt === 0 && this.onUnauthorized) {
                 const refreshed = await this.onUnauthorized()
-                if (refreshed) {
+                if (refreshed && refreshed !== authToken) {
                     this.token = refreshed
                     return await this.request<T>(path, init, attempt + 1, refreshed)
                 }
             }
-            throw new Error('Session expired. Please sign in again.')
+
+            const body = await res.text().catch(() => '')
+            const reason = normalizeUnauthorizedReason(parseErrorMessage(body))
+            emitCodeAgentUnauthorized({ reason, status: res.status, path })
+            throw new Error(reason)
         }
 
         if (!res.ok) {
@@ -390,11 +405,11 @@ export class ApiClient {
         directory: string,
         agent?: 'claude' | 'codex' | 'cursor' | 'gemini' | 'opencode',
         model?: string,
-        yolo?: boolean
+        permissionMode?: PermissionMode
     ): Promise<SpawnResponse> {
         return await this.request<SpawnResponse>(`/api/machines/${encodeURIComponent(machineId)}/spawn`, {
             method: 'POST',
-            body: JSON.stringify({ directory, agent, model, yolo })
+            body: JSON.stringify({ directory, agent, model, permissionMode })
         })
     }
 

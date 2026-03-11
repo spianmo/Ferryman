@@ -269,6 +269,38 @@ bool CodeAgentManager::AbortSession(const std::string& ns, const std::string& se
   session.generation += 1;
   session.thinking = false;
   session.updated_at_ms = NowMs();
+
+  if (!session.agent_state_requests.is_object()) {
+    session.agent_state_requests = nlohmann::json::object();
+  }
+  if (!session.agent_state_completed_requests.is_object()) {
+    session.agent_state_completed_requests = nlohmann::json::object();
+  }
+  for (auto request_it = session.agent_state_requests.begin(); request_it != session.agent_state_requests.end();) {
+    if (!request_it->is_object()) {
+      request_it = session.agent_state_requests.erase(request_it);
+      continue;
+    }
+
+    const nlohmann::json request = *request_it;
+    const std::string request_id = request_it.key();
+    const std::string request_tool = request.value("tool", std::string("Tool"));
+    const nlohmann::json request_arguments = request.value("arguments", nlohmann::json::object());
+    request_it = session.agent_state_requests.erase(request_it);
+    session.agent_state_completed_requests[request_id] = {
+        {"tool", request_tool},
+        {"arguments", request_arguments},
+        {"createdAt", request.value("createdAt", session.updated_at_ms)},
+        {"completedAt", session.updated_at_ms},
+        {"status", "denied"},
+        {"decision", "abort"},
+        {"reason", "Aborted by user"},
+    };
+  }
+
+  if (!InterruptSessionRunnerLocked(session.id, error)) {
+    return false;
+  }
   PushEventLocked(ns,
                   {
                       {"type", "session-updated"},
@@ -278,31 +310,47 @@ bool CodeAgentManager::AbortSession(const std::string& ns, const std::string& se
                   },
                   session.id);
   PersistStateLocked();
+  if (error != nullptr) {
+    error->clear();
+  }
   return true;
 }
 
 bool CodeAgentManager::ArchiveSession(const std::string& ns, const std::string& session_id, std::string* error) {
-  std::lock_guard<std::mutex> lock(mu_);
-  auto session_opt = GetMutableSessionLocked(ns, session_id);
-  if (!session_opt.has_value()) {
-    if (error != nullptr) {
-      *error = "session not found";
+  std::shared_ptr<SessionRunnerState> runner;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto session_opt = GetMutableSessionLocked(ns, session_id);
+    if (!session_opt.has_value()) {
+      if (error != nullptr) {
+        *error = "session not found";
+      }
+      return false;
     }
-    return false;
+    SessionRecord& session = **session_opt;
+    session.active = false;
+    session.thinking = false;
+    session.updated_at_ms = NowMs();
+    auto runner_it = session_runners_.find(session.id);
+    if (runner_it != session_runners_.end()) {
+      runner = runner_it->second;
+      session_runners_.erase(runner_it);
+    }
+    PushEventLocked(ns,
+                    {
+                        {"type", "session-updated"},
+                        {"namespace", ns},
+                        {"sessionId", session.id},
+                        {"data", BuildSessionJsonLocked(session)},
+                    },
+                    session.id);
+    PersistStateLocked();
   }
-  SessionRecord& session = **session_opt;
-  session.active = false;
-  session.thinking = false;
-  session.updated_at_ms = NowMs();
-  PushEventLocked(ns,
-                  {
-                      {"type", "session-updated"},
-                      {"namespace", ns},
-                      {"sessionId", session.id},
-                      {"data", BuildSessionJsonLocked(session)},
-                  },
-                  session.id);
-  PersistStateLocked();
+
+  StopSessionRunner(runner);
+  if (error != nullptr) {
+    error->clear();
+  }
   return true;
 }
 
@@ -344,30 +392,44 @@ bool CodeAgentManager::RenameSession(const std::string& ns, const std::string& s
 }
 
 bool CodeAgentManager::DeleteSession(const std::string& ns, const std::string& session_id, std::string* error) {
-  std::lock_guard<std::mutex> lock(mu_);
-  auto session_it = sessions_by_id_.find(session_id);
-  if (session_it == sessions_by_id_.end() || session_it->second.ns != ns) {
-    if (error != nullptr) {
-      *error = "session not found";
+  std::shared_ptr<SessionRunnerState> runner;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto session_it = sessions_by_id_.find(session_id);
+    if (session_it == sessions_by_id_.end() || session_it->second.ns != ns) {
+      if (error != nullptr) {
+        *error = "session not found";
+      }
+      return false;
     }
-    return false;
+
+    auto runner_it = session_runners_.find(session_id);
+    if (runner_it != session_runners_.end()) {
+      runner = runner_it->second;
+      session_runners_.erase(runner_it);
+    }
+
+    sessions_by_id_.erase(session_it);
+    auto list_it = session_ids_by_ns_.find(ns);
+    if (list_it != session_ids_by_ns_.end()) {
+      auto& ids = list_it->second;
+      ids.erase(std::remove(ids.begin(), ids.end(), session_id), ids.end());
+    }
+
+    PushEventLocked(ns,
+                    {
+                        {"type", "session-removed"},
+                        {"namespace", ns},
+                        {"sessionId", session_id},
+                    },
+                    session_id);
+    PersistStateLocked();
   }
 
-  sessions_by_id_.erase(session_it);
-  auto list_it = session_ids_by_ns_.find(ns);
-  if (list_it != session_ids_by_ns_.end()) {
-    auto& ids = list_it->second;
-    ids.erase(std::remove(ids.begin(), ids.end(), session_id), ids.end());
+  StopSessionRunner(runner);
+  if (error != nullptr) {
+    error->clear();
   }
-
-  PushEventLocked(ns,
-                  {
-                      {"type", "session-removed"},
-                      {"namespace", ns},
-                      {"sessionId", session_id},
-                  },
-                  session_id);
-  PersistStateLocked();
   return true;
 }
 

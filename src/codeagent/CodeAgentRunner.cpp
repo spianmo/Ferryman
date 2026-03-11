@@ -9,16 +9,26 @@
 #include <array>
 #include <cctype>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
 #include <filesystem>
 #include <fstream>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <sstream>
 #include <string_view>
 #include <system_error>
 #include <thread>
 
 #if defined(__unix__) || defined(__APPLE__)
+#include <fcntl.h>
+#include <signal.h>
+#include <sys/types.h>
 #include <sys/wait.h>
+#include <unistd.h>
 #endif
 
 namespace ferryman::codeagent {
@@ -41,24 +51,24 @@ struct CodexPermissionConfig {
 };
 
 CodexPermissionConfig ResolveCodexPermissionConfig(const std::string& permission_mode) {
-  const std::string normalized = policy::NormalizePermissionModeValue(permission_mode);
+  const std::string normalized = policy::CanonicalizePermissionModeForFlavor(permission_mode, "codex");
   if (normalized == "read-only") {
-    return CodexPermissionConfig{.approval_policy = "never", .sandbox_mode = "read-only"};
+    return CodexPermissionConfig{.approval_policy = "on-request", .sandbox_mode = "read-only"};
   }
-  if (normalized == "safe-yolo") {
-    return CodexPermissionConfig{.approval_policy = "on-failure", .sandbox_mode = "workspace-write"};
-  }
-  if (normalized == "yolo") {
-    return CodexPermissionConfig{.approval_policy = "on-failure", .sandbox_mode = "danger-full-access"};
+  if (normalized == "full-access") {
+    return CodexPermissionConfig{.approval_policy = "never", .sandbox_mode = "danger-full-access"};
   }
   return CodexPermissionConfig{
-      .approval_policy = "untrusted", .sandbox_mode = "workspace-write", .allow_default_override = true};
+      .approval_policy = "on-request", .sandbox_mode = "workspace-write", .allow_default_override = true};
 }
 
 std::string ResolveGeminiApprovalMode(const std::string& permission_mode) {
-  const std::string normalized = policy::NormalizePermissionModeValue(permission_mode);
-  if (normalized == "safe-yolo") {
+  const std::string normalized = policy::CanonicalizePermissionModeForFlavor(permission_mode, "gemini");
+  if (normalized == "auto-edit") {
     return "auto_edit";
+  }
+  if (normalized == "plan") {
+    return "plan";
   }
   if (normalized == "yolo") {
     return "yolo";
@@ -213,10 +223,10 @@ std::string BuildTomlLiteralArray(const std::vector<std::string>& values) {
 
 const std::string& CodexTitleDeveloperInstruction() {
   static const std::string kInstruction = util::Trim(R"INSTR(
-ALWAYS when you start a new chat, call the title tool exactly once to set a concise task title.
+ALWAYS when you start a new chat, call the title tool to set a concise task title.
 Prefer calling functions.hapi__change_title.
 If that exact tool name is unavailable, call an equivalent alias such as hapi__change_title, mcp__hapi__change_title, or hapi_change_title.
-Do not call any title-change tool again in this session.
+If the task focus changes significantly later, call the title tool again with a better title.
 )INSTR");
   return kInstruction;
 }
@@ -506,6 +516,1940 @@ if __name__ == "__main__":
 }
 
 }  // namespace
+
+namespace {
+
+std::string ToLowerCopy(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  return value;
+}
+
+std::optional<std::string> JsonStringValue(const nlohmann::json& object,
+                                           std::initializer_list<const char*> keys) {
+  if (!object.is_object()) {
+    return std::nullopt;
+  }
+  for (const char* key : keys) {
+    if (key == nullptr) {
+      continue;
+    }
+    auto it = object.find(key);
+    if (it != object.end() && it->is_string()) {
+      return it->get<std::string>();
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<bool> JsonBoolValue(const nlohmann::json& object,
+                                  std::initializer_list<const char*> keys) {
+  if (!object.is_object()) {
+    return std::nullopt;
+  }
+  for (const char* key : keys) {
+    if (key == nullptr) {
+      continue;
+    }
+    auto it = object.find(key);
+    if (it != object.end() && it->is_boolean()) {
+      return it->get<bool>();
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<int> JsonIntValue(const nlohmann::json& object,
+                                std::initializer_list<const char*> keys) {
+  if (!object.is_object()) {
+    return std::nullopt;
+  }
+  for (const char* key : keys) {
+    if (key == nullptr) {
+      continue;
+    }
+    auto it = object.find(key);
+    if (it != object.end() && it->is_number_integer()) {
+      return it->get<int>();
+    }
+  }
+  return std::nullopt;
+}
+
+const nlohmann::json* JsonObjectValue(const nlohmann::json& object,
+                                      std::initializer_list<const char*> keys) {
+  if (!object.is_object()) {
+    return nullptr;
+  }
+  for (const char* key : keys) {
+    if (key == nullptr) {
+      continue;
+    }
+    auto it = object.find(key);
+    if (it != object.end() && it->is_object()) {
+      return &(*it);
+    }
+  }
+  return nullptr;
+}
+
+bool IsBashLikeToolNameLocal(std::string_view name) {
+  const std::string normalized = ToLowerCopy(util::Trim(std::string(name)));
+  return normalized == "bash" || normalized == "codexbash";
+}
+
+bool IsEditLikeToolNameLocal(std::string_view name) {
+  const std::string normalized = ToLowerCopy(util::Trim(std::string(name)));
+  if (normalized.empty()) {
+    return false;
+  }
+  static constexpr std::array<std::string_view, 8> kEditHints = {
+      "edit", "write", "patch", "create", "delete", "remove", "replace", "multiedit",
+  };
+  for (std::string_view hint : kEditHints) {
+    if (normalized.find(hint) != std::string::npos) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::optional<std::string> BuildPermissionToolIdentifierLocal(const std::string& tool_name,
+                                                              const nlohmann::json& input) {
+  const std::string normalized_tool = util::Trim(tool_name);
+  if (normalized_tool.empty()) {
+    return std::nullopt;
+  }
+  if (IsBashLikeToolNameLocal(normalized_tool)) {
+    std::string command = JsonStringValue(input, {"command"}).value_or("");
+    command = util::Trim(command);
+    if (command.empty()) {
+      return std::string("Bash");
+    }
+    return "Bash(" + command + ")";
+  }
+  return normalized_tool;
+}
+
+bool EndsWithLocal(std::string_view value, std::string_view suffix) {
+  return suffix.size() <= value.size() &&
+         value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+std::optional<std::string> ReadToolCommandLocal(const nlohmann::json& input) {
+  if (!input.is_object()) {
+    return std::nullopt;
+  }
+  auto command = JsonStringValue(input, {"command", "cmd", "input"});
+  if (!command.has_value()) {
+    return std::nullopt;
+  }
+  const std::string trimmed = util::Trim(*command);
+  if (trimmed.empty()) {
+    return std::nullopt;
+  }
+  return trimmed;
+}
+
+bool IsAllowToolPatternMatchedLocal(const std::string& allow_tool, const std::string& request_tool,
+                                    const nlohmann::json& request_input) {
+  const std::string pattern = util::Trim(allow_tool);
+  if (pattern.empty()) {
+    return false;
+  }
+  if (pattern == "Bash" && IsBashLikeToolNameLocal(request_tool)) {
+    return true;
+  }
+  if (pattern.size() > 6 && pattern.rfind("Bash(", 0) == 0 && pattern.back() == ')') {
+    if (!IsBashLikeToolNameLocal(request_tool)) {
+      return false;
+    }
+    auto command = ReadToolCommandLocal(request_input);
+    if (!command.has_value()) {
+      return false;
+    }
+    std::string body = pattern.substr(5, pattern.size() - 6);
+    if (body.size() > 2 && EndsWithLocal(body, ":*")) {
+      body.resize(body.size() - 2);
+      return command->rfind(body, 0) == 0;
+    }
+    return *command == body;
+  }
+  return ToLowerCopy(pattern) == ToLowerCopy(util::Trim(request_tool));
+}
+
+bool IsPermissionAllowedForSessionLocal(const std::unordered_set<std::string>& allow_tools,
+                                        const std::string& request_tool,
+                                        const nlohmann::json& request_input) {
+  for (const auto& allow_tool : allow_tools) {
+    if (IsAllowToolPatternMatchedLocal(allow_tool, request_tool, request_input)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::optional<std::string> ResolveAutoPermissionDecisionLocal(const std::unordered_set<std::string>& allow_tools,
+                                                              const std::string& mode,
+                                                              const std::string& request_tool,
+                                                              const nlohmann::json& request_input) {
+  if (IsPermissionAllowedForSessionLocal(allow_tools, request_tool, request_input)) {
+    return std::string("approved_for_session");
+  }
+  const std::string normalized_mode = policy::NormalizePermissionModeValue(mode);
+  if (normalized_mode == "full-access" || normalized_mode == "yolo" || normalized_mode == "bypassPermissions" ||
+      normalized_mode == "force" || normalized_mode == "allow") {
+    return std::string("approved_for_session");
+  }
+  if ((normalized_mode == "acceptEdits" || normalized_mode == "auto-edit") &&
+      IsEditLikeToolNameLocal(request_tool)) {
+    return std::string("approved");
+  }
+  if (normalized_mode == "deny") {
+    return std::string("denied");
+  }
+  return std::nullopt;
+}
+
+void MergePermissionAllowToolsLocal(std::unordered_set<std::string>* target,
+                                    const std::vector<std::string>& allow_tools) {
+  if (target == nullptr) {
+    return;
+  }
+  for (const auto& raw_tool : allow_tools) {
+    const std::string normalized_tool = util::Trim(raw_tool);
+    if (!normalized_tool.empty()) {
+      target->insert(normalized_tool);
+    }
+  }
+}
+
+std::string NormalizeItemType(std::string value) {
+  value = ToLowerCopy(util::Trim(value));
+  value.erase(std::remove_if(value.begin(), value.end(), [](unsigned char ch) {
+    return ch == '_' || ch == '-' || std::isspace(ch);
+  }), value.end());
+  return value;
+}
+
+std::optional<std::string> ExtractItemId(const nlohmann::json& params) {
+  if (!params.is_object()) {
+    return std::nullopt;
+  }
+  if (auto direct = JsonStringValue(params, {"itemId", "item_id", "id"}); direct.has_value()) {
+    return direct;
+  }
+  if (const nlohmann::json* item = JsonObjectValue(params, {"item"}); item != nullptr) {
+    return JsonStringValue(*item, {"id", "itemId", "item_id"});
+  }
+  return std::nullopt;
+}
+
+std::string JoinStringArray(const nlohmann::json& value) {
+  if (value.is_string()) {
+    return value.get<std::string>();
+  }
+  if (!value.is_array()) {
+    return std::string();
+  }
+  std::string output;
+  for (const auto& entry : value) {
+    if (!entry.is_string()) {
+      continue;
+    }
+    if (!output.empty()) {
+      output.push_back(' ');
+    }
+    output += entry.get<std::string>();
+  }
+  return output;
+}
+
+std::string FormatCodexTurnText(const std::string& text, const nlohmann::json& attachments) {
+  std::vector<std::string> paths;
+  if (attachments.is_array()) {
+    for (const auto& attachment : attachments) {
+      if (attachment.is_string()) {
+        const std::string path = util::Trim(attachment.get<std::string>());
+        if (!path.empty()) {
+          paths.push_back(path);
+        }
+        continue;
+      }
+      if (!attachment.is_object()) {
+        continue;
+      }
+      auto path = JsonStringValue(attachment, {"path", "name", "filename", "url"});
+      if (path.has_value()) {
+        const std::string trimmed = util::Trim(*path);
+        if (!trimmed.empty()) {
+          paths.push_back(trimmed);
+        }
+      }
+    }
+  }
+
+  std::string attachment_text;
+  for (const auto& path : paths) {
+    if (!attachment_text.empty()) {
+      attachment_text.push_back(' ');
+    }
+    attachment_text += "@" + path;
+  }
+  if (attachment_text.empty()) {
+    return text;
+  }
+  if (util::Trim(text).empty()) {
+    return attachment_text;
+  }
+  return attachment_text + "\n\n" + text;
+}
+
+std::string ResolveCodexAppServerApprovalPolicy(const std::string& permission_mode) {
+  const std::string normalized = policy::CanonicalizePermissionModeForFlavor(permission_mode, "codex");
+  if (normalized == "read-only") {
+    return "never";
+  }
+  if (normalized == "full-access") {
+    return "never";
+  }
+  return "untrusted";
+}
+
+std::string ResolveCodexAppServerSandboxMode(const std::string& permission_mode) {
+  const std::string normalized = policy::CanonicalizePermissionModeForFlavor(permission_mode, "codex");
+  if (normalized == "read-only") {
+    return "read-only";
+  }
+  if (normalized == "full-access") {
+    return "danger-full-access";
+  }
+  return "workspace-write";
+}
+
+nlohmann::json ResolveCodexAppServerSandboxPolicy(const std::string& permission_mode) {
+  const std::string normalized = policy::CanonicalizePermissionModeForFlavor(permission_mode, "codex");
+  if (normalized == "read-only") {
+    return nlohmann::json{{"type", "readOnly"}};
+  }
+  if (normalized == "full-access") {
+    return nlohmann::json{{"type", "dangerFullAccess"}};
+  }
+  return nlohmann::json{{"type", "workspaceWrite"}};
+}
+
+std::string ResolveCodexAppServerReasoningEffort(const std::string& value) {
+  const std::string normalized = policy::NormalizeReasoningEffortValue(value);
+  if (normalized == "low" || normalized == "medium" || normalized == "high") {
+    return normalized;
+  }
+  if (normalized == "xhigh") {
+    return "high";
+  }
+  return "auto";
+}
+
+std::string MapRuntimeDecisionToAppServerDecision(const std::string& decision) {
+  if (decision == "approved_for_session") {
+    return "acceptForSession";
+  }
+  if (decision == "abort") {
+    return "cancel";
+  }
+  if (decision == "denied") {
+    return "decline";
+  }
+  return "accept";
+}
+
+struct AppServerEventConverterState {
+  std::unordered_map<std::string, std::string> agent_message_buffers;
+  std::unordered_map<std::string, std::string> reasoning_buffers;
+  std::unordered_map<std::string, std::string> command_output_buffers;
+  std::unordered_map<std::string, nlohmann::json> command_meta;
+  std::unordered_map<std::string, nlohmann::json> patch_meta;
+};
+
+std::vector<nlohmann::json> ConvertAppServerNotification(AppServerEventConverterState* state,
+                                                         const std::string& method,
+                                                         const nlohmann::json& params) {
+  std::vector<nlohmann::json> events;
+  const nlohmann::json params_object = params.is_object() ? params : nlohmann::json::object();
+
+  if (method.rfind("codex/event/", 0) == 0) {
+    const nlohmann::json msg = params_object.value("msg", nlohmann::json::object());
+    if (!msg.is_object()) {
+      return events;
+    }
+
+    const std::string msg_type = JsonStringValue(msg, {"type"}).value_or("");
+    if (msg_type.empty()) {
+      return events;
+    }
+
+    if (msg_type == "item_started" || msg_type == "item_completed") {
+      nlohmann::json nested_params = {
+          {"item", msg.value("item", nlohmann::json::object())},
+          {"itemId", JsonStringValue(msg, {"item_id", "itemId"}).value_or("")},
+      };
+      if (auto thread_id = JsonStringValue(msg, {"thread_id", "threadId"}); thread_id.has_value()) {
+        nested_params["threadId"] = *thread_id;
+      }
+      if (auto turn_id = JsonStringValue(msg, {"turn_id", "turnId"}); turn_id.has_value()) {
+        nested_params["turnId"] = *turn_id;
+      }
+      return ConvertAppServerNotification(state, msg_type == "item_started" ? "item/started" : "item/completed",
+                                          nested_params);
+    }
+
+    if (msg_type == "task_started") {
+      return ConvertAppServerNotification(state, "turn/started", nlohmann::json::object());
+    }
+    if (msg_type == "task_complete") {
+      events.push_back({{"type", "task_complete"}});
+      return events;
+    }
+    if (msg_type == "turn_aborted") {
+      events.push_back({{"type", "turn_aborted"}});
+      return events;
+    }
+    if (msg_type == "task_failed") {
+      events.push_back(
+          {{"type", "task_failed"},
+           {"error", JsonStringValue(msg, {"error", "message", "reason"}).value_or("codex app-server error")}});
+      return events;
+    }
+
+    if (msg_type == "agent_message_delta" || msg_type == "agent_message_content_delta") {
+      nlohmann::json nested_params = {
+          {"itemId", JsonStringValue(msg, {"item_id", "itemId", "id"}).value_or("agent-message")},
+          {"delta", JsonStringValue(msg, {"delta", "text", "message"}).value_or("")},
+      };
+      return ConvertAppServerNotification(state, "item/agentMessage/delta", nested_params);
+    }
+
+    if (msg_type == "reasoning_content_delta") {
+      nlohmann::json nested_params = {
+          {"itemId", JsonStringValue(msg, {"item_id", "itemId", "id"}).value_or("reasoning")},
+          {"delta", JsonStringValue(msg, {"delta", "text", "message"}).value_or("")},
+      };
+      return ConvertAppServerNotification(state, "item/reasoning/summaryTextDelta", nested_params);
+    }
+
+    if (msg_type == "agent_reasoning_section_break") {
+      nlohmann::json nested_params = {
+          {"itemId", JsonStringValue(msg, {"item_id", "itemId", "id"}).value_or("reasoning")},
+      };
+      return ConvertAppServerNotification(state, "item/reasoning/summaryPartAdded", nested_params);
+    }
+
+    if (msg_type == "exec_command_output_delta") {
+      nlohmann::json nested_params = {
+          {"itemId", JsonStringValue(msg, {"call_id", "callId", "item_id", "itemId", "id"}).value_or("")},
+          {"delta", JsonStringValue(msg, {"delta", "output", "stdout", "text"}).value_or("")},
+      };
+      return ConvertAppServerNotification(state, "item/commandExecution/outputDelta", nested_params);
+    }
+
+    if (msg_type == "error") {
+      const bool will_retry = JsonBoolValue(msg, {"will_retry", "willRetry"}).value_or(false);
+      if (!will_retry) {
+        events.push_back({{"type", "task_failed"},
+                          {"error", JsonStringValue(msg, {"message", "reason"}).value_or("codex app-server error")}});
+      }
+      return events;
+    }
+
+    return events;
+  }
+
+  if (method == "thread/started" || method == "thread/resumed") {
+    events.push_back({{"type", "thread_started"}});
+    return events;
+  }
+  if (method == "turn/started") {
+    events.push_back({{"type", "task_started"}});
+    return events;
+  }
+  if (method == "turn/completed") {
+    const nlohmann::json turn = params_object.value("turn", nlohmann::json::object());
+    const std::string status = ToLowerCopy(JsonStringValue(params_object, {"status"})
+                                               .value_or(JsonStringValue(turn, {"status"}).value_or("completed")));
+    if (status == "interrupted" || status == "cancelled" || status == "canceled") {
+      events.push_back({{"type", "turn_aborted"}});
+    } else if (status == "failed" || status == "error") {
+      events.push_back({{"type", "task_failed"},
+                        {"error", JsonStringValue(params_object, {"error", "message", "reason"}).value_or("turn failed")}});
+    } else {
+      events.push_back({{"type", "task_complete"}});
+    }
+    return events;
+  }
+  if (method == "turn/diff/updated") {
+    if (auto diff = JsonStringValue(params_object, {"diff", "unified_diff", "unifiedDiff"}); diff.has_value()) {
+      events.push_back({{"type", "turn_diff"}, {"unified_diff", *diff}});
+    }
+    return events;
+  }
+  if (method == "thread/tokenUsage/updated") {
+    nlohmann::json info = params_object.value("tokenUsage", params_object.value("token_usage", params_object));
+    if (!info.is_object()) {
+      info = nlohmann::json::object();
+    }
+    events.push_back({{"type", "token_count"}, {"info", info}});
+    return events;
+  }
+  if (method == "error") {
+    const bool will_retry = JsonBoolValue(params_object, {"will_retry", "willRetry"}).value_or(false);
+    if (!will_retry) {
+      events.push_back({{"type", "task_failed"},
+                        {"error", JsonStringValue(params_object, {"message"}).value_or("codex app-server error")}});
+    }
+    return events;
+  }
+
+  if (method == "item/agentMessage/delta") {
+    const std::string item_id = ExtractItemId(params_object).value_or("agent-message");
+    if (auto delta = JsonStringValue(params_object, {"delta", "text", "message"}); delta.has_value()) {
+      state->agent_message_buffers[item_id] += *delta;
+    }
+    return events;
+  }
+  if (method == "item/reasoning/textDelta" || method == "item/reasoning/summaryTextDelta") {
+    const std::string item_id = ExtractItemId(params_object).value_or("reasoning");
+    if (auto delta = JsonStringValue(params_object, {"delta", "text", "message"}); delta.has_value()) {
+      state->reasoning_buffers[item_id] += *delta;
+      events.push_back({{"type", "agent_reasoning_delta"}, {"delta", *delta}});
+    }
+    return events;
+  }
+  if (method == "item/reasoning/summaryPartAdded") {
+    events.push_back({{"type", "agent_reasoning_section_break"}});
+    return events;
+  }
+  if (method == "item/commandExecution/outputDelta") {
+    if (auto item_id = ExtractItemId(params_object); item_id.has_value()) {
+      if (auto delta = JsonStringValue(params_object, {"delta", "text", "output", "stdout"}); delta.has_value()) {
+        state->command_output_buffers[*item_id] += *delta;
+      }
+    }
+    return events;
+  }
+
+  if (method != "item/started" && method != "item/completed") {
+    return events;
+  }
+
+  const nlohmann::json item = params_object.value("item", params_object);
+  if (!item.is_object()) {
+    return events;
+  }
+  const std::string item_id = ExtractItemId(params_object).value_or(JsonStringValue(item, {"id", "itemId", "item_id"}).value_or(""));
+  const std::string item_type = NormalizeItemType(JsonStringValue(item, {"type", "itemType", "kind"}).value_or(""));
+  if (item_id.empty() || item_type.empty()) {
+    return events;
+  }
+
+  if (item_type == "agentmessage") {
+    if (method == "item/completed") {
+      std::string text = JsonStringValue(item, {"text", "message"}).value_or("");
+      if (text.empty()) {
+        text = state->agent_message_buffers[item_id];
+      }
+      if (!text.empty()) {
+        events.push_back({{"type", "agent_message"}, {"message", text}});
+      }
+      state->agent_message_buffers.erase(item_id);
+    }
+    return events;
+  }
+
+  if (item_type == "reasoning") {
+    if (method == "item/completed") {
+      std::string text = JsonStringValue(item, {"text", "message"}).value_or("");
+      if (text.empty()) {
+        text = state->reasoning_buffers[item_id];
+      }
+      if (!text.empty()) {
+        events.push_back({{"type", "agent_reasoning"}, {"text", text}});
+      }
+      state->reasoning_buffers.erase(item_id);
+    }
+    return events;
+  }
+
+  if (item_type == "commandexecution") {
+    if (method == "item/started") {
+      nlohmann::json meta = nlohmann::json::object();
+      const std::string command = JoinStringArray(item.value("command", item.value("cmd", item.value("args", nlohmann::json()))));
+      if (!util::Trim(command).empty()) {
+        meta["command"] = command;
+      }
+      if (auto cwd = JsonStringValue(item, {"cwd", "workingDirectory", "working_directory"}); cwd.has_value()) {
+        meta["cwd"] = *cwd;
+      }
+      if (auto auto_approved = JsonBoolValue(item, {"autoApproved", "auto_approved"}); auto_approved.has_value()) {
+        meta["auto_approved"] = *auto_approved;
+      }
+      state->command_meta[item_id] = meta;
+      nlohmann::json event = {{"type", "exec_command_begin"}, {"call_id", item_id}};
+      for (auto it = meta.begin(); it != meta.end(); ++it) {
+        event[it.key()] = it.value();
+      }
+      events.push_back(std::move(event));
+    } else {
+      nlohmann::json meta = state->command_meta[item_id];
+      nlohmann::json event = {{"type", "exec_command_end"}, {"call_id", item_id}};
+      for (auto it = meta.begin(); it != meta.end(); ++it) {
+        event[it.key()] = it.value();
+      }
+      if (auto output = JsonStringValue(item, {"output", "result", "stdout"}); output.has_value()) {
+        event["output"] = *output;
+      } else if (auto buffer_it = state->command_output_buffers.find(item_id); buffer_it != state->command_output_buffers.end()) {
+        event["output"] = buffer_it->second;
+      }
+      if (auto stderr_text = JsonStringValue(item, {"stderr"}); stderr_text.has_value()) {
+        event["stderr"] = *stderr_text;
+      }
+      if (auto error_text = JsonStringValue(item, {"error"}); error_text.has_value()) {
+        event["error"] = *error_text;
+      }
+      if (auto exit_code = JsonIntValue(item, {"exitCode", "exit_code", "exitcode"}); exit_code.has_value()) {
+        event["exit_code"] = *exit_code;
+      }
+      if (auto status = JsonStringValue(item, {"status"}); status.has_value()) {
+        event["status"] = *status;
+      }
+      events.push_back(std::move(event));
+      state->command_meta.erase(item_id);
+      state->command_output_buffers.erase(item_id);
+    }
+    return events;
+  }
+
+  if (item_type == "filechange") {
+    if (method == "item/started") {
+      nlohmann::json meta = nlohmann::json::object();
+      auto changes_it = item.find("changes");
+      if (changes_it != item.end()) {
+        meta["changes"] = *changes_it;
+      }
+      if (auto auto_approved = JsonBoolValue(item, {"autoApproved", "auto_approved"}); auto_approved.has_value()) {
+        meta["auto_approved"] = *auto_approved;
+      }
+      state->patch_meta[item_id] = meta;
+      nlohmann::json event = {{"type", "patch_apply_begin"}, {"call_id", item_id}};
+      for (auto it = meta.begin(); it != meta.end(); ++it) {
+        event[it.key()] = it.value();
+      }
+      events.push_back(std::move(event));
+    } else {
+      nlohmann::json meta = state->patch_meta[item_id];
+      nlohmann::json event = {{"type", "patch_apply_end"}, {"call_id", item_id}, {"success", false}};
+      for (auto it = meta.begin(); it != meta.end(); ++it) {
+        event[it.key()] = it.value();
+      }
+      if (auto stdout_text = JsonStringValue(item, {"stdout", "output"}); stdout_text.has_value()) {
+        event["stdout"] = *stdout_text;
+      }
+      if (auto stderr_text = JsonStringValue(item, {"stderr"}); stderr_text.has_value()) {
+        event["stderr"] = *stderr_text;
+      }
+      if (auto success = JsonBoolValue(item, {"success", "ok", "applied"}); success.has_value()) {
+        event["success"] = *success;
+      } else if (auto status = JsonStringValue(item, {"status"}); status.has_value()) {
+        event["success"] = ToLowerCopy(*status) == "completed";
+      }
+      events.push_back(std::move(event));
+      state->patch_meta.erase(item_id);
+    }
+    return events;
+  }
+
+  if (item_type == "mcptoolcall") {
+    nlohmann::json event = {
+        {"type", method == "item/completed" ? "mcp_tool_call_end" : "mcp_tool_call_begin"},
+        {"call_id", item_id},
+    };
+
+    if (const nlohmann::json* invocation = JsonObjectValue(item, {"invocation"}); invocation != nullptr) {
+      event["invocation"] = *invocation;
+    }
+    if (auto server = JsonStringValue(item, {"server", "server_name"}); server.has_value()) {
+      event["server"] = *server;
+    }
+    if (auto tool = JsonStringValue(item, {"tool", "tool_name"}); tool.has_value()) {
+      event["tool"] = *tool;
+    }
+
+    if (method == "item/completed") {
+      auto result_it = item.find("result");
+      if (result_it != item.end()) {
+        event["result"] = *result_it;
+      } else if (auto output_it = item.find("output"); output_it != item.end()) {
+        event["result"] = *output_it;
+      } else if (auto content_it = item.find("content"); content_it != item.end()) {
+        event["result"] = *content_it;
+      } else if (auto error_it = item.find("error"); error_it != item.end()) {
+        event["result"] = nlohmann::json{{"Err", *error_it}};
+      }
+    } else if (!event.contains("invocation")) {
+      auto args_it = item.find("arguments");
+      if (args_it != item.end()) {
+        event["arguments"] = *args_it;
+      } else if (auto input_it = item.find("input"); input_it != item.end()) {
+        event["input"] = *input_it;
+      }
+    }
+
+    events.push_back(std::move(event));
+    return events;
+  }
+
+  return events;
+}
+
+}  // namespace
+
+struct CodeAgentManager::SessionRunnerState {
+  struct PendingResponse {
+    std::mutex mu;
+    std::condition_variable cv;
+    bool done = false;
+    nlohmann::json result;
+    std::string error;
+  };
+
+  struct PendingPermission {
+    std::string tool_name;
+    nlohmann::json input;
+    std::mutex mu;
+    std::condition_variable cv;
+    bool resolved = false;
+    std::string response_decision;
+  };
+
+  struct TurnTask {
+    std::uint64_t generation = 0;
+    std::string prompt;
+    nlohmann::json attachments = nlohmann::json::array();
+    std::string continuation_context;
+  };
+
+  CodeAgentManager* manager = nullptr;
+  std::string session_id;
+  std::filesystem::path cwd;
+  std::mutex mu;
+  std::mutex write_mu;
+  std::condition_variable cv;
+  bool started = false;
+  bool stop = false;
+  bool turn_active = false;
+  bool turn_done = false;
+  std::uint64_t active_generation = 0;
+  std::string current_turn_id;
+  std::string thread_id;
+  std::string summary_hint;
+  parser::AgentOutputParseState parse_state;
+  AppServerEventConverterState event_converter;
+  std::deque<TurnTask> queue;
+  int next_request_id = 1;
+  std::unordered_map<int, std::shared_ptr<PendingResponse>> pending_responses;
+  std::unordered_map<std::string, std::shared_ptr<PendingPermission>> pending_permissions;
+  std::thread worker_thread;
+  std::thread reader_thread;
+#if defined(__unix__) || defined(__APPLE__)
+  pid_t child_pid = -1;
+  int stdin_fd = -1;
+  int stdout_fd = -1;
+#endif
+
+  explicit SessionRunnerState(CodeAgentManager* owner, const SessionRecord& session)
+      : manager(owner), session_id(session.id), cwd(session.path) {}
+
+  ~SessionRunnerState() { Stop(); }
+
+  bool Start(std::string* error);
+  void Stop();
+  bool EnqueueTurn(std::uint64_t generation, const std::string& prompt, const nlohmann::json& attachments,
+                   const std::string& continuation_context, std::string* error);
+  bool Interrupt(std::string* error);
+
+ private:
+  bool SpawnProcess(std::string* error);
+  bool SendRequest(const std::string& method, const nlohmann::json& params, nlohmann::json* result,
+                   int timeout_ms, std::string* error);
+  bool WriteJsonLine(const nlohmann::json& payload);
+  void ReaderLoop();
+  void WorkerLoop();
+  void HandleNotification(const std::string& method, const nlohmann::json& params);
+  nlohmann::json HandleIncomingRequest(const std::string& method, const nlohmann::json& params);
+  void HandleResponse(const nlohmann::json& payload);
+  bool EnsureThreadStarted(const TurnTask& task, bool* fresh_thread, std::string* error);
+  nlohmann::json BuildThreadStartParamsLocked(const SessionRecord& session) const;
+  nlohmann::json BuildTurnStartParamsLocked(const SessionRecord& session, const std::string& input_text) const;
+  void EmitBodies(std::uint64_t generation, const std::vector<nlohmann::json>& bodies);
+  void CompleteTurn(const std::string& fallback_summary);
+  void FailTurn(const std::string& error_message);
+  void RejectPendingRequests(const std::string& message);
+};
+
+bool CodeAgentManager::SessionRunnerState::Start(std::string* error) {
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    if (started) {
+      return true;
+    }
+  }
+
+  if (!SpawnProcess(error)) {
+    return false;
+  }
+
+  nlohmann::json init_result;
+  if (!SendRequest("initialize",
+                   nlohmann::json{{"clientInfo", {{"name", "ferryman-codex-runner"},
+                                                   {"version", "1.0.0"}}}},
+                   &init_result, 30000, error)) {
+    Stop();
+    return false;
+  }
+  WriteJsonLine(nlohmann::json{{"method", "initialized"}});
+
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    started = true;
+    worker_thread = std::thread([this]() { WorkerLoop(); });
+  }
+  return true;
+}
+
+void CodeAgentManager::SessionRunnerState::RejectPendingRequests(const std::string& message) {
+  std::unordered_map<int, std::shared_ptr<PendingResponse>> responses;
+  std::unordered_map<std::string, std::shared_ptr<PendingPermission>> permissions;
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    responses.swap(pending_responses);
+    permissions.swap(pending_permissions);
+  }
+
+  for (auto& [_, pending] : responses) {
+    std::lock_guard<std::mutex> pending_lock(pending->mu);
+    pending->done = true;
+    pending->error = message;
+    pending->cv.notify_all();
+  }
+  for (auto& [_, pending] : permissions) {
+    std::lock_guard<std::mutex> pending_lock(pending->mu);
+    pending->resolved = true;
+    pending->response_decision = "cancel";
+    pending->cv.notify_all();
+  }
+}
+
+void CodeAgentManager::SessionRunnerState::Stop() {
+  bool already_stopped = false;
+#if defined(__unix__) || defined(__APPLE__)
+  int local_stdin_fd = -1;
+  int local_stdout_fd = -1;
+  pid_t local_pid = -1;
+#endif
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    already_stopped = stop;
+    stop = true;
+    cv.notify_all();
+#if defined(__unix__) || defined(__APPLE__)
+    local_stdin_fd = stdin_fd;
+    stdin_fd = -1;
+    local_stdout_fd = stdout_fd;
+    stdout_fd = -1;
+    local_pid = child_pid;
+    child_pid = -1;
+#endif
+  }
+
+  if (already_stopped) {
+    if (worker_thread.joinable()) {
+      worker_thread.join();
+    }
+    if (reader_thread.joinable()) {
+      reader_thread.join();
+    }
+    return;
+  }
+
+  RejectPendingRequests("runner stopped");
+
+#if defined(__unix__) || defined(__APPLE__)
+  if (local_stdin_fd >= 0) {
+    ::close(local_stdin_fd);
+  }
+  if (local_pid > 0) {
+    ::kill(local_pid, SIGTERM);
+  }
+#endif
+
+  if (worker_thread.joinable()) {
+    worker_thread.join();
+  }
+  if (reader_thread.joinable()) {
+    reader_thread.join();
+  }
+
+#if defined(__unix__) || defined(__APPLE__)
+  if (local_stdout_fd >= 0) {
+    ::close(local_stdout_fd);
+  }
+  if (local_pid > 0) {
+    int status = 0;
+    (void)::waitpid(local_pid, &status, 0);
+  }
+#endif
+}
+
+bool CodeAgentManager::SessionRunnerState::EnqueueTurn(std::uint64_t generation, const std::string& prompt,
+                                                       const nlohmann::json& attachments,
+                                                       const std::string& continuation_context,
+                                                       std::string* error) {
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    if (stop) {
+      if (error != nullptr) {
+        *error = "runner stopped";
+      }
+      return false;
+    }
+    queue.push_back(TurnTask{.generation = generation,
+                             .prompt = prompt,
+                             .attachments = attachments,
+                             .continuation_context = continuation_context});
+  }
+  cv.notify_all();
+  if (error != nullptr) {
+    error->clear();
+  }
+  return true;
+}
+
+bool CodeAgentManager::SessionRunnerState::Interrupt(std::string* error) {
+  std::string local_thread_id;
+  std::string local_turn_id;
+  std::unordered_map<std::string, std::shared_ptr<PendingPermission>> permissions;
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    local_thread_id = thread_id;
+    local_turn_id = current_turn_id;
+    queue.clear();
+    permissions.swap(pending_permissions);
+  }
+
+  for (auto& entry : permissions) {
+    if (!entry.second) {
+      continue;
+    }
+    std::lock_guard<std::mutex> pending_lock(entry.second->mu);
+    entry.second->resolved = true;
+    entry.second->response_decision = "cancel";
+    entry.second->cv.notify_all();
+  }
+
+  if (local_thread_id.empty() || local_turn_id.empty()) {
+    if (error != nullptr) {
+      error->clear();
+    }
+    return true;
+  }
+
+  nlohmann::json result;
+  if (!SendRequest("turn/interrupt", nlohmann::json{{"threadId", local_thread_id}, {"turnId", local_turn_id}},
+                   &result, 30000, error)) {
+    return false;
+  }
+  if (error != nullptr) {
+    error->clear();
+  }
+  return true;
+}
+
+bool CodeAgentManager::SessionRunnerState::SpawnProcess(std::string* error) {
+#if !defined(__unix__) && !defined(__APPLE__)
+  if (error != nullptr) {
+    *error = "codex app-server runner is only supported on Unix-like platforms";
+  }
+  return false;
+#else
+  int stdin_pipe[2] = {-1, -1};
+  int stdout_pipe[2] = {-1, -1};
+  if (::pipe(stdin_pipe) != 0 || ::pipe(stdout_pipe) != 0) {
+    if (stdin_pipe[0] >= 0) ::close(stdin_pipe[0]);
+    if (stdin_pipe[1] >= 0) ::close(stdin_pipe[1]);
+    if (stdout_pipe[0] >= 0) ::close(stdout_pipe[0]);
+    if (stdout_pipe[1] >= 0) ::close(stdout_pipe[1]);
+    if (error != nullptr) {
+      *error = "failed to create pipes for codex app-server";
+    }
+    return false;
+  }
+
+  const pid_t pid = ::fork();
+  if (pid < 0) {
+    ::close(stdin_pipe[0]);
+    ::close(stdin_pipe[1]);
+    ::close(stdout_pipe[0]);
+    ::close(stdout_pipe[1]);
+    if (error != nullptr) {
+      *error = "failed to fork codex app-server";
+    }
+    return false;
+  }
+
+  if (pid == 0) {
+    ::dup2(stdin_pipe[0], STDIN_FILENO);
+    ::dup2(stdout_pipe[1], STDOUT_FILENO);
+    ::close(stdin_pipe[0]);
+    ::close(stdin_pipe[1]);
+    ::close(stdout_pipe[0]);
+    ::close(stdout_pipe[1]);
+    ::execlp("codex", "codex", "app-server", static_cast<char*>(nullptr));
+    _exit(127);
+  }
+
+  ::close(stdin_pipe[0]);
+  ::close(stdout_pipe[1]);
+  stdin_fd = stdin_pipe[1];
+  stdout_fd = stdout_pipe[0];
+  child_pid = pid;
+  reader_thread = std::thread([this]() { ReaderLoop(); });
+  if (error != nullptr) {
+    error->clear();
+  }
+  return true;
+#endif
+}
+
+bool CodeAgentManager::SessionRunnerState::WriteJsonLine(const nlohmann::json& payload) {
+#if !defined(__unix__) && !defined(__APPLE__)
+  return false;
+#else
+  const std::string line = payload.dump() + "\n";
+  std::lock_guard<std::mutex> lock(write_mu);
+  if (stdin_fd < 0) {
+    return false;
+  }
+  const ssize_t written = ::write(stdin_fd, line.data(), line.size());
+  return written == static_cast<ssize_t>(line.size());
+#endif
+}
+
+bool CodeAgentManager::SessionRunnerState::SendRequest(const std::string& method, const nlohmann::json& params,
+                                                       nlohmann::json* result, int timeout_ms,
+                                                       std::string* error) {
+  const auto pending = std::make_shared<PendingResponse>();
+  int request_id = 0;
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    if (stop) {
+      if (error != nullptr) {
+        *error = "runner stopped";
+      }
+      return false;
+    }
+    request_id = next_request_id++;
+    pending_responses[request_id] = pending;
+  }
+
+  if (!WriteJsonLine(nlohmann::json{{"id", request_id}, {"method", method}, {"params", params}})) {
+    std::lock_guard<std::mutex> lock(mu);
+    pending_responses.erase(request_id);
+    if (error != nullptr) {
+      *error = "failed to write request to codex app-server";
+    }
+    return false;
+  }
+
+  std::unique_lock<std::mutex> pending_lock(pending->mu);
+  if (timeout_ms > 0) {
+    const bool completed = pending->cv.wait_for(pending_lock, std::chrono::milliseconds(timeout_ms), [&]() {
+      return pending->done;
+    });
+    if (!completed) {
+      if (error != nullptr) {
+        *error = "codex app-server request timed out";
+      }
+      std::lock_guard<std::mutex> lock(mu);
+      pending_responses.erase(request_id);
+      return false;
+    }
+  } else {
+    pending->cv.wait(pending_lock, [&]() { return pending->done; });
+  }
+
+  if (!pending->error.empty()) {
+    if (error != nullptr) {
+      *error = pending->error;
+    }
+    return false;
+  }
+  if (result != nullptr) {
+    *result = pending->result;
+  }
+  if (error != nullptr) {
+    error->clear();
+  }
+  return true;
+}
+
+void CodeAgentManager::SessionRunnerState::HandleResponse(const nlohmann::json& payload) {
+  if (!payload.is_object()) {
+    return;
+  }
+  auto id_it = payload.find("id");
+  if (id_it == payload.end() || !id_it->is_number_integer()) {
+    return;
+  }
+
+  std::shared_ptr<PendingResponse> pending;
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    auto pending_it = pending_responses.find(id_it->get<int>());
+    if (pending_it == pending_responses.end()) {
+      return;
+    }
+    pending = pending_it->second;
+    pending_responses.erase(pending_it);
+  }
+
+  std::lock_guard<std::mutex> pending_lock(pending->mu);
+  pending->done = true;
+  if (auto error_it = payload.find("error"); error_it != payload.end() && error_it->is_object()) {
+    pending->error = JsonStringValue(*error_it, {"message"}).value_or("codex app-server request failed");
+  } else {
+    auto result_it = payload.find("result");
+    pending->result = result_it == payload.end() ? nlohmann::json::object() : *result_it;
+  }
+  pending->cv.notify_all();
+}
+
+void CodeAgentManager::SessionRunnerState::EmitBodies(std::uint64_t generation,
+                                                      const std::vector<nlohmann::json>& bodies) {
+  for (const auto& body : bodies) {
+    std::string body_summary;
+    if (manager->EmitCodexBodyMessage(session_id, generation, body, &body_summary) && !util::Trim(body_summary).empty()) {
+      std::lock_guard<std::mutex> lock(mu);
+      summary_hint = body_summary;
+    }
+  }
+}
+
+void CodeAgentManager::SessionRunnerState::CompleteTurn(const std::string& fallback_summary) {
+  std::uint64_t generation = 0;
+  std::string summary_source;
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    generation = active_generation;
+    summary_source = util::Trim(summary_hint).empty() ? fallback_summary : summary_hint;
+    if (summary_source.empty()) {
+      summary_source = "(empty output)";
+    }
+    turn_active = false;
+    turn_done = true;
+    current_turn_id.clear();
+    summary_hint.clear();
+    cv.notify_all();
+  }
+
+  std::lock_guard<std::mutex> manager_lock(manager->mu_);
+  auto session_it = manager->sessions_by_id_.find(session_id);
+  if (session_it == manager->sessions_by_id_.end()) {
+    return;
+  }
+  SessionRecord& session = session_it->second;
+  if (session.generation != generation) {
+    return;
+  }
+  session.summary_text = FirstLine(summary_source);
+  session.summary_updated_at_ms = CodeAgentManager::NowMs();
+  session.updated_at_ms = session.summary_updated_at_ms;
+  session.thinking = false;
+  manager->PushEventLocked(session.ns,
+                           {{"type", "session-updated"},
+                            {"namespace", session.ns},
+                            {"sessionId", session.id},
+                            {"data", manager->BuildSessionJsonLocked(session)}},
+                           session.id);
+  manager->PersistStateLocked();
+}
+
+void CodeAgentManager::SessionRunnerState::FailTurn(const std::string& error_message) {
+  std::uint64_t generation = 0;
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    generation = active_generation;
+  }
+
+  std::vector<nlohmann::json> bodies;
+  parser::ParseAgentOutputJson(nlohmann::json{{"type", "task_failed"}, {"error", error_message}}, &parse_state,
+                               &bodies);
+  parser::DrainBufferedBodies(&parse_state, &bodies);
+  EmitBodies(generation, bodies);
+  CompleteTurn(error_message.empty() ? std::string("task failed") : error_message);
+}
+
+nlohmann::json CodeAgentManager::SessionRunnerState::BuildThreadStartParamsLocked(const SessionRecord& session) const {
+  const std::string title_instructions = CodexTitleDeveloperInstruction();
+  nlohmann::json params = {
+      {"cwd", session.path.string()},
+      {"approvalPolicy", ResolveCodexAppServerApprovalPolicy(session.permission_mode)},
+      {"sandbox", ResolveCodexAppServerSandboxMode(session.permission_mode)},
+      {"baseInstructions", title_instructions},
+      {"developerInstructions", title_instructions},
+  };
+  if (!util::Trim(session.model).empty()) {
+    params["model"] = session.model;
+  }
+  nlohmann::json config = nlohmann::json::object();
+  config["developer_instructions"] = title_instructions;
+  const auto title_mcp_script = ResolveCodexTitleMcpScriptPath(manager->state_file_path_);
+  if (EnsureCodexTitleMcpScript(title_mcp_script)) {
+    const std::string mcp_command = EnvOrDefault("FERRYMAN_CODEAGENT_CODEX_TITLE_MCP_COMMAND", "python3");
+    config["mcp_servers.hapi"] = {
+        {"command", mcp_command},
+        {"args", nlohmann::json::array({"-u", title_mcp_script.string()})},
+    };
+  }
+  if (!config.empty()) {
+    params["config"] = std::move(config);
+  }
+  return params;
+}
+
+nlohmann::json CodeAgentManager::SessionRunnerState::BuildTurnStartParamsLocked(const SessionRecord& session,
+                                                                                 const std::string& input_text) const {
+  nlohmann::json params = {
+      {"threadId", thread_id},
+      {"input", nlohmann::json::array({{{"type", "text"}, {"text", input_text}}})},
+      {"approvalPolicy", ResolveCodexAppServerApprovalPolicy(session.permission_mode)},
+      {"sandboxPolicy", ResolveCodexAppServerSandboxPolicy(session.permission_mode)},
+  };
+  if (!util::Trim(session.model).empty()) {
+    params["model"] = session.model;
+  }
+  if (!session.model_reasoning_effort.empty()) {
+    params["effort"] = ResolveCodexAppServerReasoningEffort(session.model_reasoning_effort);
+  }
+  return params;
+}
+
+bool CodeAgentManager::SessionRunnerState::EnsureThreadStarted(const TurnTask& task, bool* fresh_thread,
+                                                               std::string* error) {
+  (void)task;
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    if (!thread_id.empty()) {
+      if (fresh_thread != nullptr) {
+        *fresh_thread = false;
+      }
+      if (error != nullptr) {
+        error->clear();
+      }
+      return true;
+    }
+  }
+
+  SessionRecord session_snapshot;
+  {
+    std::lock_guard<std::mutex> manager_lock(manager->mu_);
+    auto session_it = manager->sessions_by_id_.find(session_id);
+    if (session_it == manager->sessions_by_id_.end()) {
+      if (error != nullptr) {
+        *error = "session not found";
+      }
+      return false;
+    }
+    session_snapshot = session_it->second;
+  }
+
+  nlohmann::json result;
+  if (!SendRequest("thread/start", BuildThreadStartParamsLocked(session_snapshot), &result, 30000, error)) {
+    return false;
+  }
+
+  const nlohmann::json thread = result.value("thread", nlohmann::json::object());
+  const std::string created_thread_id = JsonStringValue(thread, {"id"}).value_or("");
+  if (created_thread_id.empty()) {
+    if (error != nullptr) {
+      *error = "codex app-server did not return a thread id";
+    }
+    return false;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    thread_id = created_thread_id;
+  }
+  if (fresh_thread != nullptr) {
+    *fresh_thread = true;
+  }
+  if (error != nullptr) {
+    error->clear();
+  }
+  return true;
+}
+
+void CodeAgentManager::SessionRunnerState::HandleNotification(const std::string& method,
+                                                              const nlohmann::json& params) {
+  std::vector<nlohmann::json> converted;
+  std::uint64_t generation = 0;
+  bool terminal_event = false;
+  std::string fallback_summary;
+
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    generation = active_generation;
+    converted = ConvertAppServerNotification(&event_converter, method, params);
+  }
+
+  for (const auto& event : converted) {
+    std::vector<nlohmann::json> bodies;
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      parser::ParseAgentOutputJson(event, &parse_state, &bodies);
+    }
+    EmitBodies(generation, bodies);
+
+    const std::string type = JsonStringValue(event, {"type"}).value_or("");
+    if (type == "task_complete" || type == "task_failed" || type == "turn_aborted") {
+      terminal_event = true;
+      if (type == "task_failed") {
+        fallback_summary = JsonStringValue(event, {"error", "message"}).value_or("task failed");
+      }
+    }
+  }
+
+  if (terminal_event) {
+    std::vector<nlohmann::json> buffered;
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      parser::DrainBufferedBodies(&parse_state, &buffered);
+      event_converter = AppServerEventConverterState{};
+    }
+    EmitBodies(generation, buffered);
+    CompleteTurn(fallback_summary);
+  }
+}
+
+nlohmann::json CodeAgentManager::SessionRunnerState::HandleIncomingRequest(const std::string& method,
+                                                                           const nlohmann::json& params) {
+  const std::string request_id = ExtractItemId(params).value_or("req-" + util::RandomHex(12));
+  std::string tool_name;
+  nlohmann::json input = nlohmann::json::object();
+
+  if (method == "item/commandExecution/requestApproval") {
+    tool_name = "CodexBash";
+    input["message"] = JsonStringValue(params, {"reason"}).value_or("");
+    auto command_it = params.find("command");
+    if (command_it != params.end()) {
+      input["command"] = command_it->is_string() ? nlohmann::json(command_it->get<std::string>()) : *command_it;
+    }
+    if (auto cwd_value = JsonStringValue(params, {"cwd"}); cwd_value.has_value()) {
+      input["cwd"] = *cwd_value;
+    }
+    input["auto_approved"] = false;
+  } else if (method == "item/fileChange/requestApproval") {
+    tool_name = "CodexPatch";
+    input["message"] = JsonStringValue(params, {"reason"}).value_or("");
+    if (auto grant_root = JsonStringValue(params, {"grantRoot"}); grant_root.has_value()) {
+      input["grantRoot"] = *grant_root;
+    }
+    input["auto_approved"] = false;
+  } else if (method == "item/tool/requestUserInput") {
+    return nlohmann::json{{"decision", "cancel"}};
+  } else {
+    return nlohmann::json{{"decision", "cancel"}};
+  }
+
+  std::shared_ptr<PendingPermission> pending;
+  {
+    std::lock_guard<std::mutex> manager_lock(manager->mu_);
+    auto session_it = manager->sessions_by_id_.find(session_id);
+    if (session_it == manager->sessions_by_id_.end()) {
+      return nlohmann::json{{"decision", "cancel"}};
+    }
+
+    SessionRecord& session = session_it->second;
+    const std::int64_t now = CodeAgentManager::NowMs();
+    auto auto_decision = ResolveAutoPermissionDecisionLocal(session.permission_allow_tools, session.permission_mode,
+                                                            tool_name, input);
+    if (auto_decision.has_value()) {
+      if (!session.agent_state_completed_requests.is_object()) {
+        session.agent_state_completed_requests = nlohmann::json::object();
+      }
+      nlohmann::json completed = {
+          {"tool", tool_name},
+          {"arguments", input},
+          {"createdAt", now},
+          {"completedAt", now},
+          {"status", *auto_decision == "denied" ? "denied" : "approved"},
+          {"decision", *auto_decision},
+      };
+      if (*auto_decision == "approved_for_session") {
+        if (auto inferred = BuildPermissionToolIdentifierLocal(tool_name, input); inferred.has_value()) {
+          completed["allowTools"] = nlohmann::json::array({*inferred});
+          session.permission_allow_tools.insert(*inferred);
+        }
+      }
+      session.agent_state_completed_requests[request_id] = std::move(completed);
+      session.updated_at_ms = std::max(session.updated_at_ms, now);
+      manager->PushEventLocked(session.ns,
+                               {{"type", "session-updated"},
+                                {"namespace", session.ns},
+                                {"sessionId", session.id},
+                                {"data", manager->BuildSessionJsonLocked(session)}},
+                               session.id);
+      manager->PersistStateLocked();
+      return nlohmann::json{{"decision", MapRuntimeDecisionToAppServerDecision(*auto_decision)}};
+    }
+
+    if (!session.agent_state_requests.is_object()) {
+      session.agent_state_requests = nlohmann::json::object();
+    }
+    if (!session.agent_state_completed_requests.is_object()) {
+      session.agent_state_completed_requests = nlohmann::json::object();
+    }
+    session.agent_state_requests[request_id] = {
+        {"tool", tool_name},
+        {"arguments", input},
+        {"createdAt", now},
+    };
+    session.agent_state_completed_requests.erase(request_id);
+    session.updated_at_ms = std::max(session.updated_at_ms, now);
+    session.thinking = false;
+
+    pending = std::make_shared<PendingPermission>();
+    pending->tool_name = tool_name;
+    pending->input = input;
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      pending_permissions[request_id] = pending;
+    }
+
+    const std::string short_title = "Permission Required";
+    const std::string short_body = "The agent is waiting for your approval.";
+    manager->PushEventLocked(session.ns,
+                             {{"type", "toast"},
+                              {"namespace", session.ns},
+                              {"data", {{"title", short_title},
+                                         {"body", short_body},
+                                         {"sessionId", session.id},
+                                         {"url", "/sessions/" + session.id}}}},
+                             session.id);
+    manager->PushEventLocked(session.ns,
+                             {{"type", "session-updated"},
+                              {"namespace", session.ns},
+                              {"sessionId", session.id},
+                              {"data", manager->BuildSessionJsonLocked(session)}},
+                             session.id);
+    manager->PersistStateLocked();
+  }
+
+  std::unique_lock<std::mutex> pending_lock(pending->mu);
+  pending->cv.wait(pending_lock, [&]() { return pending->resolved; });
+  const std::string response_decision = pending->response_decision.empty() ? "cancel" : pending->response_decision;
+  return nlohmann::json{{"decision", response_decision}};
+}
+
+void CodeAgentManager::SessionRunnerState::ReaderLoop() {
+#if !defined(__unix__) && !defined(__APPLE__)
+  return;
+#else
+  FILE* stream = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    if (stdout_fd >= 0) {
+      stream = ::fdopen(stdout_fd, "r");
+      stdout_fd = -1;
+    }
+  }
+  if (stream == nullptr) {
+    FailTurn("failed to open codex app-server stdout");
+    return;
+  }
+
+  std::array<char, 8192> buffer{};
+  while (std::fgets(buffer.data(), static_cast<int>(buffer.size()), stream) != nullptr) {
+    std::string line = util::Trim(std::string(buffer.data()));
+    if (line.empty()) {
+      continue;
+    }
+
+    nlohmann::json payload;
+    try {
+      payload = nlohmann::json::parse(line);
+    } catch (...) {
+      continue;
+    }
+    if (!payload.is_object()) {
+      continue;
+    }
+
+    auto method_it = payload.find("method");
+    if (method_it != payload.end() && method_it->is_string()) {
+      const std::string method = method_it->get<std::string>();
+      const nlohmann::json params = payload.value("params", nlohmann::json::object());
+      auto id_it = payload.find("id");
+      if (id_it != payload.end()) {
+        const nlohmann::json response = HandleIncomingRequest(method, params);
+        WriteJsonLine(nlohmann::json{{"id", *id_it}, {"result", response}});
+      } else {
+        HandleNotification(method, params);
+      }
+      continue;
+    }
+
+    if (payload.contains("id")) {
+      HandleResponse(payload);
+    }
+  }
+
+  std::fclose(stream);
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    thread_id.clear();
+    current_turn_id.clear();
+  }
+  FailTurn("codex app-server disconnected");
+#endif
+}
+
+void CodeAgentManager::SessionRunnerState::WorkerLoop() {
+  while (true) {
+    TurnTask task;
+    {
+      std::unique_lock<std::mutex> lock(mu);
+      cv.wait(lock, [&]() { return stop || !queue.empty(); });
+      if (stop) {
+        return;
+      }
+      task = std::move(queue.front());
+      queue.pop_front();
+      turn_active = true;
+      turn_done = false;
+      active_generation = task.generation;
+      current_turn_id.clear();
+      summary_hint.clear();
+      parse_state = parser::AgentOutputParseState{};
+      event_converter = AppServerEventConverterState{};
+    }
+
+    bool fresh_thread = false;
+    std::string error;
+    if (!EnsureThreadStarted(task, &fresh_thread, &error)) {
+      FailTurn(error.empty() ? std::string("failed to start codex thread") : error);
+      continue;
+    }
+
+    SessionRecord session_snapshot;
+    std::string input_text;
+    {
+      std::lock_guard<std::mutex> manager_lock(manager->mu_);
+      auto session_it = manager->sessions_by_id_.find(session_id);
+      if (session_it == manager->sessions_by_id_.end()) {
+        FailTurn("session not found");
+        continue;
+      }
+      session_snapshot = session_it->second;
+      if (fresh_thread || !task.continuation_context.empty()) {
+        input_text = manager->BuildConversationPrompt(session_snapshot, task.prompt, task.continuation_context);
+      } else {
+        input_text = FormatCodexTurnText(task.prompt, task.attachments);
+      }
+    }
+
+    nlohmann::json turn_start_params;
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      turn_start_params = BuildTurnStartParamsLocked(session_snapshot, input_text);
+    }
+
+    nlohmann::json result;
+    if (!SendRequest("turn/start", turn_start_params, &result, 30000, &error)) {
+      FailTurn(error.empty() ? std::string("failed to start codex turn") : error);
+      continue;
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      const nlohmann::json turn = result.value("turn", nlohmann::json::object());
+      current_turn_id = JsonStringValue(turn, {"id"}).value_or("");
+    }
+
+    std::unique_lock<std::mutex> lock(mu);
+    cv.wait(lock, [&]() { return stop || turn_done; });
+    if (stop) {
+      return;
+    }
+  }
+}
+
+std::shared_ptr<CodeAgentManager::SessionRunnerState> CodeAgentManager::EnsureSessionRunnerLocked(SessionRecord& session,
+                                                                                                  std::string* error) {
+  if (session.flavor != "codex") {
+    return nullptr;
+  }
+  auto existing = session_runners_.find(session.id);
+  if (existing != session_runners_.end()) {
+    return existing->second;
+  }
+
+  const auto runner = std::make_shared<SessionRunnerState>(this, session);
+  if (!runner->Start(error)) {
+    return nullptr;
+  }
+  session_runners_[session.id] = runner;
+  return runner;
+}
+
+void CodeAgentManager::StopSessionRunner(const std::shared_ptr<SessionRunnerState>& runner) {
+  if (!runner) {
+    return;
+  }
+  runner->Stop();
+}
+
+void CodeAgentManager::StopSessionRunnerLocked(const std::string& session_id) {
+  session_runners_.erase(session_id);
+}
+
+bool CodeAgentManager::InterruptSessionRunnerLocked(const std::string& session_id, std::string* error) {
+  auto it = session_runners_.find(session_id);
+  if (it == session_runners_.end() || !it->second) {
+    if (error != nullptr) {
+      error->clear();
+    }
+    return true;
+  }
+  return it->second->Interrupt(error);
+}
+
+bool CodeAgentManager::StartSessionTurn(const std::string& session_id, std::uint64_t generation,
+                                        const std::string& prompt, const nlohmann::json& attachments,
+                                        const std::string& continuation_context, std::string* error) {
+  std::shared_ptr<SessionRunnerState> runner;
+  bool requires_live_runner = false;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto session_it = sessions_by_id_.find(session_id);
+    if (session_it == sessions_by_id_.end()) {
+      if (error != nullptr) {
+        *error = "session not found";
+      }
+      return false;
+    }
+    requires_live_runner = session_it->second.flavor == "codex";
+    runner = EnsureSessionRunnerLocked(session_it->second, error);
+    if (requires_live_runner && runner == nullptr) {
+      return false;
+    }
+  }
+
+  if (runner != nullptr) {
+    return runner->EnqueueTurn(generation, prompt, attachments, continuation_context, error);
+  }
+
+  StartAgentRun(session_id, generation, prompt, continuation_context);
+  if (error != nullptr) {
+    error->clear();
+  }
+  return true;
+}
+
+bool CodeAgentManager::AutoResolveSessionRunnerPermissionsLocked(SessionRecord& session,
+                                                                 const std::string& normalized_mode,
+                                                                 std::vector<std::string>* resolved_lines) {
+  if (resolved_lines != nullptr) {
+    resolved_lines->clear();
+  }
+
+  auto runner_it = session_runners_.find(session.id);
+  if (runner_it == session_runners_.end() || !runner_it->second) {
+    return false;
+  }
+  auto runner = runner_it->second;
+
+  struct ResolvedPermission {
+    std::string request_id;
+    std::string tool_name;
+    nlohmann::json input = nlohmann::json::object();
+    std::string decision;
+    std::vector<std::string> allow_tools;
+    std::shared_ptr<SessionRunnerState::PendingPermission> pending;
+  };
+
+  std::vector<ResolvedPermission> resolved;
+  {
+    std::lock_guard<std::mutex> runner_lock(runner->mu);
+    for (auto pending_it = runner->pending_permissions.begin(); pending_it != runner->pending_permissions.end();) {
+      const std::string request_id = pending_it->first;
+      const auto pending = pending_it->second;
+      const std::string tool_name = pending ? pending->tool_name : std::string("Tool");
+      const nlohmann::json input = pending ? pending->input : nlohmann::json::object();
+
+      auto decision = ResolveAutoPermissionDecisionLocal(session.permission_allow_tools, normalized_mode, tool_name, input);
+      if (!decision.has_value()) {
+        ++pending_it;
+        continue;
+      }
+
+      ResolvedPermission item;
+      item.request_id = request_id;
+      item.tool_name = tool_name;
+      item.input = input;
+      item.decision = *decision;
+      item.pending = pending;
+      if (*decision == "approved_for_session") {
+        if (auto inferred = BuildPermissionToolIdentifierLocal(tool_name, input); inferred.has_value()) {
+          item.allow_tools.push_back(*inferred);
+        }
+      }
+
+      resolved.push_back(std::move(item));
+      pending_it = runner->pending_permissions.erase(pending_it);
+    }
+  }
+
+  if (resolved.empty()) {
+    return false;
+  }
+
+  if (!session.agent_state_requests.is_object()) {
+    session.agent_state_requests = nlohmann::json::object();
+  }
+  if (!session.agent_state_completed_requests.is_object()) {
+    session.agent_state_completed_requests = nlohmann::json::object();
+  }
+
+  const std::int64_t now = NowMs();
+  for (auto& item : resolved) {
+    std::int64_t created_at = now;
+    auto request_it = session.agent_state_requests.find(item.request_id);
+    if (request_it != session.agent_state_requests.end() && request_it->is_object()) {
+      created_at = request_it->value("createdAt", now);
+      session.agent_state_requests.erase(request_it);
+    } else {
+      session.agent_state_requests.erase(item.request_id);
+    }
+    if (!item.allow_tools.empty()) {
+      MergePermissionAllowToolsLocal(&session.permission_allow_tools, item.allow_tools);
+    }
+
+    nlohmann::json completed = {
+        {"tool", item.tool_name},
+        {"arguments", item.input},
+        {"createdAt", created_at},
+        {"completedAt", now},
+        {"status", item.decision == "denied" ? "denied" : "approved"},
+        {"decision", item.decision},
+    };
+    if (normalized_mode != "default") {
+      completed["mode"] = normalized_mode;
+    }
+    if (!item.allow_tools.empty()) {
+      completed["allowTools"] = item.allow_tools;
+    }
+    session.agent_state_completed_requests[item.request_id] = std::move(completed);
+    session.updated_at_ms = std::max(session.updated_at_ms, now);
+
+    if (resolved_lines != nullptr) {
+      resolved_lines->push_back("- " + item.tool_name + " (" + item.decision + ")");
+    }
+  }
+
+  {
+    std::lock_guard<std::mutex> runner_lock(runner->mu);
+    if (runner->turn_active && session.agent_state_requests.empty()) {
+      session.thinking = true;
+    }
+  }
+
+  for (auto& item : resolved) {
+    if (!item.pending) {
+      continue;
+    }
+    std::lock_guard<std::mutex> pending_lock(item.pending->mu);
+    item.pending->resolved = true;
+    item.pending->response_decision = MapRuntimeDecisionToAppServerDecision(item.decision);
+    item.pending->cv.notify_all();
+  }
+
+  return true;
+}
+
+bool CodeAgentManager::ResolveSessionRunnerPermissionLocked(SessionRecord& session, const std::string& request_id,
+                                                            bool approved, const std::string& mode,
+                                                            const std::vector<std::string>& allow_tools,
+                                                            const std::string& decision,
+                                                            const nlohmann::json& answers, std::string* error,
+                                                            bool* handled) {
+  if (handled != nullptr) {
+    *handled = false;
+  }
+  auto runner_it = session_runners_.find(session.id);
+  if (runner_it == session_runners_.end() || !runner_it->second) {
+    return false;
+  }
+  auto runner = runner_it->second;
+
+  std::shared_ptr<SessionRunnerState::PendingPermission> pending;
+  {
+    std::lock_guard<std::mutex> runner_lock(runner->mu);
+    auto pending_it = runner->pending_permissions.find(request_id);
+    if (pending_it == runner->pending_permissions.end()) {
+      return false;
+    }
+    pending = pending_it->second;
+  }
+
+  if (handled != nullptr) {
+    *handled = true;
+  }
+
+  if (!session.agent_state_requests.is_object()) {
+    session.agent_state_requests = nlohmann::json::object();
+  }
+  auto request_it = session.agent_state_requests.find(request_id);
+  if (request_it == session.agent_state_requests.end() || !request_it->is_object()) {
+    if (error != nullptr) {
+      *error = "request not found";
+    }
+    return false;
+  }
+
+  const std::string trimmed_mode = util::Trim(mode);
+  std::string normalized_mode =
+      trimmed_mode.empty() ? std::string() : policy::CanonicalizePermissionModeForFlavor(trimmed_mode, session.flavor);
+  if (!trimmed_mode.empty() && normalized_mode.empty()) {
+    if (error != nullptr) {
+      *error = "invalid permission mode for session flavor";
+    }
+    return false;
+  }
+
+  std::string normalized_decision = ToLowerCopy(util::Trim(decision));
+  if (!normalized_decision.empty() && normalized_decision != "approved" && normalized_decision != "approved_for_session" &&
+      normalized_decision != "denied" && normalized_decision != "abort") {
+    if (error != nullptr) {
+      *error = "invalid decision";
+    }
+    return false;
+  }
+
+  std::vector<std::string> effective_allow_tools;
+  effective_allow_tools.reserve(allow_tools.size());
+  std::unordered_set<std::string> allow_tool_dedup;
+  for (const auto& raw_tool : allow_tools) {
+    const std::string normalized_tool = util::Trim(raw_tool);
+    if (!normalized_tool.empty() && allow_tool_dedup.insert(normalized_tool).second) {
+      effective_allow_tools.push_back(normalized_tool);
+    }
+  }
+
+  {
+    std::lock_guard<std::mutex> runner_lock(runner->mu);
+    auto pending_it = runner->pending_permissions.find(request_id);
+    if (pending_it == runner->pending_permissions.end()) {
+      if (error != nullptr) {
+        *error = "request not found";
+      }
+      return false;
+    }
+    runner->pending_permissions.erase(pending_it);
+  }
+
+  const std::int64_t now = NowMs();
+  const nlohmann::json request = *request_it;
+  const std::string request_tool = request.value("tool", std::string("Tool"));
+  const nlohmann::json request_arguments = request.value("arguments", nlohmann::json::object());
+  session.agent_state_requests.erase(request_it);
+  if (!session.agent_state_completed_requests.is_object()) {
+    session.agent_state_completed_requests = nlohmann::json::object();
+  }
+
+  if (approved && normalized_decision == "approved_for_session" && effective_allow_tools.empty()) {
+    if (auto inferred = BuildPermissionToolIdentifierLocal(request_tool, request_arguments); inferred.has_value()) {
+      effective_allow_tools.push_back(*inferred);
+    }
+  }
+  if (!effective_allow_tools.empty()) {
+    MergePermissionAllowToolsLocal(&session.permission_allow_tools, effective_allow_tools);
+  }
+
+  nlohmann::json completed = {
+      {"tool", request_tool},
+      {"arguments", request_arguments},
+      {"createdAt", request.value("createdAt", now)},
+      {"completedAt", now},
+      {"status", approved ? "approved" : "denied"},
+  };
+  if (!normalized_mode.empty() && normalized_mode != "default") {
+    completed["mode"] = normalized_mode;
+  }
+  if (!effective_allow_tools.empty()) {
+    completed["allowTools"] = effective_allow_tools;
+  }
+  if (!normalized_decision.empty()) {
+    completed["decision"] = normalized_decision;
+  }
+  if (answers.is_object() && !answers.empty()) {
+    completed["answers"] = answers;
+  }
+  if (!approved) {
+    completed["reason"] = normalized_decision == "abort" ? "Aborted by user" : "Denied by user";
+  }
+
+  if (!normalized_mode.empty()) {
+    const bool mode_changed = session.permission_mode != normalized_mode;
+    ApplySessionRuntimeConfigLocked(session, normalized_mode);
+    if (mode_changed) {
+      EmitAgentEventMessageLocked(session,
+                                  {{"type", "permission-mode-changed"}, {"mode", normalized_mode}});
+    }
+  }
+
+  session.agent_state_completed_requests[request_id] = std::move(completed);
+  session.updated_at_ms = now;
+  {
+    std::lock_guard<std::mutex> runner_lock(runner->mu);
+    if (runner->turn_active && session.agent_state_requests.empty()) {
+      session.thinking = true;
+    }
+  }
+
+  {
+    std::lock_guard<std::mutex> pending_lock(pending->mu);
+    pending->resolved = true;
+    pending->response_decision = approved
+                                     ? MapRuntimeDecisionToAppServerDecision(normalized_decision.empty() ? std::string("approved")
+                                                                                                         : normalized_decision)
+                                     : MapRuntimeDecisionToAppServerDecision(normalized_decision.empty() ? std::string("denied")
+                                                                                                         : normalized_decision);
+    pending->cv.notify_all();
+  }
+
+  PushEventLocked(session.ns,
+                  {{"type", "session-updated"},
+                   {"namespace", session.ns},
+                   {"sessionId", session.id},
+                   {"data", BuildSessionJsonLocked(session)}},
+                  session.id);
+  PersistStateLocked();
+  if (error != nullptr) {
+    error->clear();
+  }
+  return true;
+}
+
 
 void CodeAgentManager::StartAgentRun(const std::string& session_id, std::uint64_t generation, std::string prompt,
                                      std::string continuation_context) {
@@ -1049,16 +2993,10 @@ std::string CodeAgentManager::BuildAgentCommand(const SessionRecord& session, co
     cmd_template = "cd " + escaped_cwd + " && " + cmd_template;
   }
 
-  std::string permission_mode = policy::NormalizePermissionModeValue(session.permission_mode);
+  std::string permission_mode = util::Trim(session.permission_mode);
+  permission_mode = policy::CanonicalizePermissionModeForFlavor(permission_mode, session.flavor);
   if (permission_mode.empty()) {
-    permission_mode = "default";
-  }
-  if (permission_mode == "default" && session.yolo) {
-    if (session.flavor == "claude") {
-      permission_mode = "bypassPermissions";
-    } else {
-      permission_mode = "yolo";
-    }
+    permission_mode = policy::DefaultPermissionModeForFlavor(session.flavor);
   }
 
   if (session.flavor == "codex") {
@@ -1072,30 +3010,28 @@ std::string CodeAgentManager::BuildAgentCommand(const SessionRecord& session, co
       AppendCodexCommandOption(&cmd_template, "--config", ShellEscape(config_override));
     }
 
-    if (!session.title_initialized) {
-      if (!HasCodexConfigKey(cmd_template, "developer_instructions")) {
-        const std::string instruction_override =
-            "developer_instructions=\"" + EscapeTomlString(CodexTitleDeveloperInstruction()) + "\"";
-        AppendCodexCommandOption(&cmd_template, "--config", ShellEscape(instruction_override));
-      }
+    if (!HasCodexConfigKey(cmd_template, "developer_instructions")) {
+      const std::string instruction_override =
+          "developer_instructions=\"" + EscapeTomlString(CodexTitleDeveloperInstruction()) + "\"";
+      AppendCodexCommandOption(&cmd_template, "--config", ShellEscape(instruction_override));
+    }
 
-      const bool has_hapi_mcp_command = HasCodexConfigKey(cmd_template, "mcp_servers.hapi.command");
-      const bool has_hapi_mcp_args = HasCodexConfigKey(cmd_template, "mcp_servers.hapi.args");
-      if (!has_hapi_mcp_command || !has_hapi_mcp_args) {
-        const auto title_mcp_script = ResolveCodexTitleMcpScriptPath(state_file_path_);
-        if (EnsureCodexTitleMcpScript(title_mcp_script)) {
-          if (!has_hapi_mcp_command) {
-            const std::string mcp_command = EnvOrDefault("FERRYMAN_CODEAGENT_CODEX_TITLE_MCP_COMMAND", "python3");
-            const std::string command_override =
-                "mcp_servers.hapi.command=\"" + EscapeTomlString(mcp_command) + "\"";
-            AppendCodexCommandOption(&cmd_template, "--config", ShellEscape(command_override));
-          }
-          if (!has_hapi_mcp_args) {
-            const std::string args_override =
-                "mcp_servers.hapi.args=" +
-                BuildTomlLiteralArray(std::vector<std::string>{"-u", title_mcp_script.string()});
-            AppendCodexCommandOption(&cmd_template, "--config", ShellEscape(args_override));
-          }
+    const bool has_hapi_mcp_command = HasCodexConfigKey(cmd_template, "mcp_servers.hapi.command");
+    const bool has_hapi_mcp_args = HasCodexConfigKey(cmd_template, "mcp_servers.hapi.args");
+    if (!has_hapi_mcp_command || !has_hapi_mcp_args) {
+      const auto title_mcp_script = ResolveCodexTitleMcpScriptPath(state_file_path_);
+      if (EnsureCodexTitleMcpScript(title_mcp_script)) {
+        if (!has_hapi_mcp_command) {
+          const std::string mcp_command = EnvOrDefault("FERRYMAN_CODEAGENT_CODEX_TITLE_MCP_COMMAND", "python3");
+          const std::string command_override =
+              "mcp_servers.hapi.command=\"" + EscapeTomlString(mcp_command) + "\"";
+          AppendCodexCommandOption(&cmd_template, "--config", ShellEscape(command_override));
+        }
+        if (!has_hapi_mcp_args) {
+          const std::string args_override =
+              "mcp_servers.hapi.args=" +
+              BuildTomlLiteralArray(std::vector<std::string>{"-u", title_mcp_script.string()});
+          AppendCodexCommandOption(&cmd_template, "--config", ShellEscape(args_override));
         }
       }
     }
@@ -1125,15 +3061,14 @@ std::string CodeAgentManager::BuildAgentCommand(const SessionRecord& session, co
   } else if (session.flavor == "cursor") {
     if (permission_mode == "plan" || permission_mode == "ask") {
       AppendCommandOption(&cmd_template, "--mode", permission_mode);
-    } else if (permission_mode == "yolo") {
-      AppendCommandOption(&cmd_template, "--yolo", "");
+    } else if (permission_mode == "force") {
+      AppendCommandOption(&cmd_template, "--force", "");
     }
   } else if (session.flavor == "gemini") {
     const std::string approval_mode = ResolveGeminiApprovalMode(permission_mode);
     AppendCommandOption(&cmd_template, "--approval-mode", approval_mode);
-  } else if (session.yolo) {
-    cmd_template += " --yolo";
   }
+
 
   return cmd_template;
 }

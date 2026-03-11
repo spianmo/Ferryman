@@ -108,48 +108,22 @@ export function reduceChatBlocks(
     }
 
     // Calculate usage snapshot for status bar.
-    // Prefer server-provided cumulative totals when available; otherwise
-    // aggregate per-turn usage so the counter doesn't reset every turn.
+    // Match hapi behavior for per-turn usage payloads by preferring the latest
+    // message with usage, while still honoring explicit cumulative totals when
+    // the backend provides them.
     let latestUsage: LatestUsage | null = null
-    let latestUsageMessage: NormalizedMessage | null = null
-    let aggregatedInputTokens = 0
-    let aggregatedOutputTokens = 0
-    let aggregatedCacheCreationTokens = 0
-    let aggregatedCacheReadTokens = 0
-    let latestTotalTokens: number | undefined
-    let latestContextWindow: number | undefined
-
-    for (const msg of normalized) {
+    for (let i = normalized.length - 1; i >= 0; i--) {
+        const msg = normalized[i]
         const usage = msg.usage
         if (!usage) continue
 
-        latestUsageMessage = msg
-        aggregatedInputTokens += Math.max(0, usage.input_tokens)
-        aggregatedOutputTokens += Math.max(0, usage.output_tokens)
-        aggregatedCacheCreationTokens += Math.max(0, usage.cache_creation_input_tokens ?? 0)
-        aggregatedCacheReadTokens += Math.max(0, usage.cache_read_input_tokens ?? 0)
-
-        if (typeof usage.total_tokens === 'number' && Number.isFinite(usage.total_tokens)) {
-            latestTotalTokens = Math.max(0, usage.total_tokens)
-        }
-        if (typeof usage.model_context_window === 'number' && Number.isFinite(usage.model_context_window)) {
-            latestContextWindow = Math.max(0, usage.model_context_window)
-        }
-    }
-
-    if (latestUsageMessage?.usage) {
-        const latest = latestUsageMessage.usage
         const mergedUsage: UsageData = {
-            input_tokens: latestTotalTokens !== undefined ? latest.input_tokens : aggregatedInputTokens,
-            output_tokens: latestTotalTokens !== undefined ? latest.output_tokens : aggregatedOutputTokens,
-            cache_creation_input_tokens: latestTotalTokens !== undefined
-                ? latest.cache_creation_input_tokens
-                : aggregatedCacheCreationTokens,
-            cache_read_input_tokens: latestTotalTokens !== undefined
-                ? latest.cache_read_input_tokens
-                : aggregatedCacheReadTokens,
-            total_tokens: latestTotalTokens,
-            model_context_window: latestContextWindow
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_creation_input_tokens: usage.cache_creation_input_tokens,
+            cache_read_input_tokens: usage.cache_read_input_tokens,
+            total_tokens: usage.total_tokens,
+            model_context_window: usage.model_context_window
         }
 
         latestUsage = {
@@ -160,8 +134,9 @@ export function reduceChatBlocks(
             totalTokens: mergedUsage.total_tokens ?? undefined,
             contextWindow: mergedUsage.model_context_window ?? undefined,
             contextSize: calculateContextSize(mergedUsage),
-            timestamp: latestUsageMessage.createdAt
+            timestamp: msg.createdAt
         }
+        break
     }
 
     return { blocks: dedupeAgentEvents(foldApiErrorEvents(rootResult.blocks)), hasReadyEvent, latestUsage }

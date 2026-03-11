@@ -13,7 +13,10 @@ const CLAUDE_MODEL_CONTEXT_WINDOWS: Record<ModelMode, number> = {
 }
 
 const MODEL_CONTEXT_WINDOWS_BY_NAME: Record<string, number> = {
-    // Source (OpenAI Codex model pricing/docs): https://developers.openai.com/codex/model-pricing
+    // Sources:
+    // - OpenAI Codex model pricing/docs: https://developers.openai.com/codex/model-pricing
+    // - OpenAI model docs for GPT-5.4: https://platform.openai.com/docs/models/gpt-5.4
+    'gpt-5.4': 1_050_000,
     'gpt-5.3-codex': 272_000,
     'gpt-5.2-codex': 272_000,
     'gpt-5.2': 400_000,

@@ -914,7 +914,7 @@ int ServerApp::HandleCodeAgentMachineSpawn(HttpRequest* req, HttpResponse* resp)
   options.directory = JsonString(payload, "directory");
   options.agent = JsonString(payload, "agent", "claude");
   options.model = JsonString(payload, "model");
-  options.yolo = JsonBool(payload, "yolo", false);
+  options.permission_mode = JsonString(payload, "permissionMode");
 
   const auto result = codeagent_application_service_.SpawnSession(*ns, options);
   if (result.type != "success") {

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ApiClient } from '@/api/client'
+import { UNAUTHORIZED_EVENT } from '../../api/client'
 import type { AuthResponse } from '@/types/api'
 
 const FERRYMAN_SESSION_KEY = 'ferryman.session'
@@ -191,6 +192,21 @@ export function useAuth(authSource: AuthSource | null, baseUrl: string): {
         applyAuthSource(authSource)
         setIsLoading(false)
     }, [applyAuthSource, authSource, baseUrl])
+
+    useEffect(() => {
+        const onUnauthorized = () => {
+            tokenRef.current = null
+            setToken(null)
+            setUser(null)
+            setNeedsBinding(false)
+            setIsLoading(false)
+            setError('Ferryman session invalid or expired.')
+        }
+
+        window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized as EventListener)
+        return () => window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized as EventListener)
+    }, [])
+
 
     useEffect(() => {
         if (!token || !authSource || authSource.type !== 'accessToken') {

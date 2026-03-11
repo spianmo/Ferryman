@@ -41,6 +41,10 @@ export default {
   // Sessions page
   'sessions.count': '{n} sessions in {m} projects',
   'sessions.new': 'New Session',
+  'sessions.empty.title': 'No session selected',
+  'sessions.empty.description': 'Select a session from the left, or create a new one.',
+  'sessions.missing.title': 'Session unavailable',
+  'sessions.missing.description': 'This session was deleted or is no longer available.',
 
   // Session list
   'session.item.path': 'path',
@@ -111,9 +115,6 @@ export default {
   'newSession.agent': 'Agent',
   'newSession.model': 'Model',
   'newSession.model.optional': 'optional',
-  'newSession.yolo': 'YOLO mode',
-  'newSession.yolo.title': 'Bypass approvals and sandbox',
-  'newSession.yolo.desc': 'Uses dangerous agent flags when spawning.',
   'newSession.create': 'Create',
   'newSession.creating': 'Creating…',
 

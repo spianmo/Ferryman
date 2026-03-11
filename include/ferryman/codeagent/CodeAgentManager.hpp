@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <functional>
 #include <mutex>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -23,7 +24,7 @@ struct SpawnSessionOptions {
   std::string directory;
   std::string agent = "claude";
   std::string model;
-  bool yolo = false;
+  std::string permission_mode;
 };
 
 struct SpawnSessionResult {
@@ -113,7 +114,6 @@ class CodeAgentManager {
     std::string model_mode = "default";
     std::string model_reasoning_effort;
     std::string model;
-    bool yolo = false;
     bool title_initialized = false;
     nlohmann::json agent_state_requests = nlohmann::json::object();
     nlohmann::json agent_state_completed_requests = nlohmann::json::object();
@@ -148,6 +148,10 @@ class CodeAgentManager {
   nlohmann::json BuildSessionJsonLocked(const SessionRecord& session) const;
   nlohmann::json BuildSessionSummaryJsonLocked(const SessionRecord& session) const;
   nlohmann::json BuildMessageJson(const MessageRecord& message) const;
+  void ApplySessionRuntimeConfigLocked(SessionRecord& session,
+                                       const std::optional<std::string>& permission_mode = std::nullopt,
+                                       const std::optional<std::string>& model_mode = std::nullopt,
+                                       const std::optional<std::string>& reasoning_effort = std::nullopt);
   MessageRecord UpsertMessageLocked(SessionRecord& session, nlohmann::json content, const std::string& local_id,
                                     bool dedupe_by_local_id, bool* inserted_new);
   void EmitAgentEventMessageLocked(SessionRecord& session, nlohmann::json event_data);
@@ -155,6 +159,21 @@ class CodeAgentManager {
 
   void PushEventLocked(const std::string& ns, const nlohmann::json& payload,
                        const std::string& session_id = "", const std::string& machine_id = "");
+
+  struct SessionRunnerState;
+  std::shared_ptr<SessionRunnerState> EnsureSessionRunnerLocked(SessionRecord& session, std::string* error);
+  void StopSessionRunner(const std::shared_ptr<SessionRunnerState>& runner);
+  void StopSessionRunnerLocked(const std::string& session_id);
+  bool InterruptSessionRunnerLocked(const std::string& session_id, std::string* error);
+  bool StartSessionTurn(const std::string& session_id, std::uint64_t generation, const std::string& prompt,
+                        const nlohmann::json& attachments, const std::string& continuation_context,
+                        std::string* error);
+  bool ResolveSessionRunnerPermissionLocked(SessionRecord& session, const std::string& request_id, bool approved,
+                                            const std::string& mode, const std::vector<std::string>& allow_tools,
+                                            const std::string& decision, const nlohmann::json& answers,
+                                            std::string* error, bool* handled);
+  bool AutoResolveSessionRunnerPermissionsLocked(SessionRecord& session, const std::string& normalized_mode,
+                                                 std::vector<std::string>* resolved_lines);
 
   void StartAgentRun(const std::string& session_id, std::uint64_t generation, std::string prompt,
                      std::string continuation_context = {});
@@ -196,6 +215,7 @@ class CodeAgentManager {
   std::string opencode_cmd_template_;
   std::filesystem::path state_file_path_;
   std::filesystem::path legacy_state_file_path_;
+  std::unordered_map<std::string, std::shared_ptr<SessionRunnerState>> session_runners_;
 };
 
 }  // namespace ferryman::codeagent

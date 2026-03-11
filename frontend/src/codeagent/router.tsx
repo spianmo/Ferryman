@@ -1,4 +1,4 @@
-import { useCallback } from 'react'
+import { useCallback, useEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
     Navigate,
@@ -94,6 +94,32 @@ function SettingsIcon(props: { className?: string }) {
     )
 }
 
+
+function SessionPanePlaceholder(props: {
+    title: string
+    description: string
+    actionLabel?: string
+    onAction?: () => void
+}) {
+    return (
+        <div className="flex h-full items-center justify-center p-6">
+            <div className="mx-auto flex max-w-md flex-col items-center gap-3 text-center">
+                <div className="text-base font-semibold text-[var(--app-fg)]">{props.title}</div>
+                <div className="text-sm text-[var(--app-hint)]">{props.description}</div>
+                {props.actionLabel && props.onAction ? (
+                    <button
+                        type="button"
+                        onClick={props.onAction}
+                        className="rounded-lg bg-[var(--app-link)] px-4 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90"
+                    >
+                        {props.actionLabel}
+                    </button>
+                ) : null}
+            </div>
+        </div>
+    )
+}
+
 function SessionsPage() {
     const { api } = useAppContext()
     const navigate = useNavigate()
@@ -174,7 +200,17 @@ function SessionsPage() {
 }
 
 function SessionsIndexPage() {
-    return null
+    const navigate = useNavigate()
+    const { t } = useTranslation()
+
+    return (
+        <SessionPanePlaceholder
+            title={t('sessions.empty.title')}
+            description={t('sessions.empty.description')}
+            actionLabel={t('sessions.new')}
+            onAction={() => navigate({ to: '/sessions/new' })}
+        />
+    )
 }
 
 function SessionPage() {
@@ -187,6 +223,8 @@ function SessionPage() {
     const { sessionId } = useParams({ from: '/sessions/$sessionId' })
     const {
         session,
+        isLoading: sessionLoading,
+        error: sessionError,
         refetch: refetchSession,
     } = useSession(api, sessionId)
     const {
@@ -285,11 +323,29 @@ function SessionPage() {
         void refetchMessages()
     }, [refetchMessages, refetchSession])
 
-    if (!session) {
+    useEffect(() => {
+        if (sessionLoading || session) {
+            return
+        }
+        if (sessionError && /(^HTTP\s+404\b|session not found)/i.test(sessionError)) {
+            navigate({ to: '/sessions', replace: true })
+        }
+    }, [navigate, session, sessionError, sessionLoading])
+
+    if (sessionLoading) {
         return (
             <div className="flex-1 flex items-center justify-center p-4">
-                <LoadingState label="Loading session…" className="text-sm" />
+                <LoadingState label={t('loading.session')} className="text-sm" />
             </div>
+        )
+    }
+
+    if (!session) {
+        return (
+            <SessionPanePlaceholder
+                title={t('sessions.missing.title')}
+                description={sessionError ?? t('sessions.missing.description')}
+            />
         )
     }
 

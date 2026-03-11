@@ -650,7 +650,7 @@ export async function codeAgentSpawnSession(
     directory: string;
     agent: "claude" | "codex" | "cursor" | "gemini" | "opencode";
     model?: string;
-    yolo?: boolean;
+    permissionMode?: string;
   }
 ) {
   return codeAgentRequest<{ type: "success" | "error"; sessionId?: string; message?: string }>(

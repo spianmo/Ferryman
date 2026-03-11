@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import type { ApiClient } from '@/api/client'
-import type { SpawnResponse } from '@/types/api'
+import type { SpawnResponse, PermissionMode } from '@/types/api'
 import { queryKeys } from '@/lib/query-keys'
 
 type SpawnInput = {
@@ -8,7 +8,7 @@ type SpawnInput = {
     directory: string
     agent?: 'claude' | 'codex' | 'cursor' | 'gemini' | 'opencode'
     model?: string
-    yolo?: boolean
+    permissionMode?: PermissionMode
 }
 
 export function useSpawnSession(api: ApiClient | null): {
@@ -28,7 +28,7 @@ export function useSpawnSession(api: ApiClient | null): {
                 input.directory,
                 input.agent,
                 input.model,
-                input.yolo
+                input.permissionMode
             )
         },
         onSuccess: () => {

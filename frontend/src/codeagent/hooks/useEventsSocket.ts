@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { emitCodeAgentUnauthorized, isUnauthorizedPayload, normalizeUnauthorizedReason } from '@/lib/unauthorized'
 import { isObject, toSessionSummary } from '@hapi/protocol'
 import type {
     Machine,
@@ -561,6 +562,23 @@ export function useEventsSocket(options: UseEventsSocketOptions): { subscription
             try {
                 parsed = JSON.parse(message.data)
             } catch {
+                return
+            }
+
+            if (isUnauthorizedPayload(parsed)) {
+                const reason = normalizeUnauthorizedReason(parsed.error)
+                emitCodeAgentUnauthorized({ reason, path: '/ws/codeagent/events' })
+                if (reconnectTimerRef.current) {
+                    clearTimeout(reconnectTimerRef.current)
+                    reconnectTimerRef.current = null
+                }
+                socket.onclose = null
+                socket.onerror = null
+                if (socketRef.current === socket) {
+                    socketRef.current = null
+                }
+                setSubscriptionId(null)
+                socket.close()
                 return
             }
 

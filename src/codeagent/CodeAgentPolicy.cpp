@@ -23,40 +23,65 @@ std::string NormalizePermissionModeValue(std::string mode) {
     return "default";
   }
 
-  std::string collapsed;
-  collapsed.reserve(mode.size());
-  for (char ch : mode) {
-    if (std::isalnum(static_cast<unsigned char>(ch)) == 0) {
-      continue;
-    }
-    collapsed.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+  static constexpr std::array<std::string_view, 14> kKnownModes = {
+      "default",
+      "acceptEdits",
+      "plan",
+      "bypassPermissions",
+      "ask",
+      "read-only",
+      "auto",
+      "full-access",
+      "auto-edit",
+      "yolo",
+      "allow",
+      "deny",
+      "agent",
+      "force",
+  };
+
+  return ArrayContains(kKnownModes, mode) ? mode : std::string();
+}
+
+std::string CanonicalizePermissionModeForFlavor(std::string mode, std::string_view flavor) {
+  const std::string normalized = NormalizePermissionModeValue(std::move(mode));
+  if (normalized.empty()) {
+    return "";
   }
 
-  if (collapsed == "default") {
-    return "default";
+  static constexpr std::array<std::string_view, 4> kClaudeModes = {"default", "acceptEdits", "plan",
+                                                                    "bypassPermissions"};
+  static constexpr std::array<std::string_view, 3> kCodexModes = {"read-only", "auto", "full-access"};
+  static constexpr std::array<std::string_view, 4> kGeminiModes = {"default", "auto-edit", "plan", "yolo"};
+  static constexpr std::array<std::string_view, 3> kOpencodeModes = {"ask", "allow", "deny"};
+  static constexpr std::array<std::string_view, 4> kCursorModes = {"agent", "plan", "ask", "force"};
+
+  if (flavor == "codex") {
+    return ArrayContains(kCodexModes, normalized) ? normalized : std::string();
   }
-  if (collapsed == "acceptedits") {
-    return "acceptEdits";
+  if (flavor == "gemini") {
+    return ArrayContains(kGeminiModes, normalized) ? normalized : std::string();
   }
-  if (collapsed == "bypasspermissions") {
-    return "bypassPermissions";
+  if (flavor == "opencode") {
+    return ArrayContains(kOpencodeModes, normalized) ? normalized : std::string();
   }
-  if (collapsed == "plan") {
-    return "plan";
+  if (flavor == "cursor") {
+    return ArrayContains(kCursorModes, normalized) ? normalized : std::string();
   }
-  if (collapsed == "readonly") {
-    return "read-only";
+  return ArrayContains(kClaudeModes, normalized) ? normalized : std::string();
+}
+
+std::string DefaultPermissionModeForFlavor(std::string_view flavor) {
+  if (flavor == "codex") {
+    return "auto";
   }
-  if (collapsed == "safeyolo") {
-    return "safe-yolo";
+  if (flavor == "cursor") {
+    return "agent";
   }
-  if (collapsed == "yolo") {
-    return "yolo";
-  }
-  if (collapsed == "ask") {
+  if (flavor == "opencode") {
     return "ask";
   }
-  return "";
+  return "default";
 }
 
 bool IsCodexOrGeminiFlavor(std::string_view flavor) {
@@ -64,35 +89,7 @@ bool IsCodexOrGeminiFlavor(std::string_view flavor) {
 }
 
 bool IsPermissionModeAllowedForFlavor(std::string_view mode, std::string_view flavor) {
-  static constexpr std::array<std::string_view, 4> kClaudeModes = {"default", "acceptEdits", "bypassPermissions",
-                                                                    "plan"};
-  static constexpr std::array<std::string_view, 4> kCodexGeminiModes = {"default", "read-only", "safe-yolo", "yolo"};
-  static constexpr std::array<std::string_view, 2> kOpencodeModes = {"default", "yolo"};
-  static constexpr std::array<std::string_view, 4> kCursorModes = {"default", "plan", "ask", "yolo"};
-
-  if (IsCodexOrGeminiFlavor(flavor)) {
-    return ArrayContains(kCodexGeminiModes, mode);
-  }
-  if (flavor == "opencode") {
-    return ArrayContains(kOpencodeModes, mode);
-  }
-  if (flavor == "cursor") {
-    return ArrayContains(kCursorModes, mode);
-  }
-  return ArrayContains(kClaudeModes, mode);
-}
-
-std::string ResolveSpawnPermissionMode(std::string_view flavor, bool yolo) {
-  if (!yolo) {
-    return "default";
-  }
-  if (flavor == "claude") {
-    return "bypassPermissions";
-  }
-  if (IsCodexOrGeminiFlavor(flavor) || flavor == "cursor" || flavor == "opencode") {
-    return "yolo";
-  }
-  return "default";
+  return !CanonicalizePermissionModeForFlavor(std::string(mode), flavor).empty();
 }
 
 bool IsKnownModelMode(std::string_view mode) {

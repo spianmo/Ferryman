@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { emitCodeAgentUnauthorized, normalizeUnauthorizedReason } from '@/lib/unauthorized'
 
 type TerminalConnectionState =
     | { status: 'idle' }
@@ -145,6 +146,19 @@ export function useTerminalSocket(options: UseTerminalSocketOptions): {
         }
 
         if (payload.ok === false) {
+            if (payload.code === 'unauthorized') {
+                emitCodeAgentUnauthorized({
+                    reason: normalizeUnauthorizedReason(payload.error),
+                    path: '/ws/codeagent/terminal'
+                })
+                const socket = socketRef.current
+                if (socket) {
+                    socket.onclose = null
+                    socket.onerror = null
+                    socket.close()
+                    socketRef.current = null
+                }
+            }
             setErrorState(payload.error || 'Terminal request failed.')
             return
         }

@@ -288,7 +288,6 @@ void CodeAgentManager::RestoreStateLocked() {
     }
     session.model_reasoning_effort = policy::NormalizeReasoningEffortValue(session.model_reasoning_effort);
     session.model = parse_string(raw_session.value("model", nlohmann::json("")), "");
-    session.yolo = parse_bool(raw_session.value("yolo", nlohmann::json(nullptr)), false);
     session.title_initialized =
         parse_bool(raw_session.value("titleInitialized", nlohmann::json(nullptr)), false);
     if (!session.title_initialized) {
@@ -315,26 +314,13 @@ void CodeAgentManager::RestoreStateLocked() {
         }
       }
     }
-    const bool legacy_yolo = session.yolo;
-    std::string normalized_permission_mode = policy::NormalizePermissionModeValue(session.permission_mode);
+    std::string normalized_permission_mode = util::Trim(session.permission_mode);
+    normalized_permission_mode =
+        policy::CanonicalizePermissionModeForFlavor(normalized_permission_mode, session.flavor);
     if (normalized_permission_mode.empty()) {
-      normalized_permission_mode = "default";
-    }
-    if (normalized_permission_mode == "default" && legacy_yolo) {
-      normalized_permission_mode = policy::ResolveSpawnPermissionMode(session.flavor, true);
-    }
-    if (!policy::IsPermissionModeAllowedForFlavor(normalized_permission_mode, session.flavor)) {
-      normalized_permission_mode = "default";
+      normalized_permission_mode = policy::DefaultPermissionModeForFlavor(session.flavor);
     }
     session.permission_mode = normalized_permission_mode;
-    if (session.flavor == "claude") {
-      session.yolo = session.permission_mode == "bypassPermissions";
-    } else if (policy::IsCodexOrGeminiFlavor(session.flavor) || session.flavor == "cursor" ||
-               session.flavor == "opencode") {
-      session.yolo = session.permission_mode == "yolo";
-    } else {
-      session.yolo = false;
-    }
     if (!policy::IsKnownModelMode(session.model_mode) ||
         !policy::IsModelModeAllowedForFlavor(session.model_mode, session.flavor)) {
       session.model_mode = "default";
@@ -444,7 +430,6 @@ void CodeAgentManager::PersistStateLocked() {
         {"modelMode", session->model_mode},
         {"reasoningEffort", session->model_reasoning_effort},
         {"model", session->model},
-        {"yolo", session->yolo},
         {"titleInitialized", session->title_initialized},
         {"agentStateRequests",
          session->agent_state_requests.is_object() ? session->agent_state_requests : nlohmann::json::object()},

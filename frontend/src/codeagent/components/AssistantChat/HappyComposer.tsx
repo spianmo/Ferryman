@@ -428,9 +428,16 @@ export function HappyComposer(props: {
                                                 <div className="h-2 w-2 rounded-full bg-[var(--app-link)]" />
                                             )}
                                         </div>
-                                        <span className={permissionMode === option.mode ? 'text-[var(--app-link)]' : ''}>
-                                            {option.label}
-                                        </span>
+                                        <div className="flex min-w-0 flex-col">
+                                            <span className={permissionMode === option.mode ? 'text-[var(--app-link)]' : ''}>
+                                                {option.label}
+                                            </span>
+                                            {option.description ? (
+                                                <span className="text-xs text-[var(--app-hint)]">
+                                                    {option.description}
+                                                </span>
+                                            ) : null}
+                                        </div>
                                     </button>
                                 ))}
                             </div>
