@@ -41,6 +41,8 @@ export default {
   // Sessions page
   'sessions.count': '{n} 个会话，{m} 个项目',
   'sessions.new': '新建会话',
+  'sessions.source.codeagent': 'CodeAgent 会话',
+  'sessions.source.external': '外部会话',
   'sessions.empty.title': '未选择会话',
   'sessions.empty.description': '请先从左侧选择一个会话，或新建一个会话。',
   'sessions.missing.title': '会话不可用',
@@ -257,6 +259,9 @@ export default {
   'settings.voice.title': '语音助手',
   'settings.voice.language': '语音语言',
   'settings.voice.autoDetect': '自动检测',
+  'settings.sessions.title': '会话',
+  'settings.sessions.readExternal': '读取外部会话',
+  'settings.sessions.readExternal.description': '在单独分组中显示本机上的 Cursor、Gemini、OpenCode、Claude 和 Codex 会话。',
   'settings.about.title': '关于',
   'settings.about.website': '官方网站',
   'settings.about.appVersion': '应用版本',

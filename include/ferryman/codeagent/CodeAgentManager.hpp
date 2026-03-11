@@ -44,7 +44,7 @@ class CodeAgentManager {
  explicit CodeAgentManager(const core::AppConfig& config);
   ~CodeAgentManager();
 
-  nlohmann::json BuildSessionsResponse(const std::string& ns) const;
+  nlohmann::json BuildSessionsResponse(const std::string& ns, bool include_external = true) const;
   std::optional<nlohmann::json> BuildSessionResponse(const std::string& ns, const std::string& session_id) const;
   std::optional<nlohmann::json> BuildMessagesResponse(const std::string& ns, const std::string& session_id,
                                                       int limit, std::optional<int> before_seq) const;

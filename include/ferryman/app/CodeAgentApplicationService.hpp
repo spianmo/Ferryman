@@ -14,8 +14,8 @@ class CodeAgentApplicationService {
   explicit CodeAgentApplicationService(codeagent::CodeAgentManager& codeagent_manager)
       : codeagent_manager_(codeagent_manager) {}
 
-  nlohmann::json BuildSessionsResponse(const std::string& ns) const {
-    return codeagent_manager_.BuildSessionsResponse(ns);
+  nlohmann::json BuildSessionsResponse(const std::string& ns, bool include_external = true) const {
+    return codeagent_manager_.BuildSessionsResponse(ns, include_external);
   }
 
   std::optional<nlohmann::json> BuildSessionResponse(const std::string& ns, const std::string& session_id) const {

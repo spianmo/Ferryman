@@ -10,7 +10,7 @@
 
 namespace ferryman::codeagent {
 
-nlohmann::json CodeAgentManager::BuildSessionsResponse(const std::string& ns) const {
+nlohmann::json CodeAgentManager::BuildSessionsResponse(const std::string& ns, bool include_external) const {
   struct SummaryRecord {
     bool active = false;
     std::int64_t updated_at_ms = 0;
@@ -40,15 +40,17 @@ nlohmann::json CodeAgentManager::BuildSessionsResponse(const std::string& ns) co
     }
   }
 
-  for (const auto& external_session : DiscoverExternalSessions(ns)) {
-    if (known_ids.find(external_session.id) != known_ids.end()) {
-      continue;
+  if (include_external) {
+    for (const auto& external_session : DiscoverExternalSessions(ns)) {
+      if (known_ids.find(external_session.id) != known_ids.end()) {
+        continue;
+      }
+      sessions.push_back({
+          .active = external_session.active,
+          .updated_at_ms = external_session.updated_at_ms,
+          .payload = BuildSessionSummaryJsonLocked(external_session),
+      });
     }
-    sessions.push_back({
-        .active = external_session.active,
-        .updated_at_ms = external_session.updated_at_ms,
-        .payload = BuildSessionSummaryJsonLocked(external_session),
-    });
   }
 
   std::sort(sessions.begin(), sessions.end(), [](const SummaryRecord& lhs, const SummaryRecord& rhs) {

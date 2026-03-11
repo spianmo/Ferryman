@@ -8,6 +8,7 @@ import { SessionActionMenu } from '@/components/SessionActionMenu'
 import { RenameSessionDialog } from '@/components/RenameSessionDialog'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { useTranslation } from '@/lib/use-translation'
+import { isExternalSessionSummary } from '@/lib/external-sessions'
 
 type SessionGroup = {
     directory: string
@@ -15,6 +16,13 @@ type SessionGroup = {
     sessions: SessionSummary[]
     latestUpdatedAt: number
     hasActiveSession: boolean
+}
+
+type SessionSourceGroup = {
+    key: 'codeagent' | 'external'
+    title: string
+    sessions: SessionSummary[]
+    groups: SessionGroup[]
 }
 
 function getGroupDisplayName(directory: string): string {
@@ -59,6 +67,36 @@ function groupSessionsByDirectory(sessions: SessionSummary[]): SessionGroup[] {
             }
             return b.latestUpdatedAt - a.latestUpdatedAt
         })
+}
+
+
+function groupSessionsBySource(
+    sessions: SessionSummary[],
+    t: (key: string, params?: Record<string, string | number>) => string
+): SessionSourceGroup[] {
+    const codeagentSessions = sessions.filter((session) => !isExternalSessionSummary(session))
+    const externalSessions = sessions.filter((session) => isExternalSessionSummary(session))
+    const groups: SessionSourceGroup[] = []
+
+    if (codeagentSessions.length > 0) {
+        groups.push({
+            key: 'codeagent',
+            title: t('sessions.source.codeagent'),
+            sessions: codeagentSessions,
+            groups: groupSessionsByDirectory(codeagentSessions),
+        })
+    }
+
+    if (externalSessions.length > 0) {
+        groups.push({
+            key: 'external',
+            title: t('sessions.source.external'),
+            sessions: externalSessions,
+            groups: groupSessionsByDirectory(externalSessions),
+        })
+    }
+
+    return groups
 }
 
 function PlusIcon(props: { className?: string }) {
@@ -330,23 +368,27 @@ export function SessionList(props: {
 }) {
     const { t } = useTranslation()
     const { renderHeader = true, api, selectedSessionId } = props
-    const groups = useMemo(
-        () => groupSessionsByDirectory(props.sessions),
-        [props.sessions]
+    const sourceGroups = useMemo(
+        () => groupSessionsBySource(props.sessions, t),
+        [props.sessions, t]
+    )
+    const totalProjectGroups = useMemo(
+        () => sourceGroups.reduce((count, group) => count + group.groups.length, 0),
+        [sourceGroups]
     )
     const [collapseOverrides, setCollapseOverrides] = useState<Map<string, boolean>>(
         () => new Map()
     )
-    const isGroupCollapsed = (group: SessionGroup): boolean => {
-        const override = collapseOverrides.get(group.directory)
+    const isGroupCollapsed = (groupKey: string, hasActiveSession: boolean): boolean => {
+        const override = collapseOverrides.get(groupKey)
         if (override !== undefined) return override
-        return !group.hasActiveSession
+        return !hasActiveSession
     }
 
-    const toggleGroup = (directory: string, isCollapsed: boolean) => {
+    const toggleGroup = (groupKey: string, isCollapsed: boolean) => {
         setCollapseOverrides(prev => {
             const next = new Map(prev)
-            next.set(directory, !isCollapsed)
+            next.set(groupKey, !isCollapsed)
             return next
         })
     }
@@ -355,24 +397,26 @@ export function SessionList(props: {
         setCollapseOverrides(prev => {
             if (prev.size === 0) return prev
             const next = new Map(prev)
-            const knownGroups = new Set(groups.map(group => group.directory))
+            const knownGroups = new Set(
+                sourceGroups.flatMap((group) => group.groups.map((directoryGroup) => `${group.key}:${directoryGroup.directory}`))
+            )
             let changed = false
-            for (const directory of next.keys()) {
-                if (!knownGroups.has(directory)) {
-                    next.delete(directory)
+            for (const groupKey of next.keys()) {
+                if (!knownGroups.has(groupKey)) {
+                    next.delete(groupKey)
                     changed = true
                 }
             }
             return changed ? next : prev
         })
-    }, [groups])
+    }, [sourceGroups])
 
     return (
         <div className="mx-auto w-full max-w-content flex flex-col">
             {renderHeader ? (
                 <div className="flex items-center justify-between px-3 py-1">
                     <div className="text-xs text-[var(--app-hint)]">
-                        {t('sessions.count', { n: props.sessions.length, m: groups.length })}
+                        {t('sessions.count', { n: props.sessions.length, m: totalProjectGroups })}
                     </div>
                     <button
                         type="button"
@@ -386,45 +430,54 @@ export function SessionList(props: {
             ) : null}
 
             <div className="flex flex-col">
-                {groups.map((group) => {
-                    const isCollapsed = isGroupCollapsed(group)
-                    return (
-                        <div key={group.directory}>
-                            <button
-                                type="button"
-                                onClick={() => toggleGroup(group.directory, isCollapsed)}
-                                className="sticky top-0 z-10 flex w-full items-center gap-2 px-3 py-2 text-left bg-[var(--app-bg)] border-b border-[var(--app-divider)] transition-colors hover:bg-[var(--app-secondary-bg)]"
-                            >
-                                <ChevronIcon
-                                    className="h-4 w-4 text-[var(--app-hint)]"
-                                    collapsed={isCollapsed}
-                                />
-                                <div className="flex items-center gap-2 min-w-0 flex-1">
-                                    <span className="font-medium text-base break-words" title={group.directory}>
-                                        {group.displayName}
-                                    </span>
-                                    <span className="shrink-0 text-xs text-[var(--app-hint)]">
-                                        ({group.sessions.length})
-                                    </span>
-                                </div>
-                            </button>
-                            {!isCollapsed ? (
-                                <div className="flex flex-col divide-y divide-[var(--app-divider)] border-b border-[var(--app-divider)]">
-                                    {group.sessions.map((s) => (
-                                        <SessionItem
-                                            key={s.id}
-                                            session={s}
-                                            onSelect={props.onSelect}
-                                            showPath={false}
-                                            api={api}
-                                            selected={s.id === selectedSessionId}
-                                        />
-                                    ))}
-                                </div>
-                            ) : null}
+                {sourceGroups.map((sourceGroup) => (
+                    <section key={sourceGroup.key} className="flex flex-col">
+                        <div className="px-3 py-2 text-xs font-semibold text-[var(--app-hint)] uppercase tracking-wide border-b border-[var(--app-divider)]">
+                            {sourceGroup.title}
+                            <span className="ml-2 text-[var(--app-hint)] normal-case">({sourceGroup.sessions.length})</span>
                         </div>
-                    )
-                })}
+                        {sourceGroup.groups.map((group) => {
+                            const groupKey = `${sourceGroup.key}:${group.directory}`
+                            const isCollapsed = isGroupCollapsed(groupKey, group.hasActiveSession)
+                            return (
+                                <div key={groupKey}>
+                                    <button
+                                        type="button"
+                                        onClick={() => toggleGroup(groupKey, isCollapsed)}
+                                        className="sticky top-0 z-10 flex w-full items-center gap-2 px-3 py-2 text-left bg-[var(--app-bg)] border-b border-[var(--app-divider)] transition-colors hover:bg-[var(--app-secondary-bg)]"
+                                    >
+                                        <ChevronIcon
+                                            className="h-4 w-4 text-[var(--app-hint)]"
+                                            collapsed={isCollapsed}
+                                        />
+                                        <div className="flex items-center gap-2 min-w-0 flex-1">
+                                            <span className="font-medium text-base break-words" title={group.directory}>
+                                                {group.displayName}
+                                            </span>
+                                            <span className="shrink-0 text-xs text-[var(--app-hint)]">
+                                                ({group.sessions.length})
+                                            </span>
+                                        </div>
+                                    </button>
+                                    {!isCollapsed ? (
+                                        <div className="flex flex-col divide-y divide-[var(--app-divider)] border-b border-[var(--app-divider)]">
+                                            {group.sessions.map((session) => (
+                                                <SessionItem
+                                                    key={session.id}
+                                                    session={session}
+                                                    onSelect={props.onSelect}
+                                                    showPath={false}
+                                                    api={api}
+                                                    selected={session.id === selectedSessionId}
+                                                />
+                                            ))}
+                                        </div>
+                                    ) : null}
+                                </div>
+                            )
+                        })}
+                    </section>
+                ))}
             </div>
         </div>
     )

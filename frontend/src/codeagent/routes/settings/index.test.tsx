@@ -1,17 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { I18nContext, I18nProvider } from '@/lib/i18n-context'
 import { en } from '@/lib/locales'
 import SettingsPage from './index'
 
-// Mock the router hooks
 vi.mock('@tanstack/react-router', () => ({
     useNavigate: () => vi.fn(),
     useRouter: () => ({ history: { back: vi.fn() } }),
     useLocation: () => '/settings',
 }))
 
-// Mock useFontScale hook
 vi.mock('@/hooks/useFontScale', () => ({
     useFontScale: () => ({ fontScale: 1, setFontScale: vi.fn() }),
     getFontScaleOptions: () => [
@@ -21,7 +19,6 @@ vi.mock('@/hooks/useFontScale', () => ({
     ],
 }))
 
-// Mock languages
 vi.mock('@/lib/languages', () => ({
     getElevenLabsSupportedLanguages: () => [
         { code: null, name: 'Auto-detect' },
@@ -52,18 +49,41 @@ function renderWithSpyT(ui: React.ReactElement) {
 describe('SettingsPage', () => {
     beforeEach(() => {
         vi.clearAllMocks()
-        // Mock localStorage
+        const storage = new Map<string, string>([['hapi-voice-lang', 'en']])
         const localStorageMock = {
-            getItem: vi.fn(() => 'en'),
-            setItem: vi.fn(),
-            removeItem: vi.fn(),
+            getItem: vi.fn((key: string) => storage.get(key) ?? null),
+            setItem: vi.fn((key: string, value: string) => {
+                storage.set(key, value)
+            }),
+            removeItem: vi.fn((key: string) => {
+                storage.delete(key)
+            }),
         }
-        Object.defineProperty(window, 'localStorage', { value: localStorageMock })
+        Object.defineProperty(window, 'localStorage', { value: localStorageMock, configurable: true })
     })
 
     it('renders the Voice Assistant section', () => {
         renderWithProviders(<SettingsPage />)
         expect(screen.getByText('Voice Assistant')).toBeInTheDocument()
+    })
+
+    it('renders the sessions section and external session toggle', () => {
+        renderWithProviders(<SettingsPage />)
+        expect(screen.getByText('Sessions')).toBeInTheDocument()
+        expect(screen.getByRole('switch', { name: 'Read External Sessions' })).toHaveAttribute('aria-checked', 'true')
+    })
+
+    it('toggles external session reading in localStorage', () => {
+        renderWithProviders(<SettingsPage />)
+        const toggle = screen.getByRole('switch', { name: 'Read External Sessions' })
+
+        fireEvent.click(toggle)
+        expect(window.localStorage.setItem).toHaveBeenCalledWith('hapi-codeagent-read-external-sessions', 'false')
+        expect(toggle).toHaveAttribute('aria-checked', 'false')
+
+        fireEvent.click(toggle)
+        expect(window.localStorage.removeItem).toHaveBeenCalledWith('hapi-codeagent-read-external-sessions')
+        expect(toggle).toHaveAttribute('aria-checked', 'true')
     })
 
     it('does not render About section content', () => {
@@ -74,12 +94,15 @@ describe('SettingsPage', () => {
         expect(screen.queryByText('Protocol Version')).not.toBeInTheDocument()
     })
 
-    it('uses correct i18n keys for voice section', () => {
+    it('uses correct i18n keys for settings sections', () => {
         const spyT = renderWithSpyT(<SettingsPage />)
         const calledKeys = spyT.mock.calls.map((call) => call[0])
         expect(calledKeys).toContain('settings.voice.title')
         expect(calledKeys).toContain('settings.voice.language')
         expect(calledKeys).toContain('settings.voice.autoDetect')
+        expect(calledKeys).toContain('settings.sessions.title')
+        expect(calledKeys).toContain('settings.sessions.readExternal')
+        expect(calledKeys).toContain('settings.sessions.readExternal.description')
         expect(calledKeys).not.toContain('settings.language.title')
         expect(calledKeys).not.toContain('settings.display.title')
         expect(calledKeys).not.toContain('settings.about.title')

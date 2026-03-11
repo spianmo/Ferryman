@@ -165,8 +165,13 @@ export class ApiClient {
         return await res.json() as AuthResponse
     }
 
-    async getSessions(): Promise<SessionsResponse> {
-        return await this.request<SessionsResponse>('/api/sessions')
+    async getSessions(options?: { includeExternal?: boolean }): Promise<SessionsResponse> {
+        const params = new URLSearchParams()
+        if (options?.includeExternal !== undefined) {
+            params.set('includeExternal', options.includeExternal ? 'true' : 'false')
+        }
+        const qs = params.toString()
+        return await this.request<SessionsResponse>(`/api/sessions${qs ? `?${qs}` : ''}`)
     }
 
     async getPushVapidPublicKey(): Promise<PushVapidPublicKeyResponse> {

@@ -41,6 +41,8 @@ export default {
   // Sessions page
   'sessions.count': '{n} sessions in {m} projects',
   'sessions.new': 'New Session',
+  'sessions.source.codeagent': 'CodeAgent Sessions',
+  'sessions.source.external': 'External Sessions',
   'sessions.empty.title': 'No session selected',
   'sessions.empty.description': 'Select a session from the left, or create a new one.',
   'sessions.missing.title': 'Session unavailable',
@@ -255,6 +257,9 @@ export default {
   'settings.voice.title': 'Voice Assistant',
   'settings.voice.language': 'Voice Language',
   'settings.voice.autoDetect': 'Auto-detect',
+  'settings.sessions.title': 'Sessions',
+  'settings.sessions.readExternal': 'Read External Sessions',
+  'settings.sessions.readExternal.description': 'Show local Cursor, Gemini, OpenCode, Claude, and Codex sessions in a separate group.',
   'settings.about.title': 'About',
   'settings.about.website': 'Website',
   'settings.about.appVersion': 'App Version',

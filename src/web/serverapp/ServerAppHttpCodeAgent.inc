@@ -76,7 +76,8 @@ int ServerApp::HandleCodeAgentSessions(HttpRequest* req, HttpResponse* resp) {
   if (!ns.has_value()) {
     return resp->status_code;
   }
-  return Json(resp, 200, DumpJsonSafe(codeagent_application_service_.BuildSessionsResponse(*ns)));
+  const bool include_external = ParseBool(QueryOf(req, "includeExternal"), true);
+  return Json(resp, 200, DumpJsonSafe(codeagent_application_service_.BuildSessionsResponse(*ns, include_external)));
 }
 
 int ServerApp::HandleCodeAgentSession(HttpRequest* req, HttpResponse* resp) {
