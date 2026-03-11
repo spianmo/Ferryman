@@ -492,6 +492,55 @@ int ServerApp::HandleCodeAgentSessionReasoningEffort(HttpRequest* req, HttpRespo
   return Json(resp, 200, json{{"ok", true}}.dump());
 }
 
+int ServerApp::HandleCodeAgentSessionCodexFast(HttpRequest* req, HttpResponse* resp) {
+  auto ns = RequireCodeAgentNamespace(req, resp);
+  if (!ns.has_value()) {
+    return resp->status_code;
+  }
+
+  std::string session_id;
+  std::vector<std::string> tail;
+  if (!ParseApiSessionPath(req->path, &session_id, &tail) || tail.size() != 1 || tail[0] != "codex-fast") {
+    return Json(resp, 404, json{{"error", "Not found"}}.dump());
+  }
+
+  const auto payload = ParseJsonOrNull(req->body);
+  if (!payload.has_value() || !payload->is_object()) {
+    return Json(resp, 400, json{{"error", "Invalid body"}}.dump());
+  }
+  auto enabled_it = payload->find("enabled");
+  if (enabled_it == payload->end() || !enabled_it->is_boolean()) {
+    return Json(resp, 400, json{{"error", "Invalid body"}}.dump());
+  }
+  const bool enabled = enabled_it->get<bool>();
+
+  std::string error;
+  if (!codeagent_application_service_.SetCodexFast(*ns, session_id, enabled, &error)) {
+    const std::string normalized_error = util::Trim(error);
+    if (normalized_error == "session is inactive") {
+      return Json(resp, 409, json{{"error", "Session is inactive"}}.dump());
+    }
+    if (normalized_error == "codex fast mode is only supported for codex sessions") {
+      return Json(resp, 400, json{{"error", "Codex fast mode is only supported for Codex sessions"}}.dump());
+    }
+    return Json(resp, 404, json{{"error", normalized_error.empty() ? "Session not found" : normalized_error}}.dump());
+  }
+
+  bool applied_enabled = enabled;
+  auto session = codeagent_application_service_.BuildSessionResponse(*ns, session_id);
+  if (session.has_value() && session->is_object()) {
+    auto session_it = session->find("session");
+    if (session_it != session->end() && session_it->is_object()) {
+      auto enabled_field = session_it->find("codexFast");
+      if (enabled_field != session_it->end() && enabled_field->is_boolean()) {
+        applied_enabled = enabled_field->get<bool>();
+      }
+    }
+  }
+
+  return Json(resp, 200, json{{"ok", true}, {"applied", {{"codexFast", applied_enabled}}}}.dump());
+}
+
 int ServerApp::HandleCodeAgentSessionSlashCommands(HttpRequest* req, HttpResponse* resp) {
   auto ns = RequireCodeAgentNamespace(req, resp);
   if (!ns.has_value()) {

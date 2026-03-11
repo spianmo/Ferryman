@@ -5,7 +5,7 @@ import type { NormalizedMessage } from '@/chat/types'
 import { isCodexContent, isSkippableAgentContent, normalizeAgentRecord } from '@/chat/normalizeAgent'
 import { normalizeUserRecord } from '@/chat/normalizeUser'
 
-export function normalizeDecryptedMessage(message: DecryptedMessage): NormalizedMessage | null {
+export function normalizeDecryptedMessage(message: DecryptedMessage, agentFlavor?: string | null): NormalizedMessage | null {
     const record = unwrapRoleWrappedRecordEnvelope(message.content)
     if (!record) {
         return {
@@ -40,7 +40,7 @@ export function normalizeDecryptedMessage(message: DecryptedMessage): Normalized
         if (isSkippableAgentContent(record.content)) {
             return null
         }
-        const normalized = normalizeAgentRecord(message.id, message.localId, message.createdAt, record.content, record.meta)
+        const normalized = normalizeAgentRecord(message.id, message.localId, message.createdAt, record.content, record.meta, agentFlavor)
         if (!normalized && isCodexContent(record.content)) {
             return null
         }

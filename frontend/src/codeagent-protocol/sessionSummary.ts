@@ -21,6 +21,7 @@ export type SessionSummary = {
     pendingRequestsCount: number
     modelMode?: ModelMode
     reasoningEffort?: ReasoningEffort
+    codexFast?: boolean
 }
 
 export function toSessionSummary(session: Session): SessionSummary {
@@ -50,6 +51,7 @@ export function toSessionSummary(session: Session): SessionSummary {
         todoProgress,
         pendingRequestsCount,
         modelMode: session.modelMode,
-        reasoningEffort: session.reasoningEffort
+        reasoningEffort: session.reasoningEffort,
+        codexFast: session.codexFast
     }
 }

@@ -105,6 +105,10 @@ class CodeAgentApplicationService {
     return codeagent_manager_.SetModelReasoningEffort(ns, session_id, effort, error);
   }
 
+  bool SetCodexFast(const std::string& ns, const std::string& session_id, bool enabled, std::string* error) {
+    return codeagent_manager_.SetCodexFast(ns, session_id, enabled, error);
+  }
+
   nlohmann::json BuildRunnerState(const std::string& ns) const {
     return codeagent_manager_.BuildRunnerState(ns);
   }

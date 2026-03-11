@@ -234,6 +234,9 @@ void CodeAgentModule::Register(HttpService* http_service) const {
   http_service->POST("/api/sessions/{sid}/reasoning-effort", [controller](HttpRequest* req, HttpResponse* resp) {
     return controller->HandleCodeAgentSessionReasoningEffort(req, resp);
   });
+  http_service->POST("/api/sessions/{sid}/codex-fast", [controller](HttpRequest* req, HttpResponse* resp) {
+    return controller->HandleCodeAgentSessionCodexFast(req, resp);
+  });
   http_service->POST("/api/sessions/{sid}/permissions/{rid}/approve", [controller](HttpRequest* req, HttpResponse* resp) {
     return controller->HandleCodeAgentSessionPermissionApprove(req, resp);
   });

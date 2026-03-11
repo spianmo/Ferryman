@@ -275,7 +275,8 @@ export function normalizeAgentRecord(
     localId: string | null,
     createdAt: number,
     content: unknown,
-    meta?: unknown
+    meta?: unknown,
+    agentFlavor?: string | null
 ): NormalizedMessage | null {
     if (!isObject(content) || typeof content.type !== 'string') return null
 
@@ -389,6 +390,7 @@ export function normalizeAgentRecord(
         if (!data || typeof data.type !== 'string') return null
 
         if (data.type === 'token_count') {
+            if (agentFlavor === 'claude') return null
             const usageSource = isObject(data.info) ? data.info : data
             const usage = normalizeUsageData(usageSource)
             if (!usage) return null

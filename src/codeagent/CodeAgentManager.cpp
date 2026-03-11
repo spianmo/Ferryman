@@ -58,6 +58,13 @@ std::string MakeCodexObjectId() {
   return "codex-" + util::RandomHex(18);
 }
 
+std::string MakeCodexBodyLocalId(std::uint64_t generation, const std::string& body_id) {
+  if (body_id.empty()) {
+    return {};
+  }
+  return "codex-body:" + std::to_string(generation) + ":" + body_id;
+}
+
 std::optional<std::string> JsonFirstString(const nlohmann::json& object, std::initializer_list<const char*> keys) {
   if (!object.is_object()) {
     return std::nullopt;
@@ -99,6 +106,24 @@ const nlohmann::json* JsonObjectField(const nlohmann::json& object, const char* 
     return nullptr;
   }
   return &(*it);
+}
+
+const nlohmann::json* FindCodexMessageData(const nlohmann::json& message_content) {
+  if (!message_content.is_object()) {
+    return nullptr;
+  }
+  const nlohmann::json* wrapped_content = JsonObjectField(message_content, "content");
+  if (wrapped_content == nullptr || !wrapped_content->is_object()) {
+    return nullptr;
+  }
+  if (JsonFirstString(*wrapped_content, {"type"}).value_or("") != "codex") {
+    return nullptr;
+  }
+  const nlohmann::json* data = JsonObjectField(*wrapped_content, "data");
+  if (data == nullptr || !data->is_object()) {
+    return nullptr;
+  }
+  return data;
 }
 
 std::optional<std::string> ExtractCallId(const nlohmann::json& object) {
@@ -725,8 +750,11 @@ nlohmann::json CodeAgentManager::BuildSessionSummaryJsonLocked(const SessionReco
       {"pendingRequestsCount", pending_requests_count},
       {"modelMode", session.model_mode},
   };
-  if (session.flavor == "codex" && !session.model_reasoning_effort.empty()) {
-    summary["reasoningEffort"] = session.model_reasoning_effort;
+  if (session.flavor == "codex") {
+    summary["codexFast"] = session.codex_fast;
+    if (!session.model_reasoning_effort.empty()) {
+      summary["reasoningEffort"] = session.model_reasoning_effort;
+    }
   }
   return summary;
 }
@@ -776,8 +804,11 @@ nlohmann::json CodeAgentManager::BuildSessionJsonLocked(const SessionRecord& ses
       {"modelMode", session.model_mode},
       {"permissionAllowTools", SerializePermissionAllowTools(session.permission_allow_tools)},
   };
-  if (session.flavor == "codex" && !session.model_reasoning_effort.empty()) {
-    result["reasoningEffort"] = session.model_reasoning_effort;
+  if (session.flavor == "codex") {
+    result["codexFast"] = session.codex_fast;
+    if (!session.model_reasoning_effort.empty()) {
+      result["reasoningEffort"] = session.model_reasoning_effort;
+    }
   }
   return result;
 }
@@ -785,7 +816,8 @@ nlohmann::json CodeAgentManager::BuildSessionJsonLocked(const SessionRecord& ses
 void CodeAgentManager::ApplySessionRuntimeConfigLocked(SessionRecord& session,
                                                        const std::optional<std::string>& permission_mode,
                                                        const std::optional<std::string>& model_mode,
-                                                       const std::optional<std::string>& reasoning_effort) {
+                                                       const std::optional<std::string>& reasoning_effort,
+                                                       const std::optional<bool>& codex_fast) {
   bool updated = false;
   if (permission_mode.has_value()) {
     session.permission_mode = *permission_mode;
@@ -797,6 +829,10 @@ void CodeAgentManager::ApplySessionRuntimeConfigLocked(SessionRecord& session,
   }
   if (reasoning_effort.has_value()) {
     session.model_reasoning_effort = *reasoning_effort;
+    updated = true;
+  }
+  if (codex_fast.has_value()) {
+    session.codex_fast = *codex_fast;
     updated = true;
   }
   if (updated) {
@@ -1172,6 +1208,9 @@ bool CodeAgentManager::EmitCodexBodyMessage(const std::string& session_id, std::
   std::optional<std::string> title_change;
   bool has_title_signal = false;
   const auto body_type = JsonFirstString(normalized, {"type"});
+  const bool streamable_body = body_type.has_value() && (*body_type == "message" || *body_type == "reasoning");
+  const std::string body_local_id =
+      streamable_body ? MakeCodexBodyLocalId(generation, JsonFirstString(normalized, {"id"}).value_or("")) : std::string();
   if (body_type.has_value() && *body_type == "tool-call") {
     auto tool_name = JsonFirstString(normalized, {"name"});
     if (tool_name.has_value() && IsChangeTitleToolName(*tool_name)) {
@@ -1553,14 +1592,44 @@ bool CodeAgentManager::EmitCodexBodyMessage(const std::string& session_id, std::
         {"content", {
                         {"type", "codex"},
                         {"data", normalized},
-                    }},
+        }},
         {"meta", {{"sentFrom", "cli"}}},
     };
     bool inserted_new = false;
-    const MessageRecord message =
-        UpsertMessageLocked(session, std::move(content), "", /*dedupe_by_local_id=*/false, &inserted_new);
+    MessageRecord message;
+    if (!body_local_id.empty()) {
+      auto existing = std::find_if(session.messages.begin(), session.messages.end(),
+                                   [&body_local_id](const MessageRecord& item) {
+                                     return item.local_id == body_local_id;
+                                   });
+      if (existing == session.messages.end()) {
+        const std::string body_id = JsonFirstString(normalized, {"id"}).value_or("");
+        const std::string normalized_type = body_type.value_or("");
+        if (!body_id.empty()) {
+          existing = std::find_if(session.messages.begin(), session.messages.end(),
+                                  [&body_id, &normalized_type](const MessageRecord& item) {
+                                    const nlohmann::json* data = FindCodexMessageData(item.content);
+                                    if (data == nullptr) {
+                                      return false;
+                                    }
+                                    return JsonFirstString(*data, {"type"}).value_or("") == normalized_type &&
+                                           JsonFirstString(*data, {"id"}).value_or("") == body_id;
+                                  });
+        }
+      }
+      if (existing != session.messages.end()) {
+        existing->content = content;
+        existing->local_id = body_local_id;
+        message = *existing;
+      } else {
+        message = UpsertMessageLocked(session, std::move(content), body_local_id,
+                                      /*dedupe_by_local_id=*/false, &inserted_new);
+      }
+    } else {
+      message = UpsertMessageLocked(session, std::move(content), "", /*dedupe_by_local_id=*/false, &inserted_new);
+    }
     (void)inserted_new;
-    session.updated_at_ms = message.created_at_ms;
+    session.updated_at_ms = NowMs();
 
     PublishMessageReceivedLocked(session, message);
   }

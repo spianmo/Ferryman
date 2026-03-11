@@ -77,6 +77,7 @@ class CodeAgentManager {
                     std::string* error);
   bool SetModelReasoningEffort(const std::string& ns, const std::string& session_id, const std::string& effort,
                                std::string* error);
+  bool SetCodexFast(const std::string& ns, const std::string& session_id, bool enabled, std::string* error);
 
   nlohmann::json BuildRunnerState(const std::string& ns) const;
 
@@ -113,6 +114,7 @@ class CodeAgentManager {
     std::string permission_mode = "default";
     std::string model_mode = "default";
     std::string model_reasoning_effort;
+    bool codex_fast = false;
     std::string model;
     bool title_initialized = false;
     nlohmann::json agent_state_requests = nlohmann::json::object();
@@ -151,7 +153,8 @@ class CodeAgentManager {
   void ApplySessionRuntimeConfigLocked(SessionRecord& session,
                                        const std::optional<std::string>& permission_mode = std::nullopt,
                                        const std::optional<std::string>& model_mode = std::nullopt,
-                                       const std::optional<std::string>& reasoning_effort = std::nullopt);
+                                       const std::optional<std::string>& reasoning_effort = std::nullopt,
+                                       const std::optional<bool>& codex_fast = std::nullopt);
   MessageRecord UpsertMessageLocked(SessionRecord& session, nlohmann::json content, const std::string& local_id,
                                     bool dedupe_by_local_id, bool* inserted_new);
   void EmitAgentEventMessageLocked(SessionRecord& session, nlohmann::json event_data);

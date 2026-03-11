@@ -16,6 +16,7 @@ export function useSessionActions(
     setPermissionMode: (mode: PermissionMode) => Promise<void>
     setModelMode: (mode: ModelMode) => Promise<void>
     setReasoningEffort: (effort: ReasoningEffort) => Promise<void>
+    setCodexFast: (enabled: boolean) => Promise<void>
     renameSession: (name: string) => Promise<void>
     deleteSession: () => Promise<void>
     isPending: boolean
@@ -28,7 +29,7 @@ export function useSessionActions(
         await queryClient.invalidateQueries({ queryKey: queryKeys.sessions })
     }
 
-    const applySessionPatch = (patch: Partial<Pick<Session, 'permissionMode' | 'modelMode' | 'reasoningEffort'>>) => {
+    const applySessionPatch = (patch: Partial<Pick<Session, 'permissionMode' | 'modelMode' | 'reasoningEffort' | 'codexFast'>>) => {
         if (!sessionId) return
         if (Object.keys(patch).length === 0) return
 
@@ -64,7 +65,8 @@ export function useSessionActions(
             nextSessions[index] = {
                 ...current,
                 modelMode: patch.modelMode ?? current.modelMode,
-                reasoningEffort: patch.reasoningEffort ?? current.reasoningEffort
+                reasoningEffort: patch.reasoningEffort ?? current.reasoningEffort,
+                codexFast: patch.codexFast ?? current.codexFast
             }
             return { ...previous, sessions: nextSessions }
         })
@@ -136,6 +138,22 @@ export function useSessionActions(
         },
     })
 
+    const codexFastMutation = useMutation({
+        mutationFn: async (enabled: boolean) => {
+            if (!api || !sessionId) {
+                throw new Error('Session unavailable')
+            }
+            if (isKnownFlavor(agentFlavor) && agentFlavor !== 'codex') {
+                throw new Error('Codex fast mode is only supported for Codex sessions')
+            }
+            return await api.setCodexFast(sessionId, enabled)
+        },
+        onSuccess: (applied, enabled) => {
+            applySessionPatch({ codexFast: applied.codexFast ?? enabled })
+            void invalidateSession()
+        },
+    })
+
     const renameMutation = useMutation({
         mutationFn: async (name: string) => {
             if (!api || !sessionId) {
@@ -173,6 +191,9 @@ export function useSessionActions(
         setReasoningEffort: async (effort: ReasoningEffort) => {
             await reasoningEffortMutation.mutateAsync(effort)
         },
+        setCodexFast: async (enabled: boolean) => {
+            await codexFastMutation.mutateAsync(enabled)
+        },
         renameSession: renameMutation.mutateAsync,
         deleteSession: deleteMutation.mutateAsync,
         isPending: abortMutation.isPending
@@ -180,6 +201,7 @@ export function useSessionActions(
             || permissionMutation.isPending
             || modelMutation.isPending
             || reasoningEffortMutation.isPending
+            || codexFastMutation.isPending
             || renameMutation.isPending
             || deleteMutation.isPending,
     }

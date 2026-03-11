@@ -746,6 +746,86 @@ std::optional<std::string> ExtractItemId(const nlohmann::json& params) {
   return std::nullopt;
 }
 
+std::string MakeStreamingBodyId(const char* kind, const std::string& item_id) {
+  if (kind == nullptr || item_id.empty()) {
+    return "codex-stream";
+  }
+  return "codex-stream-" + std::string(kind) + "-" + item_id;
+}
+
+constexpr std::string_view kPendingAgentMessageKey = "__pending_agent_message__";
+constexpr std::string_view kPendingReasoningKey = "__pending_reasoning__";
+
+std::string EnsureStreamingKey(std::unordered_map<std::string, std::string>* stream_keys,
+                               const std::string& buffer_key, std::string_view prefix) {
+  if (stream_keys == nullptr || buffer_key.empty()) {
+    return std::string(prefix.empty() ? "stream" : prefix) + "-" + util::RandomHex(12);
+  }
+  auto existing = stream_keys->find(buffer_key);
+  if (existing != stream_keys->end() && !existing->second.empty()) {
+    return existing->second;
+  }
+  std::string generated = std::string(prefix.empty() ? "stream" : prefix) + "-" + util::RandomHex(12);
+  (*stream_keys)[buffer_key] = generated;
+  return generated;
+}
+
+template <typename BufferMap>
+bool MovePendingBuffer(BufferMap* buffers, std::unordered_map<std::string, std::string>* stream_keys,
+                       std::string_view pending_key, const std::string& item_id) {
+  if (buffers == nullptr || item_id.empty()) {
+    return false;
+  }
+  auto pending = buffers->find(std::string(pending_key));
+  if (pending == buffers->end() || pending->second.empty()) {
+    return false;
+  }
+
+  (*buffers)[item_id] = pending->second;
+  buffers->erase(pending);
+
+  if (stream_keys != nullptr) {
+    auto pending_stream = stream_keys->find(std::string(pending_key));
+    if (pending_stream != stream_keys->end()) {
+      (*stream_keys)[item_id] = pending_stream->second;
+      stream_keys->erase(pending_stream);
+    }
+  }
+  return true;
+}
+
+bool StartsWithLocal(std::string_view value, std::string_view prefix) {
+  return prefix.size() <= value.size() && value.compare(0, prefix.size(), prefix) == 0;
+}
+
+void MergeStreamingFragment(std::string* buffer, std::string_view fragment) {
+  if (buffer == nullptr || fragment.empty()) {
+    return;
+  }
+  if (buffer->empty()) {
+    buffer->assign(fragment);
+    return;
+  }
+
+  if (fragment.size() > buffer->size() && StartsWithLocal(fragment, *buffer)) {
+    buffer->assign(fragment);
+    return;
+  }
+  if (buffer->size() > fragment.size() && StartsWithLocal(*buffer, fragment)) {
+    return;
+  }
+
+  const size_t max_overlap = std::min(buffer->size(), fragment.size());
+  for (size_t overlap = max_overlap; overlap > 0; --overlap) {
+    if (buffer->compare(buffer->size() - overlap, overlap, fragment.data(), overlap) == 0) {
+      buffer->append(fragment.substr(overlap));
+      return;
+    }
+  }
+
+  buffer->append(fragment);
+}
+
 std::string JoinStringArray(const nlohmann::json& value) {
   if (value.is_string()) {
     return value.get<std::string>();
@@ -867,9 +947,28 @@ struct AppServerEventConverterState {
   std::unordered_map<std::string, std::string> agent_message_buffers;
   std::unordered_map<std::string, std::string> reasoning_buffers;
   std::unordered_map<std::string, std::string> command_output_buffers;
+  std::unordered_map<std::string, std::string> agent_message_stream_keys;
+  std::unordered_map<std::string, std::string> reasoning_stream_keys;
   std::unordered_map<std::string, nlohmann::json> command_meta;
   std::unordered_map<std::string, nlohmann::json> patch_meta;
 };
+
+bool IsDuplicateCodexWrapperEvent(std::string_view msg_type) {
+  static constexpr std::array<std::string_view, 10> kDuplicatedWrapperEventTypes = {
+      "item_started",
+      "item_completed",
+      "task_started",
+      "task_complete",
+      "turn_aborted",
+      "agent_message_delta",
+      "agent_message_content_delta",
+      "reasoning_content_delta",
+      "agent_reasoning_section_break",
+      "exec_command_output_delta",
+  };
+  return std::find(kDuplicatedWrapperEventTypes.begin(), kDuplicatedWrapperEventTypes.end(), msg_type) !=
+         kDuplicatedWrapperEventTypes.end();
+}
 
 std::vector<nlohmann::json> ConvertAppServerNotification(AppServerEventConverterState* state,
                                                          const std::string& method,
@@ -885,6 +984,9 @@ std::vector<nlohmann::json> ConvertAppServerNotification(AppServerEventConverter
 
     const std::string msg_type = JsonStringValue(msg, {"type"}).value_or("");
     if (msg_type.empty()) {
+      return events;
+    }
+    if (IsDuplicateCodexWrapperEvent(msg_type)) {
       return events;
     }
 
@@ -1010,16 +1112,25 @@ std::vector<nlohmann::json> ConvertAppServerNotification(AppServerEventConverter
   }
 
   if (method == "item/agentMessage/delta") {
-    const std::string item_id = ExtractItemId(params_object).value_or("agent-message");
+    const std::string item_id = ExtractItemId(params_object).value_or(std::string(kPendingAgentMessageKey));
     if (auto delta = JsonStringValue(params_object, {"delta", "text", "message"}); delta.has_value()) {
-      state->agent_message_buffers[item_id] += *delta;
+      std::string& buffered = state->agent_message_buffers[item_id];
+      MergeStreamingFragment(&buffered, *delta);
+      if (!util::Trim(buffered).empty()) {
+        const std::string stream_key = EnsureStreamingKey(&state->agent_message_stream_keys, item_id, "message");
+        events.push_back({
+            {"type", "agent_message"},
+            {"id", MakeStreamingBodyId("message", stream_key)},
+            {"message", buffered},
+        });
+      }
     }
     return events;
   }
   if (method == "item/reasoning/textDelta" || method == "item/reasoning/summaryTextDelta") {
-    const std::string item_id = ExtractItemId(params_object).value_or("reasoning");
+    const std::string item_id = ExtractItemId(params_object).value_or(std::string(kPendingReasoningKey));
     if (auto delta = JsonStringValue(params_object, {"delta", "text", "message"}); delta.has_value()) {
-      state->reasoning_buffers[item_id] += *delta;
+      MergeStreamingFragment(&state->reasoning_buffers[item_id], *delta);
       events.push_back({{"type", "agent_reasoning_delta"}, {"delta", *delta}});
     }
     return events;
@@ -1031,7 +1142,7 @@ std::vector<nlohmann::json> ConvertAppServerNotification(AppServerEventConverter
   if (method == "item/commandExecution/outputDelta") {
     if (auto item_id = ExtractItemId(params_object); item_id.has_value()) {
       if (auto delta = JsonStringValue(params_object, {"delta", "text", "output", "stdout"}); delta.has_value()) {
-        state->command_output_buffers[*item_id] += *delta;
+        MergeStreamingFragment(&state->command_output_buffers[*item_id], *delta);
       }
     }
     return events;
@@ -1053,12 +1164,19 @@ std::vector<nlohmann::json> ConvertAppServerNotification(AppServerEventConverter
 
   if (item_type == "agentmessage") {
     if (method == "item/completed") {
+      MovePendingBuffer(&state->agent_message_buffers, &state->agent_message_stream_keys, kPendingAgentMessageKey,
+                        item_id);
       std::string text = JsonStringValue(item, {"text", "message"}).value_or("");
       if (text.empty()) {
         text = state->agent_message_buffers[item_id];
       }
       if (!text.empty()) {
-        events.push_back({{"type", "agent_message"}, {"message", text}});
+        const std::string stream_key = EnsureStreamingKey(&state->agent_message_stream_keys, item_id, "message");
+        events.push_back({
+            {"type", "agent_message"},
+            {"id", MakeStreamingBodyId("message", stream_key)},
+            {"message", text},
+        });
       }
       state->agent_message_buffers.erase(item_id);
     }
@@ -1067,6 +1185,7 @@ std::vector<nlohmann::json> ConvertAppServerNotification(AppServerEventConverter
 
   if (item_type == "reasoning") {
     if (method == "item/completed") {
+      MovePendingBuffer(&state->reasoning_buffers, &state->reasoning_stream_keys, kPendingReasoningKey, item_id);
       std::string text = JsonStringValue(item, {"text", "message"}).value_or("");
       if (text.empty()) {
         text = state->reasoning_buffers[item_id];
@@ -1709,6 +1828,9 @@ nlohmann::json CodeAgentManager::SessionRunnerState::BuildThreadStartParamsLocke
   if (!util::Trim(session.model).empty()) {
     params["model"] = session.model;
   }
+  if (session.codex_fast) {
+    params["serviceTier"] = "fast";
+  }
   nlohmann::json config = nlohmann::json::object();
   config["developer_instructions"] = title_instructions;
   const auto title_mcp_script = ResolveCodexTitleMcpScriptPath(manager->state_file_path_);
@@ -1738,6 +1860,9 @@ nlohmann::json CodeAgentManager::SessionRunnerState::BuildTurnStartParamsLocked(
   }
   if (!session.model_reasoning_effort.empty()) {
     params["effort"] = ResolveCodexAppServerReasoningEffort(session.model_reasoning_effort);
+  }
+  if (session.codex_fast) {
+    params["serviceTier"] = "fast";
   }
   return params;
 }
@@ -3038,6 +3163,11 @@ std::string CodeAgentManager::BuildAgentCommand(const SessionRecord& session, co
   } else if (session.flavor == "claude") {
     const bool allow_default_override = permission_mode == "default";
     AppendCommandOption(&cmd_template, "--permission-mode", permission_mode, allow_default_override);
+    const bool uses_stream_json = cmd_template.find("--output-format stream-json") != std::string::npos ||
+                                  cmd_template.find("--output-format=stream-json") != std::string::npos;
+    if (uses_stream_json && !HasCommandOption(cmd_template, "--include-partial-messages")) {
+      AppendCommandOption(&cmd_template, "--include-partial-messages", "");
+    }
 
     if (!session.title_initialized) {
       if (!HasCommandOption(cmd_template, "--append-system-prompt")) {

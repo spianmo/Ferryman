@@ -177,6 +177,22 @@ export function useHappyRuntime(props: {
     attachmentAdapter?: AttachmentAdapter
     allowSendWhenInactive?: boolean
 }) {
+    const dedupeThreadMessages = useCallback((messages: readonly ThreadMessageLike[]): ThreadMessageLike[] => {
+        if (messages.length <= 1) return [...messages]
+
+        const byId = new Map<string, ThreadMessageLike>()
+        const order: string[] = []
+
+        for (const message of messages) {
+            if (!byId.has(message.id)) {
+                order.push(message.id)
+            }
+            byId.set(message.id, message)
+        }
+
+        return order.map((id) => byId.get(id)).filter((message): message is ThreadMessageLike => Boolean(message))
+    }, [])
+
     // Use cached message converter for performance optimization
     // This prevents re-converting all messages on every render
     const convertedMessages = useExternalMessageConverter<ChatBlock>({
@@ -184,6 +200,11 @@ export function useHappyRuntime(props: {
         messages: props.blocks as ChatBlock[],
         isRunning: props.session.thinking,
     })
+
+    const stableMessages = useMemo(
+        () => dedupeThreadMessages(convertedMessages),
+        [convertedMessages, dedupeThreadMessages]
+    )
 
     const onNew = useCallback(async (message: AppendMessage) => {
         const { text, attachments } = extractMessageContent(message)
@@ -200,7 +221,7 @@ export function useHappyRuntime(props: {
     const adapter = useMemo(() => ({
         isDisabled: props.isSending || (!props.session.active && !props.allowSendWhenInactive),
         isRunning: props.session.thinking,
-        messages: convertedMessages,
+        messages: stableMessages,
         onNew,
         onCancel,
         adapters: props.attachmentAdapter ? { attachments: props.attachmentAdapter } : undefined,
@@ -210,7 +231,7 @@ export function useHappyRuntime(props: {
         props.isSending,
         props.allowSendWhenInactive,
         props.session.thinking,
-        convertedMessages,
+        stableMessages,
         onNew,
         onCancel,
         props.attachmentAdapter

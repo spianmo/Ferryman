@@ -90,6 +90,7 @@ function getConnectionStatus(
 function getContextWarning(
     contextSize: number,
     maxContextSize: number,
+    showTokenCounts: boolean,
     t: (key: string, params?: Record<string, string | number>) => string
 ): { text: string; color: string } | null {
     if (!Number.isFinite(contextSize) || !Number.isFinite(maxContextSize) || maxContextSize <= 0) return null
@@ -102,7 +103,9 @@ function getContextWarning(
     const percent = Math.round(percentageRemaining)
     const used = usedTokens.toLocaleString()
     const limit = limitTokens.toLocaleString()
-    const text = t('misc.percentLeftWithTokens', { percent, used, limit })
+    const text = showTokenCounts
+        ? t('misc.percentLeftWithTokens', { percent, used, limit })
+        : t('misc.percentLeft', { percent })
 
     if (percentageRemaining <= 5) {
         return { text, color: 'text-red-500' }
@@ -123,6 +126,7 @@ export function StatusBar(props: {
     modelMode?: ModelMode
     permissionMode?: PermissionMode
     agentFlavor?: string | null
+    codexFast?: boolean
     voiceStatus?: ConversationStatus
 }) {
     const { t } = useTranslation()
@@ -139,15 +143,16 @@ export function StatusBar(props: {
                 model: props.model,
                 flavor: props.agentFlavor
             })
+            const isClaudeSession = props.agentFlavor === 'claude'
 
-            if (typeof props.contextWindow === 'number' && Number.isFinite(props.contextWindow) && props.contextWindow > 0) {
+            if (!isClaudeSession && typeof props.contextWindow === 'number' && Number.isFinite(props.contextWindow) && props.contextWindow > 0) {
                 const effectiveWindow = configuredBudget && configuredBudget > 0
                     ? Math.min(props.contextWindow, configuredBudget)
                     : props.contextWindow
-                return getContextWarning(props.contextSize, effectiveWindow, t)
+                return getContextWarning(props.contextSize, effectiveWindow, true, t)
             }
             if (!configuredBudget) return null
-            return getContextWarning(props.contextSize, configuredBudget, t)
+            return getContextWarning(props.contextSize, configuredBudget, true, t)
         },
         [props.contextSize, props.contextWindow, props.modelMode, props.model, props.agentFlavor, t]
     )
@@ -162,6 +167,12 @@ export function StatusBar(props: {
     const permissionModeLabel = displayPermissionMode ? getPermissionModeLabel(displayPermissionMode) : null
     const permissionModeTone = displayPermissionMode ? getPermissionModeTone(displayPermissionMode) : null
     const permissionModeColor = permissionModeTone ? PERMISSION_TONE_CLASSES[permissionModeTone] : 'text-[var(--app-hint)]'
+
+    const codexFastEnabled = props.agentFlavor === 'codex' ? (props.codexFast ?? false) : null
+    const codexFastLabel = codexFastEnabled === null
+        ? null
+        : (codexFastEnabled ? t('misc.codexFastOn') : t('misc.codexFastOff'))
+    const codexFastColor = codexFastEnabled ? 'text-[var(--app-link)]' : 'text-[var(--app-hint)]'
 
     return (
         <div className="flex items-center justify-between px-2 pb-1">
@@ -181,11 +192,18 @@ export function StatusBar(props: {
                 ) : null}
             </div>
 
-            {displayPermissionMode ? (
-                <span className={`text-xs ${permissionModeColor}`}>
-                    {permissionModeLabel}
-                </span>
-            ) : null}
+            <div className="flex items-center gap-3">
+                {codexFastLabel ? (
+                    <span className={`text-xs ${codexFastColor}`}>
+                        {codexFastLabel}
+                    </span>
+                ) : null}
+                {displayPermissionMode ? (
+                    <span className={`text-xs ${permissionModeColor}`}>
+                        {permissionModeLabel}
+                    </span>
+                ) : null}
+            </div>
         </div>
     )
 }

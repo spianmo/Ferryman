@@ -27,6 +27,86 @@ std::string MakeCallId() {
   return "call-" + util::RandomHex(18);
 }
 
+std::string MakeStreamingBodyId(const char* kind, const std::string& item_id) {
+  if (kind == nullptr || item_id.empty()) {
+    return MakeCodexObjectId();
+  }
+  return "codex-stream-" + std::string(kind) + "-" + item_id;
+}
+
+constexpr std::string_view kPendingAgentMessageKey = "__pending_agent_message__";
+constexpr std::string_view kPendingReasoningKey = "__pending_reasoning__";
+
+std::string EnsureStreamingKey(std::unordered_map<std::string, std::string>* stream_keys,
+                               const std::string& buffer_key, std::string_view prefix) {
+  if (stream_keys == nullptr || buffer_key.empty()) {
+    return std::string(prefix.empty() ? "stream" : prefix) + "-" + util::RandomHex(12);
+  }
+  auto existing = stream_keys->find(buffer_key);
+  if (existing != stream_keys->end() && !existing->second.empty()) {
+    return existing->second;
+  }
+  std::string generated = std::string(prefix.empty() ? "stream" : prefix) + "-" + util::RandomHex(12);
+  (*stream_keys)[buffer_key] = generated;
+  return generated;
+}
+
+template <typename BufferMap>
+bool MovePendingBuffer(BufferMap* buffers, std::unordered_map<std::string, std::string>* stream_keys,
+                       std::string_view pending_key, const std::string& item_id) {
+  if (buffers == nullptr || item_id.empty()) {
+    return false;
+  }
+  auto pending = buffers->find(std::string(pending_key));
+  if (pending == buffers->end() || pending->second.empty()) {
+    return false;
+  }
+
+  (*buffers)[item_id] = pending->second;
+  buffers->erase(pending);
+
+  if (stream_keys != nullptr) {
+    auto pending_stream = stream_keys->find(std::string(pending_key));
+    if (pending_stream != stream_keys->end()) {
+      (*stream_keys)[item_id] = pending_stream->second;
+      stream_keys->erase(pending_stream);
+    }
+  }
+  return true;
+}
+
+bool StartsWith(std::string_view value, std::string_view prefix) {
+  return prefix.size() <= value.size() && value.compare(0, prefix.size(), prefix) == 0;
+}
+
+void MergeStreamingFragment(std::string* buffer, std::string_view fragment) {
+  if (buffer == nullptr || fragment.empty()) {
+    return;
+  }
+  if (buffer->empty()) {
+    buffer->assign(fragment);
+    return;
+  }
+
+  if (fragment.size() > buffer->size() && StartsWith(fragment, *buffer)) {
+    buffer->assign(fragment);
+    return;
+  }
+  if (buffer->size() > fragment.size() && StartsWith(*buffer, fragment)) {
+    return;
+  }
+
+  const size_t max_overlap = std::min(buffer->size(), fragment.size());
+  for (size_t overlap = max_overlap; overlap > 0; --overlap) {
+    if (buffer->compare(buffer->size() - overlap, overlap, fragment.data(), overlap) == 0) {
+      buffer->append(fragment.substr(overlap));
+      return;
+    }
+  }
+
+  buffer->append(fragment);
+}
+
 std::optional<std::string> JsonFirstString(const nlohmann::json& object, std::initializer_list<const char*> keys) {
   if (!object.is_object()) {
     return std::nullopt;
@@ -271,6 +351,164 @@ nlohmann::json CodexReasoningBody(const std::string& text) {
       {"message", text},
       {"id", MakeCodexObjectId()},
   };
+}
+
+nlohmann::json CodexMessageBodyWithId(const std::string& text, const std::string& body_id) {
+  return {
+      {"type", "message"},
+      {"message", text},
+      {"id", body_id.empty() ? MakeCodexObjectId() : body_id},
+  };
+}
+
+nlohmann::json CodexReasoningBodyWithId(const std::string& text, const std::string& body_id) {
+  return {
+      {"type", "reasoning"},
+      {"message", text},
+      {"id", body_id.empty() ? MakeCodexObjectId() : body_id},
+  };
+}
+
+nlohmann::json CodexTokenCountBody(const nlohmann::json& info);
+nlohmann::json ExtractTokenUsageInfo(const nlohmann::json& params);
+
+std::string ClaudeStreamBufferKey(const std::string& message_id, int index, std::string_view kind) {
+  std::string key = "claude:";
+  key += message_id.empty() ? std::string("message") : message_id;
+  key += ":";
+  key += kind.empty() ? std::string("block") : std::string(kind);
+  key += ":";
+  key += std::to_string(std::max(index, 0));
+  return key;
+}
+
+void EmitClaudeTextFragment(AgentOutputParseState* state, const std::string& message_id, int index,
+                            std::string_view fragment, std::vector<nlohmann::json>* out_bodies) {
+  if (state == nullptr || out_bodies == nullptr || fragment.empty()) {
+    return;
+  }
+  const std::string buffer_key = ClaudeStreamBufferKey(message_id, index, "text");
+  std::string& buffered = state->agent_message_buffers[buffer_key];
+  MergeStreamingFragment(&buffered, fragment);
+  if (!util::Trim(buffered).empty()) {
+    const std::string stream_key = EnsureStreamingKey(&state->agent_message_stream_keys, buffer_key, "message");
+    out_bodies->push_back(CodexMessageBodyWithId(buffered, MakeStreamingBodyId("message", stream_key)));
+  }
+}
+
+void EmitClaudeThinkingFragment(AgentOutputParseState* state, const std::string& message_id, int index,
+                                std::string_view fragment, std::vector<nlohmann::json>* out_bodies) {
+  if (state == nullptr || out_bodies == nullptr || fragment.empty()) {
+    return;
+  }
+  const std::string buffer_key = ClaudeStreamBufferKey(message_id, index, "thinking");
+  std::string& buffered = state->reasoning_buffers[buffer_key];
+  MergeStreamingFragment(&buffered, fragment);
+  if (!util::Trim(buffered).empty()) {
+    const std::string stream_key = EnsureStreamingKey(&state->reasoning_stream_keys, buffer_key, "reasoning");
+    out_bodies->push_back(CodexReasoningBodyWithId(buffered, MakeStreamingBodyId("reasoning", stream_key)));
+  }
+}
+
+void ClearStreamingBuffer(std::unordered_map<std::string, std::string>* buffers,
+                          std::unordered_map<std::string, std::string>* stream_keys, const std::string& buffer_key) {
+  if (buffers != nullptr) {
+    buffers->erase(buffer_key);
+  }
+  if (stream_keys != nullptr) {
+    stream_keys->erase(buffer_key);
+  }
+}
+
+bool HandleClaudeStreamEvent(const nlohmann::json& event, AgentOutputParseState* state,
+                             std::vector<nlohmann::json>* out_bodies) {
+  if (!event.is_object() || state == nullptr || out_bodies == nullptr) {
+    return false;
+  }
+
+  const std::string event_type = JsonFirstString(event, {"type"}).value_or("");
+  if (event_type.empty()) {
+    return true;
+  }
+
+  if (event_type == "message_start") {
+    const nlohmann::json* message = JsonObjectField(event, "message");
+    state->claude_active_message_id =
+        message == nullptr ? std::string() : JsonFirstString(*message, {"id"}).value_or("");
+    state->claude_block_types.clear();
+    if (message != nullptr) {
+      const nlohmann::json token_info = ExtractTokenUsageInfo(*message);
+      if (token_info.is_object() && !token_info.empty()) {
+        out_bodies->push_back(CodexTokenCountBody(token_info));
+      }
+    }
+    return true;
+  }
+
+  if (event_type == "content_block_start") {
+    const int index = JsonFirstInt(event, {"index"}).value_or(0);
+    const nlohmann::json* content_block = JsonObjectField(event, "content_block");
+    if (content_block == nullptr) {
+      return true;
+    }
+
+    const std::string block_type = JsonFirstString(*content_block, {"type"}).value_or("");
+    state->claude_block_types[index] = block_type;
+
+    if (block_type == "text") {
+      auto text = JsonFirstString(*content_block, {"text"});
+      if (text.has_value()) {
+        EmitClaudeTextFragment(state, state->claude_active_message_id, index, *text, out_bodies);
+      }
+    } else if (block_type == "thinking") {
+      auto thinking = JsonFirstString(*content_block, {"thinking", "text"});
+      if (thinking.has_value()) {
+        EmitClaudeThinkingFragment(state, state->claude_active_message_id, index, *thinking, out_bodies);
+      }
+    }
+    return true;
+  }
+
+  if (event_type == "content_block_delta") {
+    const int index = JsonFirstInt(event, {"index"}).value_or(0);
+    const nlohmann::json* delta = JsonObjectField(event, "delta");
+    if (delta == nullptr) {
+      return true;
+    }
+
+    std::string delta_type = JsonFirstString(*delta, {"type"}).value_or("");
+    if (delta_type.empty()) {
+      delta_type = state->claude_block_types[index];
+    }
+
+    if (delta_type == "text" || delta_type == "text_delta") {
+      auto text = JsonFirstString(*delta, {"text"});
+      if (text.has_value()) {
+        EmitClaudeTextFragment(state, state->claude_active_message_id, index, *text, out_bodies);
+      }
+    } else if (delta_type == "thinking" || delta_type == "thinking_delta") {
+      auto thinking = JsonFirstString(*delta, {"thinking", "text"});
+      if (thinking.has_value()) {
+        EmitClaudeThinkingFragment(state, state->claude_active_message_id, index, *thinking, out_bodies);
+      }
+    }
+    return true;
+  }
+
+  if (event_type == "message_delta") {
+    const nlohmann::json token_info = ExtractTokenUsageInfo(event);
+    if (token_info.is_object() && !token_info.empty()) {
+      out_bodies->push_back(CodexTokenCountBody(token_info));
+    }
+    return true;
+  }
+
+  if (event_type == "message_stop") {
+    state->claude_block_types.clear();
+    return true;
+  }
+
+  return true;
 }
 
 nlohmann::json CodexToolCallBody(const std::string& name, const std::string& call_id, const nlohmann::json& input) {
@@ -643,8 +881,14 @@ bool HandleNotificationJson(const std::string& method, const nlohmann::json& par
   if (method == "item/agentMessage/delta") {
     auto item_id = ExtractItemId(params);
     auto delta = JsonFirstString(params, {"delta", "text", "message"});
-    if (item_id.has_value() && delta.has_value()) {
-      state->agent_message_buffers[*item_id] += *delta;
+    if (delta.has_value()) {
+      const std::string buffer_key = item_id.value_or(std::string(kPendingAgentMessageKey));
+      std::string& buffered = state->agent_message_buffers[buffer_key];
+      MergeStreamingFragment(&buffered, *delta);
+      if (!util::Trim(buffered).empty()) {
+        const std::string stream_key = EnsureStreamingKey(&state->agent_message_stream_keys, buffer_key, "message");
+        out_bodies->push_back(CodexMessageBodyWithId(buffered, MakeStreamingBodyId("message", stream_key)));
+      }
     }
     return true;
   }
@@ -652,12 +896,15 @@ bool HandleNotificationJson(const std::string& method, const nlohmann::json& par
   if (method == "item/reasoning/textDelta" || method == "item/reasoning/summaryTextDelta") {
     auto item_id = ExtractItemId(params);
     auto delta = JsonFirstString(params, {"delta", "text", "message"});
-    if (!item_id.has_value()) {
-      item_id = std::string("reasoning");
-    }
     if (delta.has_value()) {
-      state->reasoning_buffers[*item_id] += *delta;
-      state->live_reasoning_buffer += *delta;
+      const std::string buffer_key = item_id.value_or(std::string(kPendingReasoningKey));
+      std::string& buffered = state->reasoning_buffers[buffer_key];
+      MergeStreamingFragment(&buffered, *delta);
+      MergeStreamingFragment(&state->live_reasoning_buffer, *delta);
+      if (!util::Trim(buffered).empty()) {
+        const std::string stream_key = EnsureStreamingKey(&state->reasoning_stream_keys, buffer_key, "reasoning");
+        out_bodies->push_back(CodexReasoningBodyWithId(buffered, MakeStreamingBodyId("reasoning", stream_key)));
+      }
     }
     return true;
   }
@@ -749,7 +996,7 @@ bool HandleNotificationJson(const std::string& method, const nlohmann::json& par
     auto item_id = ExtractItemId(params);
     auto delta = JsonFirstString(params, {"delta", "text", "output", "stdout"});
     if (item_id.has_value() && delta.has_value()) {
-      state->command_output_buffers[*item_id] += *delta;
+      MergeStreamingFragment(&state->command_output_buffers[*item_id], *delta);
     }
     return true;
   }
@@ -817,6 +1064,8 @@ bool HandleNotificationJson(const std::string& method, const nlohmann::json& par
       if (!completed) {
         return true;
       }
+      MovePendingBuffer(&state->agent_message_buffers, &state->agent_message_stream_keys, kPendingAgentMessageKey,
+                        *item_id);
       auto text = ExtractItemText(item);
       if (!text.has_value()) {
         auto it = state->agent_message_buffers.find(*item_id);
@@ -825,7 +1074,8 @@ bool HandleNotificationJson(const std::string& method, const nlohmann::json& par
         }
       }
       if (text.has_value() && !text->empty()) {
-        out_bodies->push_back(CodexMessageBody(*text));
+        const std::string stream_key = EnsureStreamingKey(&state->agent_message_stream_keys, *item_id, "message");
+        out_bodies->push_back(CodexMessageBodyWithId(*text, MakeStreamingBodyId("message", stream_key)));
       }
       state->agent_message_buffers.erase(*item_id);
       return true;
@@ -835,6 +1085,7 @@ bool HandleNotificationJson(const std::string& method, const nlohmann::json& par
       if (!completed) {
         return true;
       }
+      MovePendingBuffer(&state->reasoning_buffers, &state->reasoning_stream_keys, kPendingReasoningKey, *item_id);
       auto text = ExtractReasoningText(item);
       if (!text.has_value()) {
         auto it = state->reasoning_buffers.find(*item_id);
@@ -843,7 +1094,8 @@ bool HandleNotificationJson(const std::string& method, const nlohmann::json& par
         }
       }
       if (text.has_value() && !text->empty()) {
-        out_bodies->push_back(CodexReasoningBody(*text));
+        const std::string stream_key = EnsureStreamingKey(&state->reasoning_stream_keys, *item_id, "reasoning");
+        out_bodies->push_back(CodexReasoningBodyWithId(*text, MakeStreamingBodyId("reasoning", stream_key)));
       }
       state->reasoning_buffers.erase(*item_id);
       state->live_reasoning_buffer.clear();
@@ -1041,6 +1293,14 @@ bool ParseAgentOutputJson(const nlohmann::json& payload, AgentOutputParseState* 
     return true;
   }
 
+  if (type == "stream_event") {
+    const nlohmann::json* event = JsonObjectField(payload, "event");
+    if (event != nullptr) {
+      return HandleClaudeStreamEvent(*event, state, out_bodies);
+    }
+    return true;
+  }
+
   if (type == "message") {
     auto message = JsonFirstString(payload, {"message"});
     if (!message.has_value()) {
@@ -1116,6 +1376,9 @@ bool ParseAgentOutputJson(const nlohmann::json& payload, AgentOutputParseState* 
 
   if (type == "assistant") {
     const nlohmann::json* message = JsonObjectField(payload, "message");
+    const std::string assistant_message_id = message == nullptr
+                                                 ? state->claude_active_message_id
+                                                 : JsonFirstString(*message, {"id"}).value_or(state->claude_active_message_id);
     nlohmann::json token_info = nlohmann::json::object();
     if (message != nullptr) {
       token_info = ExtractTokenUsageInfo(*message);
@@ -1131,7 +1394,8 @@ bool ParseAgentOutputJson(const nlohmann::json& payload, AgentOutputParseState* 
     if (message != nullptr) {
       auto content_it = message->find("content");
       if (content_it != message->end() && content_it->is_array()) {
-        for (const auto& block : *content_it) {
+        for (size_t index = 0; index < content_it->size(); ++index) {
+          const auto& block = (*content_it)[index];
           if (!block.is_object()) {
             continue;
           }
@@ -1139,7 +1403,10 @@ bool ParseAgentOutputJson(const nlohmann::json& payload, AgentOutputParseState* 
           if (block_type == "text") {
             auto text = JsonFirstString(block, {"text"});
             if (text.has_value() && !text->empty()) {
-              out_bodies->push_back(CodexMessageBody(*text));
+              const std::string buffer_key = ClaudeStreamBufferKey(assistant_message_id, static_cast<int>(index), "text");
+              const std::string stream_key = EnsureStreamingKey(&state->agent_message_stream_keys, buffer_key, "message");
+              out_bodies->push_back(CodexMessageBodyWithId(*text, MakeStreamingBodyId("message", stream_key)));
+              ClearStreamingBuffer(&state->agent_message_buffers, &state->agent_message_stream_keys, buffer_key);
               emitted = true;
             }
             continue;
@@ -1147,7 +1414,10 @@ bool ParseAgentOutputJson(const nlohmann::json& payload, AgentOutputParseState* 
           if (block_type == "thinking") {
             auto thinking = JsonFirstString(block, {"thinking", "text"});
             if (thinking.has_value() && !thinking->empty()) {
-              out_bodies->push_back(CodexReasoningBody(*thinking));
+              const std::string buffer_key = ClaudeStreamBufferKey(assistant_message_id, static_cast<int>(index), "thinking");
+              const std::string stream_key = EnsureStreamingKey(&state->reasoning_stream_keys, buffer_key, "reasoning");
+              out_bodies->push_back(CodexReasoningBodyWithId(*thinking, MakeStreamingBodyId("reasoning", stream_key)));
+              ClearStreamingBuffer(&state->reasoning_buffers, &state->reasoning_stream_keys, buffer_key);
               emitted = true;
             }
             continue;
@@ -1169,7 +1439,14 @@ bool ParseAgentOutputJson(const nlohmann::json& payload, AgentOutputParseState* 
     if (!emitted) {
       auto text = TryParseCursorAssistantText(payload);
       if (text.has_value() && !text->empty()) {
-        out_bodies->push_back(CodexMessageBody(*text));
+        if (!assistant_message_id.empty()) {
+          const std::string buffer_key = ClaudeStreamBufferKey(assistant_message_id, 0, "text");
+          const std::string stream_key = EnsureStreamingKey(&state->agent_message_stream_keys, buffer_key, "message");
+          out_bodies->push_back(CodexMessageBodyWithId(*text, MakeStreamingBodyId("message", stream_key)));
+          ClearStreamingBuffer(&state->agent_message_buffers, &state->agent_message_stream_keys, buffer_key);
+        } else {
+          out_bodies->push_back(CodexMessageBody(*text));
+        }
       }
     }
     return true;
@@ -1284,7 +1561,18 @@ bool ParseAgentOutputJson(const nlohmann::json& payload, AgentOutputParseState* 
   if (type == "agent_message") {
     auto text = JsonFirstString(payload, {"message", "text"});
     if (text.has_value() && !text->empty()) {
-      out_bodies->push_back(CodexMessageBody(*text));
+      std::string body_id = JsonFirstString(payload, {"id"}).value_or("");
+      if (body_id.empty()) {
+        if (auto item_id = ExtractItemId(payload); item_id.has_value()) {
+          body_id = MakeStreamingBodyId("message", *item_id);
+        }
+      }
+      nlohmann::json body = {
+          {"type", "message"},
+          {"message", *text},
+      };
+      body["id"] = body_id.empty() ? MakeCodexObjectId() : body_id;
+      out_bodies->push_back(std::move(body));
     }
     return true;
   }
@@ -1292,7 +1580,7 @@ bool ParseAgentOutputJson(const nlohmann::json& payload, AgentOutputParseState* 
   if (type == "agent_reasoning_delta") {
     auto delta = JsonFirstString(payload, {"delta", "text", "message"});
     if (delta.has_value()) {
-      state->live_reasoning_buffer += *delta;
+      MergeStreamingFragment(&state->live_reasoning_buffer, *delta);
       if (!state->reasoning_tool_started) {
         std::string title;
         std::string content;
@@ -1557,19 +1845,29 @@ void DrainBufferedBodies(AgentOutputParseState* state, std::vector<nlohmann::jso
     return;
   }
 
-  for (const auto& [_, text] : state->agent_message_buffers) {
+  for (const auto& [item_id, text] : state->agent_message_buffers) {
     if (!util::Trim(text).empty()) {
-      out_bodies->push_back(CodexMessageBody(text));
+      const auto stream_it = state->agent_message_stream_keys.find(item_id);
+      const std::string body_key =
+          stream_it != state->agent_message_stream_keys.end() && !stream_it->second.empty() ? stream_it->second : item_id;
+      out_bodies->push_back(CodexMessageBodyWithId(text, MakeStreamingBodyId("message", body_key)));
     }
   }
   state->agent_message_buffers.clear();
+  state->agent_message_stream_keys.clear();
 
-  for (const auto& [_, text] : state->reasoning_buffers) {
+  bool emitted_reasoning_from_buffers = false;
+  for (const auto& [item_id, text] : state->reasoning_buffers) {
     if (!util::Trim(text).empty()) {
-      out_bodies->push_back(CodexReasoningBody(text));
+      const auto stream_it = state->reasoning_stream_keys.find(item_id);
+      const std::string body_key =
+          stream_it != state->reasoning_stream_keys.end() && !stream_it->second.empty() ? stream_it->second : item_id;
+      out_bodies->push_back(CodexReasoningBodyWithId(text, MakeStreamingBodyId("reasoning", body_key)));
+      emitted_reasoning_from_buffers = true;
     }
   }
   state->reasoning_buffers.clear();
+  state->reasoning_stream_keys.clear();
 
   if (!util::Trim(state->live_reasoning_buffer).empty()) {
     if (state->reasoning_tool_started && !state->reasoning_tool_call_id.empty()) {
@@ -1580,7 +1878,7 @@ void DrainBufferedBodies(AgentOutputParseState* state, std::vector<nlohmann::jso
       }
       out_bodies->push_back(CodexToolResultBody(
           state->reasoning_tool_call_id, nlohmann::json{{"content", content}, {"status", "completed"}}));
-    } else {
+    } else if (!emitted_reasoning_from_buffers) {
       out_bodies->push_back(CodexReasoningBody(state->live_reasoning_buffer));
     }
   }

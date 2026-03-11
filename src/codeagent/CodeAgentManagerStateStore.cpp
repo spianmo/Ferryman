@@ -287,6 +287,10 @@ void CodeAgentManager::RestoreStateLocked() {
           parse_string(raw_session.value("model_reasoning_effort", nlohmann::json("")), "");
     }
     session.model_reasoning_effort = policy::NormalizeReasoningEffortValue(session.model_reasoning_effort);
+    session.codex_fast = parse_bool(raw_session.value("codexFast", nlohmann::json(nullptr)), false);
+    if (!session.codex_fast) {
+      session.codex_fast = parse_bool(raw_session.value("codex_fast", nlohmann::json(nullptr)), false);
+    }
     session.model = parse_string(raw_session.value("model", nlohmann::json("")), "");
     session.title_initialized =
         parse_bool(raw_session.value("titleInitialized", nlohmann::json(nullptr)), false);
@@ -329,6 +333,9 @@ void CodeAgentManager::RestoreStateLocked() {
       session.model_reasoning_effort.clear();
     } else if (session.flavor == "codex" && session.model_reasoning_effort.empty()) {
       session.model_reasoning_effort = "medium";
+    }
+    if (session.flavor != "codex") {
+      session.codex_fast = false;
     }
     session.generation = 0;
 
@@ -429,6 +436,7 @@ void CodeAgentManager::PersistStateLocked() {
         {"permissionMode", session->permission_mode},
         {"modelMode", session->model_mode},
         {"reasoningEffort", session->model_reasoning_effort},
+        {"codexFast", session->codex_fast},
         {"model", session->model},
         {"titleInitialized", session->title_initialized},
         {"agentStateRequests",

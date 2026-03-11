@@ -337,6 +337,17 @@ export class ApiClient {
         })
     }
 
+    async setCodexFast(sessionId: string, enabled: boolean): Promise<{ codexFast?: boolean }> {
+        const response = await this.request<{ ok?: boolean; applied?: { codexFast?: boolean } }>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/codex-fast`,
+            {
+                method: 'POST',
+                body: JSON.stringify({ enabled })
+            }
+        )
+        return response.applied ?? { codexFast: enabled }
+    }
+
     async approvePermission(
         sessionId: string,
         requestId: string,

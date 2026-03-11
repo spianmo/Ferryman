@@ -6,6 +6,8 @@ import type { ModelMode } from '@/types/api'
  * These values are fallback defaults for legacy payloads.
  */
 
+const CONTEXT_HEADROOM_TOKENS = 10_000
+
 const CLAUDE_MODEL_CONTEXT_WINDOWS: Record<ModelMode, number> = {
     default: 200_000,
     sonnet: 200_000,
@@ -51,5 +53,5 @@ export function getContextBudgetTokens(options: {
     const mode: ModelMode = options.modelMode ?? 'default'
     const claudeWindow = CLAUDE_MODEL_CONTEXT_WINDOWS[mode]
     if (!claudeWindow) return null
-    return Math.max(1, claudeWindow)
+    return Math.max(1, claudeWindow - CONTEXT_HEADROOM_TOKENS)
 }

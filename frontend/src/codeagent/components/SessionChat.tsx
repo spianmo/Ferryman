@@ -45,7 +45,7 @@ export function SessionChat(props: {
     const blocksByIdRef = useRef<Map<string, ChatBlock>>(new Map())
     const [forceScrollToken, setForceScrollToken] = useState(0)
     const agentFlavor = props.session.metadata?.flavor ?? null
-    const { abortSession, setPermissionMode, setModelMode, setReasoningEffort } = useSessionActions(
+    const { abortSession, setPermissionMode, setModelMode, setReasoningEffort, setCodexFast } = useSessionActions(
         props.api,
         props.session.id,
         agentFlavor
@@ -167,7 +167,7 @@ export function SessionChat(props: {
                 if (cached.normalized) normalized.push(cached.normalized)
                 continue
             }
-            const next = normalizeDecryptedMessage(message)
+            const next = normalizeDecryptedMessage(message, agentFlavor)
             cache.set(message.id, { source: message, normalized: next })
             if (next) normalized.push(next)
         }
@@ -177,7 +177,7 @@ export function SessionChat(props: {
             }
         }
         return normalized
-    }, [props.messages])
+    }, [props.messages, agentFlavor])
 
     const reduced = useMemo(
         () => reduceChatBlocks(normalizedMessages, props.session.agentState),
@@ -226,6 +226,17 @@ export function SessionChat(props: {
             console.error('Failed to set reasoning effort:', e)
         }
     }, [setReasoningEffort, props.onRefresh, haptic])
+
+    const handleCodexFastChange = useCallback(async (enabled: boolean) => {
+        try {
+            await setCodexFast(enabled)
+            haptic.notification('success')
+            props.onRefresh()
+        } catch (e) {
+            haptic.notification('error')
+            console.error('Failed to set Codex fast mode:', e)
+        }
+    }, [setCodexFast, props.onRefresh, haptic])
 
     // Abort handler
     const handleAbort = useCallback(async () => {
@@ -317,6 +328,7 @@ export function SessionChat(props: {
                         modelMode={props.session.modelMode}
                         model={props.session.metadata?.model}
                         reasoningEffort={props.session.reasoningEffort}
+                        codexFast={props.session.codexFast}
                         agentFlavor={agentFlavor}
                         active={props.session.active}
                         allowSendWhenInactive
@@ -327,6 +339,7 @@ export function SessionChat(props: {
                         onPermissionModeChange={handlePermissionModeChange}
                         onModelModeChange={handleModelModeChange}
                         onReasoningEffortChange={handleReasoningEffortChange}
+                        onCodexFastChange={handleCodexFastChange}
                         onTerminal={props.session.active ? handleViewTerminal : undefined}
                         autocompleteSuggestions={props.autocompleteSuggestions}
                         voiceStatus={voice?.status}

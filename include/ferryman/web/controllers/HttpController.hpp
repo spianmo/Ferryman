@@ -118,6 +118,7 @@ class HttpController {
   int HandleCodeAgentSessionPermissionMode(HttpRequest* req, HttpResponse* resp);
   int HandleCodeAgentSessionModelMode(HttpRequest* req, HttpResponse* resp);
   int HandleCodeAgentSessionReasoningEffort(HttpRequest* req, HttpResponse* resp);
+  int HandleCodeAgentSessionCodexFast(HttpRequest* req, HttpResponse* resp);
   int HandleCodeAgentSessionSlashCommands(HttpRequest* req, HttpResponse* resp);
   int HandleCodeAgentSessionSkills(HttpRequest* req, HttpResponse* resp);
   int HandleCodeAgentSessionGitStatus(HttpRequest* req, HttpResponse* resp);

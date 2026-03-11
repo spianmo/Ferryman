@@ -495,6 +495,43 @@ bool CodeAgentManager::SetModelReasoningEffort(const std::string& ns, const std:
   return true;
 }
 
+bool CodeAgentManager::SetCodexFast(const std::string& ns, const std::string& session_id, bool enabled,
+                                    std::string* error) {
+  std::lock_guard<std::mutex> lock(mu_);
+  auto session_opt = GetMutableSessionLocked(ns, session_id);
+  if (!session_opt.has_value()) {
+    if (error != nullptr) {
+      *error = "session not found";
+    }
+    return false;
+  }
+
+  SessionRecord& session = **session_opt;
+  if (!session.active) {
+    if (error != nullptr) {
+      *error = "session is inactive";
+    }
+    return false;
+  }
+  if (session.flavor != "codex") {
+    if (error != nullptr) {
+      *error = "codex fast mode is only supported for codex sessions";
+    }
+    return false;
+  }
+  ApplySessionRuntimeConfigLocked(session, std::nullopt, std::nullopt, std::nullopt, enabled);
+  PushEventLocked(ns,
+                  {
+                      {"type", "session-updated"},
+                      {"namespace", ns},
+                      {"sessionId", session.id},
+                      {"data", BuildSessionJsonLocked(session)},
+                  },
+                  session.id);
+  PersistStateLocked();
+  return true;
+}
+
 bool CodeAgentManager::SendSessionMessage(const std::string& ns, const std::string& session_id,
                                           const std::string& text, const std::string& local_id,
                                           const nlohmann::json& attachments, std::string* error) {

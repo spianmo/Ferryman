@@ -5,24 +5,16 @@ import { dedupeAgentEvents, foldApiErrorEvents } from '@/chat/reducerEvents'
 import { collectTitleChanges, collectToolIdsFromMessages, ensureToolBlock, getPermissions } from '@/chat/reducerTools'
 import { reduceTimeline } from '@/chat/reducerTimeline'
 
-// Calculate context size from usage data
+// Calculate context size from usage data.
+// Match hapi: context occupancy is input-side tokens plus Claude cache tokens,
+// not total/output tokens, which can fluctuate per response.
 function calculateContextSize(usage: UsageData): number {
-    if (typeof usage.total_tokens === 'number' && Number.isFinite(usage.total_tokens)) {
-        return Math.max(0, usage.total_tokens)
-    }
-
-    const hasClaudeCacheFields = usage.cache_creation_input_tokens !== undefined
-        || usage.cache_read_input_tokens !== undefined
-    if (hasClaudeCacheFields) {
-        return Math.max(
-            0,
-            usage.input_tokens
-            + (usage.cache_creation_input_tokens || 0)
-            + (usage.cache_read_input_tokens || 0)
-        )
-    }
-
-    return Math.max(0, usage.input_tokens + usage.output_tokens)
+    return Math.max(
+        0,
+        usage.input_tokens
+        + (usage.cache_creation_input_tokens || 0)
+        + (usage.cache_read_input_tokens || 0)
+    )
 }
 
 export type LatestUsage = {
