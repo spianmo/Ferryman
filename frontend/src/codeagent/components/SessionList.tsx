@@ -147,6 +147,10 @@ function getAgentLabel(session: SessionSummary): string {
     return 'unknown'
 }
 
+function isReadOnlyLocalCliSession(sessionId: string, active: boolean): boolean {
+    return sessionId.startsWith('external-') && !active
+}
+
 function formatRelativeTime(value: number, t: (key: string, params?: Record<string, string | number>) => string): string | null {
     const ms = value < 1_000_000_000_000 ? value * 1000 : value
     if (!Number.isFinite(ms)) return null
@@ -171,6 +175,7 @@ function SessionItem(props: {
     const { t } = useTranslation()
     const { session: s, onSelect, showPath = true, api, selected = false } = props
     const { haptic } = usePlatform()
+    const canManageSession = !isReadOnlyLocalCliSession(s.id, s.active)
     const [menuOpen, setMenuOpen] = useState(false)
     const [menuAnchorPoint, setMenuAnchorPoint] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
     const [renameOpen, setRenameOpen] = useState(false)
@@ -185,6 +190,7 @@ function SessionItem(props: {
 
     const longPressHandlers = useLongPress({
         onLongPress: (point) => {
+            if (!canManageSession) return
             haptic.impact('medium')
             setMenuAnchorPoint(point)
             setMenuOpen(true)
@@ -263,47 +269,51 @@ function SessionItem(props: {
                 </div>
             </button>
 
-            <SessionActionMenu
-                isOpen={menuOpen}
-                onClose={() => setMenuOpen(false)}
-                sessionActive={s.active}
-                onRename={() => setRenameOpen(true)}
-                onArchive={() => setArchiveOpen(true)}
-                onDelete={() => setDeleteOpen(true)}
-                anchorPoint={menuAnchorPoint}
-            />
+            {canManageSession ? (
+                <>
+                    <SessionActionMenu
+                        isOpen={menuOpen}
+                        onClose={() => setMenuOpen(false)}
+                        sessionActive={s.active}
+                        onRename={() => setRenameOpen(true)}
+                        onArchive={() => setArchiveOpen(true)}
+                        onDelete={() => setDeleteOpen(true)}
+                        anchorPoint={menuAnchorPoint}
+                    />
 
-            <RenameSessionDialog
-                isOpen={renameOpen}
-                onClose={() => setRenameOpen(false)}
-                currentName={sessionName}
-                onRename={renameSession}
-                isPending={isPending}
-            />
+                    <RenameSessionDialog
+                        isOpen={renameOpen}
+                        onClose={() => setRenameOpen(false)}
+                        currentName={sessionName}
+                        onRename={renameSession}
+                        isPending={isPending}
+                    />
 
-            <ConfirmDialog
-                isOpen={archiveOpen}
-                onClose={() => setArchiveOpen(false)}
-                title={t('dialog.archive.title')}
-                description={t('dialog.archive.description', { name: sessionName })}
-                confirmLabel={t('dialog.archive.confirm')}
-                confirmingLabel={t('dialog.archive.confirming')}
-                onConfirm={archiveSession}
-                isPending={isPending}
-                destructive
-            />
+                    <ConfirmDialog
+                        isOpen={archiveOpen}
+                        onClose={() => setArchiveOpen(false)}
+                        title={t('dialog.archive.title')}
+                        description={t('dialog.archive.description', { name: sessionName })}
+                        confirmLabel={t('dialog.archive.confirm')}
+                        confirmingLabel={t('dialog.archive.confirming')}
+                        onConfirm={archiveSession}
+                        isPending={isPending}
+                        destructive
+                    />
 
-            <ConfirmDialog
-                isOpen={deleteOpen}
-                onClose={() => setDeleteOpen(false)}
-                title={t('dialog.delete.title')}
-                description={t('dialog.delete.description', { name: sessionName })}
-                confirmLabel={t('dialog.delete.confirm')}
-                confirmingLabel={t('dialog.delete.confirming')}
-                onConfirm={deleteSession}
-                isPending={isPending}
-                destructive
-            />
+                    <ConfirmDialog
+                        isOpen={deleteOpen}
+                        onClose={() => setDeleteOpen(false)}
+                        title={t('dialog.delete.title')}
+                        description={t('dialog.delete.description', { name: sessionName })}
+                        confirmLabel={t('dialog.delete.confirm')}
+                        confirmingLabel={t('dialog.delete.confirming')}
+                        onConfirm={deleteSession}
+                        isPending={isPending}
+                        destructive
+                    />
+                </>
+            ) : null}
         </>
     )
 }

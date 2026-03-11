@@ -328,6 +328,9 @@ void ServerApp::HandleWsOpen(const WebSocketChannelPtr& channel, const HttpReque
 
 void ServerApp::StartCodeAgentEventsWsLoop(std::uintptr_t channel_key) {
   std::thread([this, channel_key]() {
+    const auto dump_json_safe = [](const json& value) {
+      return value.dump(-1, ' ', false, json::error_handler_t::replace);
+    };
     const std::string subscription_id = "sub-" + util::RandomHex(12);
     std::int64_t last_heartbeat_at_ms = 0;
     bool announced_connected = false;
@@ -345,9 +348,8 @@ void ServerApp::StartCodeAgentEventsWsLoop(std::uintptr_t channel_key) {
 
       if (!announced_connected) {
         announced_connected = true;
-        SendToWs(channel_key, json{{"type", "connection-changed"},
-                                   {"data", {{"status", "connected"}, {"subscriptionId", subscription_id}}}}
-                                   .dump());
+        SendToWs(channel_key, dump_json_safe(json{{"type", "connection-changed"},
+                                   {"data", {{"status", "connected"}, {"subscriptionId", subscription_id}}}}));
       }
 
       codeagent::EventQuery query;
@@ -364,7 +366,7 @@ void ServerApp::StartCodeAgentEventsWsLoop(std::uintptr_t channel_key) {
 
       if (events.is_array() && !events.empty()) {
         for (const auto& event : events) {
-          SendToWs(channel_key, event.dump());
+          SendToWs(channel_key, dump_json_safe(event));
         }
         continue;
       }
@@ -374,7 +376,7 @@ void ServerApp::StartCodeAgentEventsWsLoop(std::uintptr_t channel_key) {
                               .count();
       if (last_heartbeat_at_ms == 0 || now_ms - last_heartbeat_at_ms >= 15000) {
         last_heartbeat_at_ms = now_ms;
-        SendToWs(channel_key, json{{"type", "heartbeat"}, {"data", {{"timestamp", now_ms}}}}.dump());
+        SendToWs(channel_key, dump_json_safe(json{{"type", "heartbeat"}, {"data", {{"timestamp", now_ms}}}}));
       }
     }
   }).detach();

@@ -105,11 +105,13 @@ class CodeAgentManager {
     bool thinking = false;
     std::int64_t thinking_at_ms = 0;
     std::filesystem::path path;
+    std::filesystem::path transcript_path;
     std::string host;
     std::string name;
     std::string summary_text;
     std::int64_t summary_updated_at_ms = 0;
     std::string flavor = "claude";
+    std::string source_session_id;
     std::string machine_id;
     std::string permission_mode = "default";
     std::string model_mode = "default";
@@ -143,9 +145,16 @@ class CodeAgentManager {
   static std::int64_t NowMs();
   static std::string NormalizeAgent(std::string agent);
   static std::string Trim(std::string value);
+  static std::string MakeExternalSessionId(std::string_view flavor, std::string_view source_session_id);
+  static bool ParseExternalSessionId(std::string_view session_id, std::string* flavor,
+                                     std::string* source_session_id);
 
   std::optional<SessionRecord*> GetMutableSessionLocked(const std::string& ns, const std::string& session_id);
   std::optional<const SessionRecord*> GetSessionLocked(const std::string& ns, const std::string& session_id) const;
+  std::vector<SessionRecord> DiscoverExternalSessions(const std::string& ns) const;
+  std::optional<SessionRecord> FindExternalSession(const std::string& ns, const std::string& session_id) const;
+  bool PopulateExternalSessionMessages(SessionRecord* session, std::string* error) const;
+  bool ImportExternalSessionLocked(const std::string& ns, SessionRecord session, std::string* error);
 
   nlohmann::json BuildSessionJsonLocked(const SessionRecord& session) const;
   nlohmann::json BuildSessionSummaryJsonLocked(const SessionRecord& session) const;

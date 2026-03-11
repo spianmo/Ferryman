@@ -130,6 +130,101 @@ std::optional<std::string> ExtractCallId(const nlohmann::json& object) {
   return JsonFirstString(object, {"call_id", "callId", "tool_call_id", "toolCallId", "id"});
 }
 
+bool IsUtf8ContinuationByte(unsigned char value) {
+  return (value & 0xC0u) == 0x80u;
+}
+
+size_t Utf8SequenceLength(unsigned char lead_byte) {
+  if (lead_byte <= 0x7Fu) {
+    return 1;
+  }
+  if (lead_byte >= 0xC2u && lead_byte <= 0xDFu) {
+    return 2;
+  }
+  if (lead_byte >= 0xE0u && lead_byte <= 0xEFu) {
+    return 3;
+  }
+  if (lead_byte >= 0xF0u && lead_byte <= 0xF4u) {
+    return 4;
+  }
+  return 0;
+}
+
+bool IsValidUtf8Sequence(std::string_view value, size_t offset, size_t length) {
+  if (length == 0 || offset + length > value.size()) {
+    return false;
+  }
+  const unsigned char lead_byte = static_cast<unsigned char>(value[offset]);
+  if (length == 1) {
+    return lead_byte <= 0x7Fu;
+  }
+  for (size_t index = 1; index < length; ++index) {
+    if (!IsUtf8ContinuationByte(static_cast<unsigned char>(value[offset + index]))) {
+      return false;
+    }
+  }
+  const unsigned char next_byte = static_cast<unsigned char>(value[offset + 1]);
+  if (length == 2) {
+    return lead_byte >= 0xC2u && lead_byte <= 0xDFu;
+  }
+  if (length == 3) {
+    if (lead_byte == 0xE0u && next_byte < 0xA0u) {
+      return false;
+    }
+    if (lead_byte == 0xEDu && next_byte >= 0xA0u) {
+      return false;
+    }
+    return lead_byte >= 0xE0u && lead_byte <= 0xEFu;
+  }
+  if (lead_byte == 0xF0u && next_byte < 0x90u) {
+    return false;
+  }
+  if (lead_byte == 0xF4u && next_byte > 0x8Fu) {
+    return false;
+  }
+  return lead_byte >= 0xF0u && lead_byte <= 0xF4u;
+}
+
+std::string SanitizeUtf8(std::string_view value) {
+  std::string sanitized;
+  sanitized.reserve(value.size());
+  static constexpr std::string_view kReplacement = "\xEF\xBF\xBD";
+
+  for (size_t offset = 0; offset < value.size();) {
+    const unsigned char lead_byte = static_cast<unsigned char>(value[offset]);
+    const size_t sequence_length = Utf8SequenceLength(lead_byte);
+    if (sequence_length > 0 && IsValidUtf8Sequence(value, offset, sequence_length)) {
+      sanitized.append(value.substr(offset, sequence_length));
+      offset += sequence_length;
+      continue;
+    }
+    sanitized.append(kReplacement);
+    ++offset;
+  }
+  return sanitized;
+}
+
+nlohmann::json SanitizeJsonStrings(const nlohmann::json& value) {
+  if (value.is_string()) {
+    return SanitizeUtf8(value.get_ref<const std::string&>());
+  }
+  if (value.is_array()) {
+    nlohmann::json sanitized = nlohmann::json::array();
+    for (const auto& item : value) {
+      sanitized.push_back(SanitizeJsonStrings(item));
+    }
+    return sanitized;
+  }
+  if (value.is_object()) {
+    nlohmann::json sanitized = nlohmann::json::object();
+    for (auto it = value.begin(); it != value.end(); ++it) {
+      sanitized[SanitizeUtf8(it.key())] = SanitizeJsonStrings(it.value());
+    }
+    return sanitized;
+  }
+  return value;
+}
+
 nlohmann::json ParseMaybeJsonString(const nlohmann::json& value) {
   if (!value.is_string()) {
     return value;
@@ -647,15 +742,15 @@ std::string CodeAgentManager::NormalizeAgent(std::string agent) {
 nlohmann::json CodeAgentManager::BuildMessageJson(const MessageRecord& message) const {
   nlohmann::json local_id = nullptr;
   if (!message.local_id.empty()) {
-    local_id = message.local_id;
+    local_id = SanitizeUtf8(message.local_id);
   }
-  return {
+  return SanitizeJsonStrings({
       {"id", message.id},
       {"seq", message.seq},
       {"localId", local_id},
       {"content", message.content},
       {"createdAt", message.created_at_ms},
-  };
+  });
 }
 
 CodeAgentManager::MessageRecord CodeAgentManager::UpsertMessageLocked(SessionRecord& session, nlohmann::json content,
@@ -756,7 +851,7 @@ nlohmann::json CodeAgentManager::BuildSessionSummaryJsonLocked(const SessionReco
       summary["reasoningEffort"] = session.model_reasoning_effort;
     }
   }
-  return summary;
+  return SanitizeJsonStrings(summary);
 }
 
 nlohmann::json CodeAgentManager::BuildSessionJsonLocked(const SessionRecord& session) const {
@@ -773,6 +868,30 @@ nlohmann::json CodeAgentManager::BuildSessionJsonLocked(const SessionRecord& ses
       {"version", "ferryman-codeagent-cpp"},
       {"os", DetectHostTag()},
   };
+
+  std::string external_flavor;
+  std::string external_source_session_id;
+  const bool is_external_session = ParseExternalSessionId(session.id, &external_flavor, &external_source_session_id);
+  if (!session.source_session_id.empty()) {
+    const std::string source_session_id = session.source_session_id;
+    metadata["startedFromRunner"] = false;
+    metadata["startedBy"] = "terminal";
+    if (session.flavor == "codex") {
+      metadata["codexSessionId"] = source_session_id;
+    } else if (session.flavor == "claude") {
+      metadata["claudeSessionId"] = source_session_id;
+    } else if (session.flavor == "cursor") {
+      metadata["cursorSessionId"] = source_session_id;
+    } else if (session.flavor == "gemini") {
+      metadata["geminiSessionId"] = source_session_id;
+    } else if (session.flavor == "opencode") {
+      metadata["opencodeSessionId"] = source_session_id;
+    }
+  }
+  if (is_external_session && !session.active) {
+    metadata["lifecycleState"] = "external";
+    metadata["lifecycleStateSince"] = session.updated_at_ms;
+  }
 
   nlohmann::json agent_state = {
       {"controlledByUser", true},
@@ -810,7 +929,7 @@ nlohmann::json CodeAgentManager::BuildSessionJsonLocked(const SessionRecord& ses
       result["reasoningEffort"] = session.model_reasoning_effort;
     }
   }
-  return result;
+  return SanitizeJsonStrings(result);
 }
 
 void CodeAgentManager::ApplySessionRuntimeConfigLocked(SessionRecord& session,
@@ -866,12 +985,13 @@ std::optional<const CodeAgentManager::SessionRecord*> CodeAgentManager::GetSessi
 
 void CodeAgentManager::PushEventLocked(const std::string& ns, const nlohmann::json& payload,
                                        const std::string& session_id, const std::string& machine_id) {
+  const nlohmann::json sanitized_payload = SanitizeJsonStrings(payload);
   events_.push_back(EventRecord{
       .id = next_event_id_++,
       .ns = ns,
       .session_id = session_id,
       .machine_id = machine_id,
-      .payload = payload,
+      .payload = sanitized_payload,
   });
 
   constexpr size_t kMaxEvents = 2048;

@@ -1,10 +1,18 @@
+namespace {
+
+std::string DumpJsonSafe(const json& value) {
+  return value.dump(-1, ' ', false, json::error_handler_t::replace);
+}
+
+}  // namespace
+
 int ServerApp::HandleCodeAgentRunnerState(HttpRequest* req, HttpResponse* resp) {
   auto session = RequireSession(req, resp);
   if (!session.has_value()) {
     return resp->status_code;
   }
   const json state = codeagent_application_service_.BuildRunnerState("default");
-  return Json(resp, 200, json{{"ok", true}, {"state", state}}.dump());
+  return Json(resp, 200, DumpJsonSafe(json{{"ok", true}, {"state", state}}));
 }
 
 int ServerApp::HandleCodeAgentBind(HttpRequest* req, HttpResponse* resp) {
@@ -33,21 +41,20 @@ int ServerApp::HandleCodeAgentEvents(HttpRequest* req, HttpResponse* resp) {
   std::ostringstream stream;
   stream << "retry: 1000\n";
   stream << "data: "
-         << json{
+         << DumpJsonSafe(json{
                 {"type", "connection-changed"},
                 {"data", {{"status", "connected"}, {"subscriptionId", subscription_id}}},
-            }
-                .dump()
+            })
          << "\n\n";
 
   if (!events.is_array() || events.empty()) {
     const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::system_clock::now().time_since_epoch())
                             .count();
-    stream << "data: " << json{{"type", "heartbeat"}, {"data", {{"timestamp", now_ms}}}}.dump() << "\n\n";
+    stream << "data: " << DumpJsonSafe(json{{"type", "heartbeat"}, {"data", {{"timestamp", now_ms}}}}) << "\n\n";
   } else {
     for (const auto& event : events) {
-      stream << "data: " << event.dump() << "\n\n";
+      stream << "data: " << DumpJsonSafe(event) << "\n\n";
     }
   }
 
@@ -69,7 +76,7 @@ int ServerApp::HandleCodeAgentSessions(HttpRequest* req, HttpResponse* resp) {
   if (!ns.has_value()) {
     return resp->status_code;
   }
-  return Json(resp, 200, codeagent_application_service_.BuildSessionsResponse(*ns).dump());
+  return Json(resp, 200, DumpJsonSafe(codeagent_application_service_.BuildSessionsResponse(*ns)));
 }
 
 int ServerApp::HandleCodeAgentSession(HttpRequest* req, HttpResponse* resp) {
@@ -88,7 +95,7 @@ int ServerApp::HandleCodeAgentSession(HttpRequest* req, HttpResponse* resp) {
   if (!payload.has_value()) {
     return Json(resp, 404, json{{"error", "Session not found"}}.dump());
   }
-  return Json(resp, 200, payload->dump());
+  return Json(resp, 200, DumpJsonSafe(*payload));
 }
 
 int ServerApp::HandleCodeAgentSessionMessages(HttpRequest* req, HttpResponse* resp) {
@@ -117,7 +124,7 @@ int ServerApp::HandleCodeAgentSessionMessages(HttpRequest* req, HttpResponse* re
   if (!payload.has_value()) {
     return Json(resp, 404, json{{"error", "Session not found"}}.dump());
   }
-  return Json(resp, 200, payload->dump());
+  return Json(resp, 200, DumpJsonSafe(*payload));
 }
 
 int ServerApp::HandleCodeAgentSessionResume(HttpRequest* req, HttpResponse* resp) {

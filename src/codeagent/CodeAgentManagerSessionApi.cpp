@@ -6,61 +6,114 @@
 #include <algorithm>
 #include <chrono>
 #include <system_error>
+#include <unordered_set>
 
 namespace ferryman::codeagent {
 
 nlohmann::json CodeAgentManager::BuildSessionsResponse(const std::string& ns) const {
-  std::lock_guard<std::mutex> lock(mu_);
-  std::vector<const SessionRecord*> sessions;
-  auto ns_it = session_ids_by_ns_.find(ns);
-  if (ns_it != session_ids_by_ns_.end()) {
-    sessions.reserve(ns_it->second.size());
-    for (const auto& id : ns_it->second) {
-      auto it = sessions_by_id_.find(id);
-      if (it != sessions_by_id_.end()) {
-        sessions.push_back(&it->second);
+  struct SummaryRecord {
+    bool active = false;
+    std::int64_t updated_at_ms = 0;
+    nlohmann::json payload;
+  };
+
+  std::vector<SummaryRecord> sessions;
+  std::unordered_set<std::string> known_ids;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto ns_it = session_ids_by_ns_.find(ns);
+    if (ns_it != session_ids_by_ns_.end()) {
+      sessions.reserve(ns_it->second.size());
+      known_ids.reserve(ns_it->second.size());
+      for (const auto& id : ns_it->second) {
+        auto it = sessions_by_id_.find(id);
+        if (it == sessions_by_id_.end()) {
+          continue;
+        }
+        sessions.push_back({
+            .active = it->second.active,
+            .updated_at_ms = it->second.updated_at_ms,
+            .payload = BuildSessionSummaryJsonLocked(it->second),
+        });
+        known_ids.insert(it->second.id);
       }
     }
   }
 
-  std::sort(sessions.begin(), sessions.end(), [](const SessionRecord* lhs, const SessionRecord* rhs) {
-    if (lhs->active != rhs->active) {
-      return lhs->active;
+  for (const auto& external_session : DiscoverExternalSessions(ns)) {
+    if (known_ids.find(external_session.id) != known_ids.end()) {
+      continue;
     }
-    return lhs->updated_at_ms > rhs->updated_at_ms;
+    sessions.push_back({
+        .active = external_session.active,
+        .updated_at_ms = external_session.updated_at_ms,
+        .payload = BuildSessionSummaryJsonLocked(external_session),
+    });
+  }
+
+  std::sort(sessions.begin(), sessions.end(), [](const SummaryRecord& lhs, const SummaryRecord& rhs) {
+    if (lhs.active != rhs.active) {
+      return lhs.active;
+    }
+    return lhs.updated_at_ms > rhs.updated_at_ms;
   });
 
   nlohmann::json serialized = nlohmann::json::array();
-  for (const auto* session : sessions) {
-    serialized.push_back(BuildSessionSummaryJsonLocked(*session));
+  for (auto& session : sessions) {
+    serialized.push_back(std::move(session.payload));
   }
   return {{"sessions", serialized}};
 }
 
 std::optional<nlohmann::json> CodeAgentManager::BuildSessionResponse(const std::string& ns,
                                                                      const std::string& session_id) const {
-  std::lock_guard<std::mutex> lock(mu_);
-  auto session = GetSessionLocked(ns, session_id);
-  if (!session.has_value()) {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto session = GetSessionLocked(ns, session_id);
+    if (session.has_value()) {
+      return nlohmann::json{{"session", BuildSessionJsonLocked(**session)}};
+    }
+  }
+
+  auto external_session = FindExternalSession(ns, session_id);
+  if (!external_session.has_value()) {
     return std::nullopt;
   }
-  return nlohmann::json{{"session", BuildSessionJsonLocked(**session)}};
+  return nlohmann::json{{"session", BuildSessionJsonLocked(*external_session)}};
 }
 
 std::optional<nlohmann::json> CodeAgentManager::BuildMessagesResponse(const std::string& ns,
                                                                       const std::string& session_id, int limit,
                                                                       std::optional<int> before_seq) const {
-  std::lock_guard<std::mutex> lock(mu_);
-  auto session_opt = GetSessionLocked(ns, session_id);
-  if (!session_opt.has_value()) {
-    return std::nullopt;
+  std::optional<SessionRecord> external_session;
+  std::vector<MessageRecord> external_messages;
+  const SessionRecord* session = nullptr;
+
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto session_opt = GetSessionLocked(ns, session_id);
+    if (session_opt.has_value()) {
+      session = *session_opt;
+    }
   }
 
-  const SessionRecord& session = **session_opt;
-  std::vector<const MessageRecord*> filtered;
-  filtered.reserve(session.messages.size());
+  if (session == nullptr) {
+    external_session = FindExternalSession(ns, session_id);
+    if (!external_session.has_value()) {
+      return std::nullopt;
+    }
+    std::string error;
+    if (!PopulateExternalSessionMessages(&*external_session, &error)) {
+      return std::nullopt;
+    }
+    external_messages = external_session->messages;
+  }
 
-  for (const auto& message : session.messages) {
+  const auto& source_messages = session != nullptr ? session->messages : external_messages;
+  std::vector<const MessageRecord*> filtered;
+  filtered.reserve(source_messages.size());
+
+  for (const auto& message : source_messages) {
     if (before_seq.has_value() && message.seq >= *before_seq) {
       continue;
     }
@@ -115,22 +168,36 @@ nlohmann::json CodeAgentManager::BuildMachinesResponse(const std::string& ns) co
 
 std::optional<std::filesystem::path> CodeAgentManager::ResolveSessionPath(const std::string& ns,
                                                                           const std::string& session_id) const {
-  std::lock_guard<std::mutex> lock(mu_);
-  auto session = GetSessionLocked(ns, session_id);
-  if (!session.has_value()) {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto session = GetSessionLocked(ns, session_id);
+    if (session.has_value()) {
+      return (**session).path;
+    }
+  }
+
+  auto external_session = FindExternalSession(ns, session_id);
+  if (!external_session.has_value()) {
     return std::nullopt;
   }
-  return (**session).path;
+  return external_session->path;
 }
 
 std::optional<std::string> CodeAgentManager::ResolveSessionFlavor(const std::string& ns,
                                                                   const std::string& session_id) const {
-  std::lock_guard<std::mutex> lock(mu_);
-  auto session = GetSessionLocked(ns, session_id);
-  if (!session.has_value()) {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto session = GetSessionLocked(ns, session_id);
+    if (session.has_value()) {
+      return (**session).flavor;
+    }
+  }
+
+  auto external_session = FindExternalSession(ns, session_id);
+  if (!external_session.has_value()) {
     return std::nullopt;
   }
-  return (**session).flavor;
+  return external_session->flavor;
 }
 
 nlohmann::json CodeAgentManager::BuildSlashCommandsResponse(const std::string& ns,
@@ -232,28 +299,48 @@ bool CodeAgentManager::CheckPathsExist(const std::string& ns, const std::vector<
 }
 
 bool CodeAgentManager::ResumeSession(const std::string& ns, const std::string& session_id, std::string* error) {
-  std::lock_guard<std::mutex> lock(mu_);
-  auto session_opt = GetMutableSessionLocked(ns, session_id);
-  if (!session_opt.has_value()) {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto session_opt = GetMutableSessionLocked(ns, session_id);
+    if (session_opt.has_value()) {
+      SessionRecord& session = **session_opt;
+      session.active = true;
+      session.active_at_ms = NowMs();
+      session.updated_at_ms = session.active_at_ms;
+      PushEventLocked(ns,
+                      {
+                          {"type", "session-updated"},
+                          {"namespace", ns},
+                          {"sessionId", session.id},
+                          {"data", BuildSessionJsonLocked(session)},
+                      },
+                      session.id);
+      PersistStateLocked();
+      if (error != nullptr) {
+        error->clear();
+      }
+      return true;
+    }
+  }
+
+  auto external_session = FindExternalSession(ns, session_id);
+  if (!external_session.has_value()) {
     if (error != nullptr) {
       *error = "session not found";
     }
     return false;
   }
-  SessionRecord& session = **session_opt;
-  session.active = true;
-  session.active_at_ms = NowMs();
-  session.updated_at_ms = session.active_at_ms;
-  PushEventLocked(ns,
-                  {
-                      {"type", "session-updated"},
-                      {"namespace", ns},
-                      {"sessionId", session.id},
-                      {"data", BuildSessionJsonLocked(session)},
-                  },
-                  session.id);
-  PersistStateLocked();
-  return true;
+
+  std::string load_error;
+  if (!PopulateExternalSessionMessages(&*external_session, &load_error)) {
+    if (error != nullptr) {
+      *error = load_error.empty() ? "failed to load session transcript" : load_error;
+    }
+    return false;
+  }
+
+  std::lock_guard<std::mutex> lock(mu_);
+  return ImportExternalSessionLocked(ns, std::move(*external_session), error);
 }
 
 bool CodeAgentManager::AbortSession(const std::string& ns, const std::string& session_id, std::string* error) {

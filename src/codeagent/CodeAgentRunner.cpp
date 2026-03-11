@@ -3169,6 +3169,15 @@ std::string CodeAgentManager::BuildAgentCommand(const SessionRecord& session, co
       AppendCommandOption(&cmd_template, "--include-partial-messages", "");
     }
 
+    const std::string source_session_id = util::Trim(session.source_session_id);
+    const bool has_native_resume = HasCommandOption(cmd_template, "--resume") ||
+                                   HasCommandOption(cmd_template, "--session-id") ||
+                                   HasCommandOption(cmd_template, "--continue");
+    const bool disables_session_persistence = HasCommandOption(cmd_template, "--no-session-persistence");
+    if (!source_session_id.empty() && !has_native_resume && !disables_session_persistence) {
+      AppendCommandOption(&cmd_template, "--resume", ShellEscape(source_session_id));
+    }
+
     if (!session.title_initialized) {
       if (!HasCommandOption(cmd_template, "--append-system-prompt")) {
         AppendCommandOption(&cmd_template, "--append-system-prompt", ShellEscape(ClaudeTitleSystemPrompt()));

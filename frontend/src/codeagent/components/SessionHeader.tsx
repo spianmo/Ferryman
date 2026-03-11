@@ -22,6 +22,10 @@ function getSessionTitle(session: Session): string {
     return session.id.slice(0, 8)
 }
 
+function isReadOnlyLocalCliSession(sessionId: string, active: boolean): boolean {
+    return sessionId.startsWith('external-') && !active
+}
+
 function FilesIcon(props: { className?: string }) {
     return (
         <svg
@@ -69,6 +73,7 @@ export function SessionHeader(props: {
     const { t } = useTranslation()
     const { session, api, onSessionDeleted } = props
     const title = useMemo(() => getSessionTitle(session), [session])
+    const canManageSession = !isReadOnlyLocalCliSession(session.id, session.active)
 
     const [menuOpen, setMenuOpen] = useState(false)
     const [menuAnchorPoint, setMenuAnchorPoint] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
@@ -154,64 +159,70 @@ export function SessionHeader(props: {
                         </button>
                     ) : null}
 
-                    <button
-                        type="button"
-                        onClick={handleMenuToggle}
-                        onPointerDown={(e) => e.stopPropagation()}
-                        ref={menuAnchorRef}
-                        aria-haspopup="menu"
-                        aria-expanded={menuOpen}
-                        aria-controls={menuOpen ? menuId : undefined}
-                        className="flex h-8 w-8 items-center justify-center rounded-full text-[var(--app-hint)] transition-colors hover:bg-[var(--app-secondary-bg)] hover:text-[var(--app-fg)]"
-                        title={t('session.more')}
-                    >
-                        <MoreVerticalIcon />
-                    </button>
+                    {canManageSession ? (
+                        <button
+                            type="button"
+                            onClick={handleMenuToggle}
+                            onPointerDown={(e) => e.stopPropagation()}
+                            ref={menuAnchorRef}
+                            aria-haspopup="menu"
+                            aria-expanded={menuOpen}
+                            aria-controls={menuOpen ? menuId : undefined}
+                            className="flex h-8 w-8 items-center justify-center rounded-full text-[var(--app-hint)] transition-colors hover:bg-[var(--app-secondary-bg)] hover:text-[var(--app-fg)]"
+                            title={t('session.more')}
+                        >
+                            <MoreVerticalIcon />
+                        </button>
+                    ) : null}
                 </div>
             </div>
 
-            <SessionActionMenu
-                isOpen={menuOpen}
-                onClose={() => setMenuOpen(false)}
-                sessionActive={session.active}
-                onRename={() => setRenameOpen(true)}
-                onArchive={() => setArchiveOpen(true)}
-                onDelete={() => setDeleteOpen(true)}
-                anchorPoint={menuAnchorPoint}
-                menuId={menuId}
-            />
+            {canManageSession ? (
+                <>
+                    <SessionActionMenu
+                        isOpen={menuOpen}
+                        onClose={() => setMenuOpen(false)}
+                        sessionActive={session.active}
+                        onRename={() => setRenameOpen(true)}
+                        onArchive={() => setArchiveOpen(true)}
+                        onDelete={() => setDeleteOpen(true)}
+                        anchorPoint={menuAnchorPoint}
+                        menuId={menuId}
+                    />
 
-            <RenameSessionDialog
-                isOpen={renameOpen}
-                onClose={() => setRenameOpen(false)}
-                currentName={title}
-                onRename={renameSession}
-                isPending={isPending}
-            />
+                    <RenameSessionDialog
+                        isOpen={renameOpen}
+                        onClose={() => setRenameOpen(false)}
+                        currentName={title}
+                        onRename={renameSession}
+                        isPending={isPending}
+                    />
 
-            <ConfirmDialog
-                isOpen={archiveOpen}
-                onClose={() => setArchiveOpen(false)}
-                title={t('dialog.archive.title')}
-                description={t('dialog.archive.description', { name: title })}
-                confirmLabel={t('dialog.archive.confirm')}
-                confirmingLabel={t('dialog.archive.confirming')}
-                onConfirm={archiveSession}
-                isPending={isPending}
-                destructive
-            />
+                    <ConfirmDialog
+                        isOpen={archiveOpen}
+                        onClose={() => setArchiveOpen(false)}
+                        title={t('dialog.archive.title')}
+                        description={t('dialog.archive.description', { name: title })}
+                        confirmLabel={t('dialog.archive.confirm')}
+                        confirmingLabel={t('dialog.archive.confirming')}
+                        onConfirm={archiveSession}
+                        isPending={isPending}
+                        destructive
+                    />
 
-            <ConfirmDialog
-                isOpen={deleteOpen}
-                onClose={() => setDeleteOpen(false)}
-                title={t('dialog.delete.title')}
-                description={t('dialog.delete.description', { name: title })}
-                confirmLabel={t('dialog.delete.confirm')}
-                confirmingLabel={t('dialog.delete.confirming')}
-                onConfirm={handleDelete}
-                isPending={isPending}
-                destructive
-            />
+                    <ConfirmDialog
+                        isOpen={deleteOpen}
+                        onClose={() => setDeleteOpen(false)}
+                        title={t('dialog.delete.title')}
+                        description={t('dialog.delete.description', { name: title })}
+                        confirmLabel={t('dialog.delete.confirm')}
+                        confirmingLabel={t('dialog.delete.confirming')}
+                        onConfirm={handleDelete}
+                        isPending={isPending}
+                        destructive
+                    />
+                </>
+            ) : null}
         </>
     )
 }

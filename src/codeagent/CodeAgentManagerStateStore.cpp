@@ -272,6 +272,10 @@ void CodeAgentManager::RestoreStateLocked() {
     session.summary_updated_at_ms =
         parse_int64(raw_session.value("summaryUpdatedAt", nlohmann::json(nullptr)), session.updated_at_ms);
     session.flavor = NormalizeAgent(parse_string(raw_session.value("flavor", nlohmann::json("claude")), "claude"));
+    session.source_session_id = parse_string(raw_session.value("sourceSessionId", nlohmann::json("")), "");
+    if (session.source_session_id.empty()) {
+      session.source_session_id = parse_string(raw_session.value("source_session_id", nlohmann::json("")), "");
+    }
     session.machine_id = parse_string(raw_session.value("machineId", nlohmann::json(machine_.id)), machine_.id);
     session.permission_mode =
         parse_string(raw_session.value("permissionMode", nlohmann::json("default")), "default");
@@ -336,6 +340,13 @@ void CodeAgentManager::RestoreStateLocked() {
     }
     if (session.flavor != "codex") {
       session.codex_fast = false;
+    }
+    if (session.source_session_id.empty()) {
+      std::string external_flavor;
+      std::string external_source_session_id;
+      if (ParseExternalSessionId(session.id, &external_flavor, &external_source_session_id)) {
+        session.source_session_id = external_source_session_id;
+      }
     }
     session.generation = 0;
 
@@ -432,6 +443,7 @@ void CodeAgentManager::PersistStateLocked() {
         {"summaryText", session->summary_text},
         {"summaryUpdatedAt", session->summary_updated_at_ms},
         {"flavor", session->flavor},
+        {"sourceSessionId", session->source_session_id},
         {"machineId", session->machine_id},
         {"permissionMode", session->permission_mode},
         {"modelMode", session->model_mode},
