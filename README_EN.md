@@ -13,8 +13,28 @@
 
 English | [中文](README.md)
 
-Ferryman is a **single-process, single-binary remote AI coding host** for LAN and private-network environments.
-After startup it runs a lightweight local HTTP/WebSocket server and exposes an embedded browser control plane that turns a remote machine into a **browser-based AI coding workstation**.
+Ferryman turns a machine you trust into a browser-accessible **AI coding control plane**.
+When Claude / Codex / Cursor / Gemini / OpenCode style CLI agents are running long tasks on a remote host, you should not need to babysit the machine or bounce between SSH, a web IDE, a remote desktop tool, and infra dashboards. AI also does not magically become self-explanatory just because you left your desk, grabbed coffee, or checked on it from your phone mid-walk. Ferryman keeps that workflow in one place: check progress, approve actions, browse and edit workspace files, take over the terminal, and jump into IDE, screen streaming, or host operations when needed.
+
+Ferryman treats **mobile-friendly access** as a first-class requirement.
+With a public FerrymanProxy or your own FerrymanProxy deployed on a public Linux server, you can bring your VibeCode terminal with you to practically any place with a browser. For developers who keep wondering whether the remote AI task back at home or in the office has started improvising, that peace of mind matters.
+
+It is not just a web terminal and not just another remote desktop.
+Ferryman is built for the new **AI agent + remote host** workflow: agents keep working, humans step in occasionally, and every intervention needs full context, enough control, and an auditable trail. It can also surface and import existing local Codex / Claude / Cursor / Gemini / OpenCode sessions so you can continue from the context already in your head instead of reconstructing it from memory.
+
+## Why Developers Care About Ferryman
+
+- **Built around AI coding rather than generic remote access**: CodeAgent, terminal, files, Git, attachments, event streams, and permission interactions live in one workflow.
+- **Mobile-friendly when you need to step in fast**: phones and tablets remain useful for checking, approving, and steering long-running tasks away from your desk.
+- **FerrymanProxy makes global reach practical**: once a public FerrymanProxy entry point is in place, the machine at home or in the office is no longer trapped inside one LAN.
+- **Local session continuation feels natural**: existing CLI-agent transcripts can be imported so the browser UI starts with real context instead of a blank slate.
+- **Brings development and operations into one entry point**: switch between `code-server`, screen control, Docker, VMs, tunnel management, and system monitoring from the same browser UI.
+- **Low-friction and self-host friendly**: single process, single binary, designed for LAN/private-network deployment with minimal runtime dependencies and clear auditability.
+
+## Coming Soon
+
+- **Ralph Wiggum Loop**: a clearer rhythm for agent collaboration, with less "what is it secretly doing now?" and more "what is it about to do next?"
+- **Developer Kanban**: a better surface for watching sessions, tasks, blockers, and next actions across multiple AI workstreams.
 
 Ferryman combines:
 
@@ -30,7 +50,7 @@ Ferryman combines:
 - built-in tunnel mapping panel (FerrymanProxy integration)
 - realtime device monitor dashboard (CPU/GPU/memory/disk)
 
-The project keeps frontend and backend in one repository, uses explicit HTTP/WebSocket contracts, and focuses on minimal runtime dependencies, auditability, extensibility, and a unified remote workflow for AI-assisted programming.
+The project keeps frontend and backend in one repository, uses explicit HTTP/WebSocket contracts, and pulls remote AI coding, host control, and infrastructure operations into one self-hostable browser workspace.
 
 ## Core Capabilities
 
@@ -297,7 +317,7 @@ Note:
 
 ## FerrymanProxy (Linux)
 
-`FerrymanProxy` is a standalone public proxy server (Linux-only) for Ferryman reverse TCP/UDP port mappings.
+`FerrymanProxy` is a standalone public proxy server (Linux-only) for Ferryman reverse TCP/UDP port mappings, and a key building block for making Ferryman feel natural on phones, tablets, and browsers outside your home network.
 
 Build the standalone target:
 
