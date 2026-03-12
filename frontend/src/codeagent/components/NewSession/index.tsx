@@ -3,10 +3,13 @@ import type { ApiClient } from '@/api/client'
 import type { Machine } from '@/types/api'
 import { usePlatform } from '@/hooks/usePlatform'
 import { useSpawnSession } from '@/hooks/mutations/useSpawnSession'
+import { useMachinePathExists } from '@/hooks/queries/useMachinePathExists'
 import { useSessions } from '@/hooks/queries/useSessions'
-import { useActiveSuggestions, type Suggestion } from '@/hooks/useActiveSuggestions'
+import { useMachinePathsExists } from '@/hooks/queries/useMachinePathsExists'
+import type { Suggestion } from '@/hooks/useActiveSuggestions'
 import { useDirectorySuggestions } from '@/hooks/useDirectorySuggestions'
 import { useRecentPaths } from '@/hooks/useRecentPaths'
+import { useTranslation } from '@/lib/use-translation'
 import type { AgentType } from './types'
 import { ActionButtons } from './ActionButtons'
 import { AgentSelector } from './AgentSelector'
@@ -33,6 +36,7 @@ export function NewSession(props: {
     onSuccess: (sessionId: string) => void
     onCancel: () => void
 }) {
+    const { t } = useTranslation()
     const { haptic } = usePlatform()
     const { spawnSession, isPending, error: spawnError } = useSpawnSession(props.api)
     const { sessions } = useSessions(props.api)
@@ -43,7 +47,8 @@ export function NewSession(props: {
     const [directory, setDirectory] = useState('')
     const [suppressSuggestions, setSuppressSuggestions] = useState(false)
     const [isDirectoryFocused, setIsDirectoryFocused] = useState(false)
-    const [pathExistence, setPathExistence] = useState<Record<string, boolean>>({})
+    const [showDirectorySuggestions, setShowDirectorySuggestions] = useState(false)
+    const [selectedSuggestionIndex, setSelectedSuggestionIndex] = useState(-1)
     const [agent, setAgent] = useState<AgentType>(loadPreferredAgent)
     const [model, setModel] = useState('auto')
     const [permissionChoice, setPermissionChoice] = useState<NewSessionPermissionChoice>(() => loadPreferredPermissionChoice(loadPreferredAgent()))
@@ -85,42 +90,23 @@ export function NewSession(props: {
     )
 
     const allPaths = useDirectorySuggestions(machineId, sessions, recentPaths)
-
-    const pathsToCheck = useMemo(
-        () => Array.from(new Set(allPaths)).slice(0, 1000),
-        [allPaths]
-    )
-
-    useEffect(() => {
-        let cancelled = false
-
-        if (!machineId || pathsToCheck.length === 0) {
-            setPathExistence({})
-            return () => { cancelled = true }
-        }
-
-        void props.api.checkMachinePathsExists(machineId, pathsToCheck)
-            .then((result) => {
-                if (cancelled) return
-                setPathExistence(result.exists ?? {})
-            })
-            .catch(() => {
-                if (cancelled) return
-                setPathExistence({})
-            })
-
-        return () => {
-            cancelled = true
-        }
-    }, [machineId, pathsToCheck, props.api])
+    const pathExistence = useMachinePathsExists(props.api, machineId, allPaths)
 
     const verifiedPaths = useMemo(
         () => allPaths.filter((path) => pathExistence[path]),
         [allPaths, pathExistence]
     )
 
-    const getSuggestions = useCallback(async (query: string): Promise<Suggestion[]> => {
-        const lowered = query.toLowerCase()
+    const suggestions = useMemo<Suggestion[]>(() => {
+        if (!isDirectoryFocused || suppressSuggestions || !showDirectorySuggestions) {
+            return []
+        }
+
+        const lowered = directory.trim().toLowerCase()
+        if (!lowered) {
+            return []
+        }
+
         return verifiedPaths
             .filter((path) => path.toLowerCase().includes(lowered))
             .slice(0, 8)
@@ -129,23 +115,91 @@ export function NewSession(props: {
                 text: path,
                 label: path
             }))
-    }, [verifiedPaths])
+    }, [directory, isDirectoryFocused, showDirectorySuggestions, suppressSuggestions, verifiedPaths])
 
-    const activeQuery = (!isDirectoryFocused || suppressSuggestions) ? null : directory
+    useEffect(() => {
+        setSelectedSuggestionIndex((previous) => {
+            if (suggestions.length === 0) {
+                return -1
+            }
+            if (previous < 0) {
+                return -1
+            }
+            if (previous >= suggestions.length) {
+                return suggestions.length - 1
+            }
+            return previous
+        })
+    }, [suggestions])
 
-    const [suggestions, selectedIndex, moveUp, moveDown, clearSuggestions] = useActiveSuggestions(
-        activeQuery,
-        getSuggestions,
-        { allowEmptyQuery: true, autoSelectFirst: false }
-    )
+    const moveSuggestionUp = useCallback(() => {
+        setSelectedSuggestionIndex((previous) => {
+            if (suggestions.length === 0) {
+                return -1
+            }
+            if (previous <= 0) {
+                return suggestions.length - 1
+            }
+            return previous - 1
+        })
+    }, [suggestions.length])
+
+    const moveSuggestionDown = useCallback(() => {
+        setSelectedSuggestionIndex((previous) => {
+            if (suggestions.length === 0) {
+                return -1
+            }
+            if (previous < 0 || previous >= suggestions.length - 1) {
+                return 0
+            }
+            return previous + 1
+        })
+    }, [suggestions.length])
+
+    const clearSuggestions = useCallback(() => {
+        setSelectedSuggestionIndex(-1)
+        setShowDirectorySuggestions(false)
+    }, [])
 
     const permissionChoiceOptions = useMemo(
-        () => getPermissionChoiceOptions(agent),
-        [agent]
+        () => getPermissionChoiceOptions(agent, t),
+        [agent, t]
     )
+
+    const directoryTrimmed = directory.trim()
+    const {
+        exists: directoryExists,
+        isChecking: isCheckingDirectory,
+        error: directoryCheckError,
+    } = useMachinePathExists(props.api, machineId, directoryTrimmed)
+
+    const directoryValidation = useMemo((): {
+        message: string | null
+        tone: 'muted' | 'success' | 'error'
+    } => {
+        if (!machineId || !directoryTrimmed) {
+            return { message: null, tone: 'muted' }
+        }
+        if (isCheckingDirectory) {
+            return { message: t('newSession.directoryChecking'), tone: 'muted' }
+        }
+        if (directoryCheckError) {
+            return { message: t('newSession.directoryCheckFailed'), tone: 'error' }
+        }
+        if (directoryExists === false) {
+            return { message: t('newSession.directoryNotFound'), tone: 'error' }
+        }
+        if (directoryExists === true) {
+            return { message: t('newSession.directoryExists'), tone: 'success' }
+        }
+        return { message: null, tone: 'muted' }
+    }, [directoryCheckError, directoryExists, directoryTrimmed, isCheckingDirectory, machineId, t])
 
     const handleMachineChange = useCallback((newMachineId: string) => {
         setMachineId(newMachineId)
+        setSelectedSuggestionIndex(-1)
+        setShowDirectorySuggestions(false)
+        setError(null)
         const paths = getRecentPaths(newMachineId)
         if (paths[0]) {
             setDirectory(paths[0])
@@ -156,6 +210,10 @@ export function NewSession(props: {
 
     const handlePathClick = useCallback((path: string) => {
         setDirectory(path)
+        setError(null)
+        setSelectedSuggestionIndex(-1)
+        setShowDirectorySuggestions(false)
+        setSuppressSuggestions(true)
     }, [])
 
     const handleBrowseDirectory = useCallback(() => {
@@ -164,6 +222,9 @@ export function NewSession(props: {
 
     const handleDirectoryPicked = useCallback((path: string) => {
         setDirectory(path)
+        setError(null)
+        setSelectedSuggestionIndex(-1)
+        setShowDirectorySuggestions(false)
         setSuppressSuggestions(true)
     }, [])
 
@@ -171,6 +232,7 @@ export function NewSession(props: {
         const suggestion = suggestions[index]
         if (suggestion) {
             setDirectory(suggestion.text)
+            setError(null)
             clearSuggestions()
             setSuppressSuggestions(true)
         }
@@ -178,16 +240,23 @@ export function NewSession(props: {
 
     const handleDirectoryChange = useCallback((value: string) => {
         setSuppressSuggestions(false)
+        setShowDirectorySuggestions(true)
+        setSelectedSuggestionIndex(-1)
+        setError(null)
         setDirectory(value)
     }, [])
 
     const handleDirectoryFocus = useCallback(() => {
         setSuppressSuggestions(false)
+        setShowDirectorySuggestions(false)
+        setSelectedSuggestionIndex(-1)
         setIsDirectoryFocused(true)
     }, [])
 
     const handleDirectoryBlur = useCallback(() => {
         setIsDirectoryFocused(false)
+        setShowDirectorySuggestions(false)
+        setSelectedSuggestionIndex(-1)
     }, [])
 
     const handleDirectoryKeyDown = useCallback((event: ReactKeyboardEvent<HTMLInputElement>) => {
@@ -195,35 +264,36 @@ export function NewSession(props: {
 
         if (event.key === 'ArrowUp') {
             event.preventDefault()
-            moveUp()
+            moveSuggestionUp()
         }
 
         if (event.key === 'ArrowDown') {
             event.preventDefault()
-            moveDown()
+            moveSuggestionDown()
         }
 
         if (event.key === 'Enter' || event.key === 'Tab') {
-            if (selectedIndex >= 0) {
+            if (selectedSuggestionIndex >= 0) {
                 event.preventDefault()
-                handleSuggestionSelect(selectedIndex)
+                handleSuggestionSelect(selectedSuggestionIndex)
             }
         }
 
         if (event.key === 'Escape') {
             clearSuggestions()
         }
-    }, [suggestions, selectedIndex, moveUp, moveDown, clearSuggestions, handleSuggestionSelect])
+    }, [suggestions.length, selectedSuggestionIndex, moveSuggestionUp, moveSuggestionDown, clearSuggestions, handleSuggestionSelect])
 
     async function handleCreate() {
-        if (!machineId || !directory.trim()) return
+        if (!machineId || !directoryTrimmed) return
+        if (isCheckingDirectory || directoryExists === false) return
 
         setError(null)
         try {
             const resolvedModel = model !== 'auto' && agent !== 'opencode' ? model : undefined
             const result = await spawnSession({
                 machineId,
-                directory: directory.trim(),
+                directory: directoryTrimmed,
                 agent,
                 model: resolvedModel,
                 permissionMode: permissionChoice
@@ -232,7 +302,7 @@ export function NewSession(props: {
             if (result.type === 'success') {
                 haptic.notification('success')
                 setLastUsedMachineId(machineId)
-                addRecentPath(machineId, directory.trim())
+                addRecentPath(machineId, directoryTrimmed)
                 props.onSuccess(result.sessionId)
                 return
             }
@@ -245,7 +315,13 @@ export function NewSession(props: {
         }
     }
 
-    const canCreate = Boolean(machineId && directory.trim() && !isFormDisabled)
+    const canCreate = Boolean(
+        machineId
+        && directoryTrimmed
+        && !isFormDisabled
+        && !isCheckingDirectory
+        && directoryExists !== false
+    )
 
     return (
         <div className="flex flex-col divide-y divide-[var(--app-divider)]">
@@ -259,9 +335,11 @@ export function NewSession(props: {
             <DirectorySection
                 directory={directory}
                 suggestions={suggestions}
-                selectedIndex={selectedIndex}
+                selectedIndex={selectedSuggestionIndex}
                 isDisabled={isFormDisabled}
                 recentPaths={recentPaths}
+                validationMessage={directoryValidation.message}
+                validationTone={directoryValidation.tone}
                 onDirectoryChange={handleDirectoryChange}
                 onDirectoryFocus={handleDirectoryFocus}
                 onDirectoryBlur={handleDirectoryBlur}

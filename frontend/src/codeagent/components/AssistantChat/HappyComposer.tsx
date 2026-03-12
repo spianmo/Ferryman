@@ -26,6 +26,7 @@ import { applySuggestion } from '@/utils/applySuggestion'
 import { usePlatform } from '@/hooks/usePlatform'
 import { usePWAInstall } from '@/hooks/usePWAInstall'
 import { isClaudeFlavor } from '@/lib/agentFlavorUtils'
+import { getPermissionModeDescriptionText } from '@/lib/permissionModeDescriptions'
 import { markSkillUsed } from '@/lib/recent-skills'
 import { FloatingOverlay } from '@/components/ChatInput/FloatingOverlay'
 import { Autocomplete } from '@/components/ChatInput/Autocomplete'
@@ -224,8 +225,12 @@ export function HappyComposer(props: {
     }, [abortDisabled, api, haptic])
 
     const permissionModeOptions = useMemo(
-        () => getPermissionModeOptionsForFlavor(agentFlavor),
-        [agentFlavor]
+        () =>
+            getPermissionModeOptionsForFlavor(agentFlavor).map((option) => ({
+                ...option,
+                description: getPermissionModeDescriptionText(t, option.mode)
+            })),
+        [agentFlavor, t]
     )
     const permissionModes = useMemo(
         () => permissionModeOptions.map((option) => option.mode),

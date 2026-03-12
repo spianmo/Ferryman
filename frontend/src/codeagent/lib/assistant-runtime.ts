@@ -5,6 +5,7 @@ import { safeStringify } from '@hapi/protocol'
 import { renderEventLabel } from '@/chat/presentation'
 import type { ChatBlock, CliOutputBlock } from '@/chat/types'
 import type { AgentEvent, ToolCallBlock } from '@/chat/types'
+import { useTranslation } from '@/lib/use-translation'
 import type { AttachmentMetadata, MessageStatus as HappyMessageStatus, Session } from '@/types/api'
 
 export type HappyChatMessageMetadata = {
@@ -18,7 +19,7 @@ export type HappyChatMessageMetadata = {
     attachments?: AttachmentMetadata[]
 }
 
-function toThreadMessageLike(block: ChatBlock): ThreadMessageLike {
+function toThreadMessageLike(block: ChatBlock, t?: (key: string, params?: Record<string, string | number>) => string): ThreadMessageLike {
     if (block.kind === 'user-text') {
         const messageId = `user:${block.id}`
         return {
@@ -70,7 +71,7 @@ function toThreadMessageLike(block: ChatBlock): ThreadMessageLike {
             role: 'system',
             id: messageId,
             createdAt: new Date(block.createdAt),
-            content: [{ type: 'text', text: renderEventLabel(block.event) }],
+            content: [{ type: 'text', text: renderEventLabel(block.event, t) }],
             metadata: {
                 custom: { kind: 'event', event: block.event } satisfies HappyChatMessageMetadata
             }
@@ -177,6 +178,8 @@ export function useHappyRuntime(props: {
     attachmentAdapter?: AttachmentAdapter
     allowSendWhenInactive?: boolean
 }) {
+    const { t } = useTranslation()
+
     const dedupeThreadMessages = useCallback((messages: readonly ThreadMessageLike[]): ThreadMessageLike[] => {
         if (messages.length <= 1) return [...messages]
 
@@ -195,8 +198,12 @@ export function useHappyRuntime(props: {
 
     // Use cached message converter for performance optimization
     // This prevents re-converting all messages on every render
+    const toThreadMessageLikeCallback = useCallback((block: ChatBlock) => {
+        return toThreadMessageLike(block, t)
+    }, [t])
+
     const convertedMessages = useExternalMessageConverter<ChatBlock>({
-        callback: toThreadMessageLike,
+        callback: toThreadMessageLikeCallback,
         messages: props.blocks as ChatBlock[],
         isRunning: props.session.thinking,
     })

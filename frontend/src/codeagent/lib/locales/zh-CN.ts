@@ -119,6 +119,10 @@ export default {
   'newSession.agent': '代理',
   'newSession.model': '模型',
   'newSession.model.optional': '可选',
+  'newSession.directoryChecking': '正在检查目录是否存在…',
+  'newSession.directoryExists': '目录存在，可以创建会话。',
+  'newSession.directoryNotFound': '目录不存在，请检查路径。',
+  'newSession.directoryCheckFailed': '目录校验失败，请稍后重试。',
   'newSession.create': '创建',
   'newSession.creating': '创建中…',
 
@@ -266,6 +270,25 @@ export default {
   'settings.about.website': '官方网站',
   'settings.about.appVersion': '应用版本',
   'settings.about.protocolVersion': '协议版本',
+
+  // Events
+  'event.permissionModeChanged': '权限模式：{mode}',
+
+  // Permission mode descriptions
+  'permissionMode.description.default': 'Claude 在需要更高权限操作时会先询问。',
+  'permissionMode.description.acceptEdits': '自动应用文件编辑，但在更广泛的操作前仍会先询问。',
+  'permissionMode.description.plan': '只查看和规划，不做修改。',
+  'permissionMode.description.bypassPermissions': '跳过权限提示。仅可在受信任环境中使用。',
+  'permissionMode.description.ask': '在执行需要批准的操作前先询问。',
+  'permissionMode.description.readOnly': '只查看代码库，不修改文件。',
+  'permissionMode.description.auto': '可在工作区内操作，并在敏感操作前先询问。',
+  'permissionMode.description.fullAccess': '跳过审批与沙箱限制。仅可在受信任环境中使用。',
+  'permissionMode.description.autoEdit': '自动批准编辑类工具，其他工具仍会提示确认。',
+  'permissionMode.description.yolo': '自动批准所有工具。仅可在受信任环境中使用。',
+  'permissionMode.description.allow': '直接允许请求的工具，无需提示。',
+  'permissionMode.description.deny': '默认拒绝请求的工具。',
+  'permissionMode.description.agent': '以标准 Agent 模式运行。',
+  'permissionMode.description.force': '跳过确认提示，并以 force 模式运行。',
 
   // Misc
   'misc.noMachines': '无可用机器',

@@ -5,6 +5,8 @@ import {
     type PermissionModeOption,
     type PermissionModeTone,
 } from '@hapi/protocol'
+import type { I18nContextValue } from '@/lib/use-translation'
+import { getPermissionModeDescriptionText } from '@/lib/permissionModeDescriptions'
 import type { AgentType } from './types'
 
 const PERMISSION_MODE_STORAGE_KEY_PREFIX = 'hapi:newSession:permissionMode:'
@@ -31,9 +33,9 @@ export function getDefaultPermissionChoice(agent: AgentType): NewSessionPermissi
     }
 }
 
-export function getPermissionChoiceOptions(agent: AgentType): NewSessionPermissionChoiceOption[] {
+export function getPermissionChoiceOptions(agent: AgentType, t: I18nContextValue['t']): NewSessionPermissionChoiceOption[] {
     return getPermissionModeOptionsForFlavor(agent)
-        .map((option) => toChoiceOption(option))
+        .map((option) => toChoiceOption(option, t))
 }
 
 export function loadPreferredPermissionChoice(agent: AgentType): NewSessionPermissionChoice {
@@ -63,11 +65,11 @@ function isPermissionChoiceAllowedForAgent(choice: string, agent: AgentType): ch
     return isPermissionModeAllowedForFlavor(choice as PermissionMode, agent)
 }
 
-function toChoiceOption(option: PermissionModeOption): NewSessionPermissionChoiceOption {
+function toChoiceOption(option: PermissionModeOption, t: I18nContextValue['t']): NewSessionPermissionChoiceOption {
     return {
         value: option.mode,
         label: option.label,
         tone: option.tone,
-        description: option.description
+        description: getPermissionModeDescriptionText(t, option.mode)
     }
 }

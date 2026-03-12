@@ -81,7 +81,7 @@ function SettingSwitch(props: {
             <div className="min-w-0 flex-1">
                 <div className="text-[var(--app-fg)]">{props.label}</div>
                 {props.description ? (
-                    <div className="mt-1 text-sm text-[var(--app-hint)]">{props.description}</div>
+                    <div className="mt-1 whitespace-normal break-words text-sm text-[var(--app-hint)]">{props.description}</div>
                 ) : null}
             </div>
             <span

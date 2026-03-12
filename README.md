@@ -11,104 +11,131 @@
 ![Native Stream](https://img.shields.io/badge/Native%20Stream-JPEG%2FH264%2FH265%2FVP8%2FVP9%2FAV1-0EA5E9)
 ![Platforms](https://img.shields.io/badge/Platforms-macOS%20%7C%20Linux%20%7C%20Windows-334155)
 
-English | [中文](README_CN.md)
+[English](README_EN.md) | 中文
 
-Ferryman is a **single-process, single-binary remote access and execution host** for LAN scenarios.
-After startup it runs a lightweight local HTTP/WebSocket server and serves an embedded browser control plane for:
+Ferryman 是一个面向局域网与私有网络场景的 **单进程、单二进制远程 AI 编程宿主**。  
+启动后会在本机拉起轻量级 HTTP/WebSocket 服务，并提供一个内嵌浏览器控制台，把远端机器变成一个 **基于浏览器的 AI 编程工作台**。
 
-- file browsing and read/write
-- PTY terminal sessions
-- async task execution
-- runtime logs/audit stream
-- WebRTC signaling + native screen streaming and remote input injection
-- Docker container management (lifecycle/metrics/logs/files)
-- Dockurr VM management (create/start/stop/restart/logs/inspect)
-- built-in code-server panel (install/start/restart, port + TLS mode config, embedded IDE view)
-- built-in CodeAgent panel (hapi-compatible web UI + C++ backend runner)
-- built-in tunnel mapping panel (FerrymanProxy integration)
-- realtime device monitor dashboard (CPU/GPU/memory/disk)
+Ferryman 将以下能力整合到同一个入口里：
 
-The project keeps frontend and backend in one repository, uses explicit HTTP/WebSocket contracts, and focuses on minimal runtime dependencies, auditability, and extensibility.
+- 内置 **CodeAgent** 面板，支持 Claude / Codex / Cursor / Gemini / OpenCode 会话工作流
+- 面向编程场景的文件浏览、文件搜索、上传/附件流转与工作区读写
+- PTY 终端会话与异步任务执行
+- 会话级 Git 状态 / diff 上下文查看
+- 内置 **code-server** 管理与 IDE 嵌入视图
+- 运行日志与审计流
+- WebRTC 信令 + 原生屏幕流与远程输入注入
+- Docker 容器管理（生命周期/指标/日志/文件）
+- Dockurr 虚拟机管理（创建/启动/停止/重启/日志/详情）
+- 内网穿透映射面板（FerrymanProxy 集成）
+- 设备实时监控（CPU/GPU/内存/磁盘）
 
-## Core Capabilities
+项目采用前后端同仓库结构，通过明确的 HTTP/WebSocket 协议交互，强调最小依赖、可审计、可扩展，以及围绕大模型辅助编程的统一远程工作流。
 
-### Access and Session Model
+## 核心能力
 
-- First run bootstraps `~/.ferryman/config.ini` with a generated `access_key`.
-- Login uses access key + session token (`X-Session-Token`) for all protected HTTP/WS channels.
-- Multiple users can log in at the same time.
-- Terminal/task contexts are scoped by session token (`owner_token`) for isolation and traceability.
-- Login currently grants command/screen authorization by default (no extra manual approval step).
+### 访问与会话模型
 
-### Runtime Features
+- 首次运行会自动生成 `~/.ferryman/config.ini`，写入 `access_key`。
+- 登录后获取会话令牌，后续受保护 HTTP/WS 接口通过 `X-Session-Token` 鉴权。
+- 支持多人同时登录。
+- 终端/任务等运行上下文按会话令牌（`owner_token`）隔离，便于区分与追踪。
+- 当前行为为登录即默认授予命令与屏幕权限（无需额外手动授权步骤）。
 
-- **Transport layer**: `libhv` HTTP + WebSocket server (single listener; WS and HTTP share one port at runtime).
-- **JSON payloads**: parsed/serialized with `nlohmann/json`.
-- **File operations**: list/read/write under workspace root (`$HOME` by default), with path boundary checks.
-- **Terminal**: child process + PTY (`forkpty`), ANSI passthrough, browser rendering via `xterm.js` (including 256-color support).
-- **Tasks**: async command execution with status lifecycle (`queued/running/succeeded/failed`), polling and output retrieval.
-- **Logs**:
-  - immediate backend output (`stdout/stderr`)
-  - in-memory tail buffer via `/api/logs/tail`
-  - realtime WS push via `/ws/logs`
-- **Dockurr VM manager**:
-  - create/list/start/stop/restart Windows/macOS VMs
-  - startup/runtime logs and inspect output
-  - Linux hosts can trigger one-click KVM installation from UI when `/dev/kvm` is unavailable
-- **Docker manager**:
-  - container list + start/stop/restart
-  - CPU/memory/network/block I/O metrics and process view
-  - inspect/logs and in-container file list/read/write/upload/download
-- **code-server panel**:
-  - detect host install state and support one-click install from UI
-  - launch/restart `code-server` with configurable port and HTTP/HTTPS
-  - TLS modes: `ferryman`, `selfsigned`, `custom`; runtime log: `~/.ferryman/logs/codeserver.log`
-- **CodeAgent panel (hapi-compatible)**:
-  - C++ backend endpoint set compatible with hapi web API (`/api/auth`, `/api/sessions`, `/api/events`, `/api/machines`, etc.)
-  - supports Claude/Codex/Cursor/Gemini/OpenCode command templates
-  - runner/session tracking and remote browser control from Ferryman UI
-  - frontend is merged into Ferryman UI (`#/codeagent`) and rendered directly (no iframe), independent from code-server runtime
-- **Tunnel (NAT traversal) panel**:
-  - FerrymanProxy host/port/token configuration
-  - mapping CRUD (`tcp`/`udp`) with enable/disable + online test
-  - local listening ports table (address/port/process/pid)
-- **Realtime monitor panel**:
-  - device snapshots over `/ws/monitor`
-  - CPU/GPU/memory/disk cards and trend charts
-- **Screen + remote control**:
-  - WebRTC room signaling (`join` / `signal`) channel
-  - native screen stream over WS binary frames (`FRM1`)
-  - keyboard/mouse event uplink and native input injection
-  - soft-key combos for Ctrl/Alt/Meta plus Tab/Esc/system-attention shortcuts
-  - drag-and-drop file transfer with conflict strategy + chunked upload session APIs
-  - codec/fps/resolution/bitrate negotiation for native stream subscribers
+### 远程大模型编程能力
 
-### Screen Backends
+- **内置 CodeAgent 面板（hapi 兼容）**：
+  - 直接并入 Ferryman UI（`#/codeagent`），非 iframe 渲染，与 `code-server` 完全解耦
+  - C++ 后端实现 hapi Web API 兼容接口（`/api/auth`、`/api/sessions`、`/api/events`、`/api/machines` 等）
+  - 支持 Claude / Codex / Cursor / Gemini / OpenCode 命令模板调用
+- **会话化编程工作流**：
+  - 按机器、工作目录、Agent 类型、模型、权限模式创建会话
+  - 支持 resume / abort / archive / rename / delete 等完整会话生命周期操作
+  - 提供 Runner/会话状态跟踪与实时事件流
+- **交互式 Agent 控制**：
+  - 浏览器内完成权限审批/拒绝
+  - 支持 ask-user-input / 提问回答类交互，适配计划式协作流程
+  - 支持按会话调整模型、推理强度与 Codex Fast 模式
+- **面向编码的工作区上下文**：
+  - 目录树、文件浏览、文件搜索与会话文件视图
+  - 文件上传与附件随消息传递
+  - 会话工作区内的 Git 状态 / diff 查看
+  - 基于 WebSocket 的独立会话终端
+- **外部 Agent 历史接入**：
+  - 可发现并导入本机已有的 Codex / Claude / Cursor / Gemini / OpenCode transcript
+  - 支持把已有 CLI Agent 会话接到 Ferryman 中继续远程协作
+
+### 运行时与开发环境能力
+
+- **传输层**：基于 `libhv` 的 HTTP + WebSocket 服务（运行时 HTTP/WS 共享同一监听端口）。
+- **JSON 处理**：基于 `nlohmann/json`。
+- **文件能力**：在工作根目录（默认 `$HOME`）下进行目录列举与文件读写，并带路径越界检查。
+- **终端能力**：基于子进程 + PTY（`forkpty`），透传 ANSI 控制序列，前端通过 `xterm.js` 渲染（含 256 色支持）。
+- **任务能力**：异步命令执行，状态流转（`queued/running/succeeded/failed`），支持轮询与输出获取。
+- **日志能力**：
+  - 后端即时控制台输出（`stdout/stderr`）
+  - `/api/logs/tail` 内存日志尾部读取
+  - `/ws/logs` 实时推送
+- **code-server 面板**：
+  - 检测主机安装状态并支持 UI 一键安装
+  - 按可配置端口与 HTTP/HTTPS 模式启动/重启 `code-server`
+  - TLS 模式：`ferryman`、`selfsigned`、`custom`；运行日志：`~/.ferryman/logs/codeserver.log`
+
+### 宿主与基础设施能力
+
+- **Dockurr 虚拟机管理**：
+  - 创建/列举/启动/停止/重启 Windows/macOS 虚拟机
+  - 启动日志、运行日志与虚拟机详情查看
+  - Linux 主机在 `/dev/kvm` 缺失时可在 UI 一键安装 KVM
+- **Docker 容器管理**：
+  - 容器列表 + 启停/重启
+  - CPU/内存/网络/磁盘 I/O 指标与进程视图
+  - inspect/日志与容器内文件浏览/读写/上传/下载
+- **内网穿透能力**：
+  - FerrymanProxy 的 host/port/token 配置
+  - `tcp`/`udp` 映射的新增、更新、删除、启用/禁用、在线测试
+  - 本机监听端口（地址/端口/进程/PID）可视化
+- **设备实时监控**：
+  - 通过 `/ws/monitor` 推送快照
+  - CPU/GPU/内存/磁盘卡片与趋势图
+- **屏幕与远控能力**：
+  - WebRTC 房间信令（`join` / `signal`）
+  - 原生屏幕流（WS 二进制 `FRM1`）
+  - 键鼠事件上行 + 本地输入注入
+  - 软键盘组合键（Ctrl/Alt/Meta）+ Tab/Esc/系统注意力快捷键
+  - 拖拽文件传输（冲突策略 + 分片上传会话）
+  - 原生流按订阅者协商 codec/fps/分辨率/码率
+
+### 屏幕采集后端
 
 - macOS: ScreenCaptureKit + ApplicationServices
-- Linux: X11 capture + XTest input
-- Windows: GDI capture + SendInput
-- Encoders:
-  - always available: `jpeg`
-  - when ffmpeg is available: `h264`, `h265`, `vp8`, `vp9`, `av1`
-- Runtime profiles:
-  - FPS: `1..60`
-  - Resolution tiers: `full(100%)`, `balanced(75%)`, `performance(50%)`
-  - Bitrate tiers: `sd(1.5Mbps)`, `hd(3Mbps)`, `uhd(6Mbps)`
+- Linux: X11 Capture + XTest
+- Windows: GDI + SendInput
+- 编码器支持：
+  - 始终可用：`jpeg`
+  - ffmpeg 可用时：`h264`、`h265`、`vp8`、`vp9`、`av1`
+- 运行时配置档位：
+  - 帧率：`1..60`
+  - 分辨率档：`full(100%)`、`balanced(75%)`、`performance(50%)`
+  - 码率档：`sd(1.5Mbps)`、`hd(3Mbps)`、`uhd(6Mbps)`
 
-## Architecture
+## 架构概览
 
 ```text
 Browser (React/Vite)
   |- /api/*  (HTTP)
   |- /ws/terminal (WebSocket)
+  |- /ws/codeagent/terminal (WebSocket)
+  |- /ws/codeagent/events   (WebSocket)
   |- /ws/webrtc   (WebSocket)
   |- /ws/logs     (WebSocket)
   |- /ws/dockurr  (WebSocket)
-  `- /ws/monitor  (WebSocket)
+  |- /ws/monitor  (WebSocket)
+  `- /ws/tunnel   (WebSocket)
 
 Ferryman (single process)
   |- SessionManager / Auth (access key)
+  |- CodeAgentManager
   |- FileService
   |- PtyManager
   |- TaskManager
@@ -121,51 +148,51 @@ Ferryman (single process)
   `- ScreenService + VideoEncoder (ffmpeg)
 ```
 
-## CodeAgent Integration
+## CodeAgent 集成说明
 
-- The CodeAgent module is a standalone panel in Ferryman UI (`#/codeagent`).
-- The CodeAgent backend is fully implemented in C++ (`CodeAgentManager` + HTTP handlers in `ServerApp`) and runs in parallel with code-server without shared process/state coupling.
-- Copied hapi frontend source is merged into `frontend/src/codeagent*` and built together with Ferryman UI.
+- Ferryman UI 新增独立 CodeAgent 页签（`#/codeagent`）。
+- CodeAgent 后端逻辑完全由 C++ 实现（`CodeAgentManager` + `ServerApp` 路由），并与 CodeServer 模块并行运行、互不依赖。
+- 仓库内拷贝的 hapi 前端源码已并入 `frontend/src/codeagent*`，与 Ferryman 前端统一构建。
 
-## Repository Layout
+## 仓库结构
 
-- `include/ferryman/*`: backend headers
-- `src/*`: backend implementation
-- `frontend/*`: Vite + React + TypeScript control panel
-- `cmake/EmbedAssets.cmake`: embed `frontend/dist` into generated C++ source
-- `scripts/make_deps.sh`: dependency bootstrap
-- `Makefile`: one-command workflows
+- `include/ferryman/*`: 后端头文件
+- `src/*`: 后端实现
+- `frontend/*`: Vite + React + TypeScript 控制台
+- `cmake/EmbedAssets.cmake`: 将 `frontend/dist` 嵌入 C++ 代码
+- `scripts/make_deps.sh`: 依赖安装脚本
+- `Makefile`: 一键工作流入口
 
-## Build and Run
+## 构建与运行
 
-### 0) Install C++ dependencies (vcpkg)
+### 0) 安装 C++ 依赖（vcpkg）
 
 ```bash
 make deps
 ```
 
-`make deps` includes:
+`make deps` 具备：
 
-- local downloads cache: `.vcpkg-downloads`
-- local binary cache: `.vcpkg-binary-cache`
-- archive prefetch + SHA-512 verification (nlohmann-json / meson / ffmpeg), with mirror fallback URLs
+- 本地下载缓存：`.vcpkg-downloads`
+- 本地二进制缓存：`.vcpkg-binary-cache`
+- nlohmann-json / meson / ffmpeg 预拉取 + SHA-512 校验 + 镜像回退
 
-Optional proxy mode (if local `useProxy` command exists):
+可选代理模式（本机存在 `useProxy` 命令时生效）：
 
 ```bash
 make deps-proxy
 ```
 
-Optional mirror/proxy envs:
+可选镜像/代理环境变量：
 
 - `FERRYMAN_USE_PROXY=1`
 - `NLOHMANN_JSON_URL=<mirror-url>`
 - `MESON_URL=<mirror-url>`
 - `FFMPEG_URL=<mirror-url>`
 - `GITHUB_MIRROR_PREFIX=<prefix>`
-- `VCPKG_ASSET_SOURCES=<asset-source-config>` (passed through to `X_VCPKG_ASSET_SOURCES`)
+- `VCPKG_ASSET_SOURCES=<asset-source-config>`（透传为 `X_VCPKG_ASSET_SOURCES`）
 
-For Windows single-exe builds without third-party DLLs, use a static triplet:
+Windows 若希望产出不依赖三方 DLL 的单文件可执行程序，请使用静态 triplet：
 
 ```powershell
 $env:VCPKG_TARGET_TRIPLET = "x64-windows-static"
@@ -176,53 +203,51 @@ cmake -S . -B build -A x64 `
 cmake --build build --config Release --parallel
 ```
 
-### 1) Build frontend assets
+### 1) 构建前端资源
 
 ```bash
 make frontend
 ```
 
-### 2) Build backend
+### 2) 构建后端
 
 ```bash
 make build
 ```
 
-### 3) Run
+### 3) 运行
 
 ```bash
 make run
 ```
 
-On first run, Ferryman generates and prints an access key, and writes config to `~/.ferryman/config.ini`.
+首次运行会打印 Access Key，并写入 `~/.ferryman/config.ini`。
 
-### One-command release build
+### 一键发布构建
 
 ```bash
 make release
 ```
 
-## Split Development Mode
+## 前后端分离开发模式
 
-Run backend and frontend separately.
-
-Terminal 1:
+终端 1（后端）：
 
 ```bash
 make dev-backend
 ```
 
-Terminal 2:
+终端 2（前端）：
 
 ```bash
 make dev-frontend
 ```
 
-Open:
+浏览器访问：
 
 - `http://127.0.0.1:5173`
 
-Optional proxy override:
+可选代理目标覆盖：
 
 ```bash
 cd frontend
@@ -231,9 +256,9 @@ VITE_BACKEND_WS_URL=ws://127.0.0.1:28080 \
 npm run dev -- --host
 ```
 
-## Runtime Configuration
+## 运行配置
 
-Default config file: `~/.ferryman/config.ini`
+默认配置文件：`~/.ferryman/config.ini`
 
 ```ini
 access_key=<generated>
@@ -255,35 +280,36 @@ tunnel_proxy_token=
 tunnel_mappings_json=[]
 ```
 
-Note:
+说明：
 
-- HTTP and WebSocket share the same listener port at runtime.
-- Set `https_enabled=true` to enable HTTPS/WSS. HTTP/WS stay available on `http_port`.
-- If `tls_cert_file`/`tls_key_file` are empty, Ferryman auto-generates `~/.ferryman/cert/server.crt` and `~/.ferryman/cert/server.key` on first HTTPS startup.
-- Auto-generated certificate paths are written back into `~/.ferryman/config.ini` (`tls_cert_file` / `tls_key_file`).
-- Ferryman also initializes `~/.ferryman/logs/` and reserves `audit.log` path for audit output.
-- `codeserver_port/codeserver_https_enabled/codeserver_https_mode/codeserver_https_cert_file/codeserver_https_key_file` are used by the built-in code-server panel.
-- `tunnel_proxy_host/tunnel_proxy_port/tunnel_proxy_token/tunnel_mappings_json` are used by the built-in tunnel panel for NAT traversal settings.
+- 运行时 HTTP 与 WebSocket 共享同一监听端口。
+- `ws_port` 仍会写入配置文件以兼容旧版本，但运行时会被强制同步为 `http_port`，不能再独立配置。
+- 设置 `https_enabled=true` 可开启 HTTPS/WSS，HTTP/WS 会继续在 `http_port` 上可用。
+- 当 `tls_cert_file`/`tls_key_file` 为空时，首次启用 HTTPS 会自动生成 `~/.ferryman/cert/server.crt` 与 `~/.ferryman/cert/server.key`。
+- 自动生成后的证书路径会回写到 `~/.ferryman/config.ini` 的 `tls_cert_file` / `tls_key_file`。
+- 启动时会初始化 `~/.ferryman/logs/`，并预留 `audit.log` 路径。
+- `codeserver_port/codeserver_https_enabled/codeserver_https_mode/codeserver_https_cert_file/codeserver_https_key_file` 用于内置 code-server 面板。
+- `tunnel_proxy_host/tunnel_proxy_port/tunnel_proxy_token/tunnel_mappings_json` 用于内网穿透配置（由前端“内网穿透”面板维护）。
 
-## FerrymanProxy (Linux)
+## FerrymanProxy（Linux）
 
-`FerrymanProxy` is a standalone public proxy server (Linux-only) for Ferryman reverse TCP/UDP port mappings.
+`FerrymanProxy` 是独立的公网代理服务端（仅支持 Linux），用于承载 Ferryman 发起的 TCP/UDP 反向端口映射。
 
-Build the standalone target:
+编译独立 target：
 
 ```bash
 cmake --build build --target FerrymanProxy -j
-# or
+# 或
 make build-proxy
 ```
 
-Run the proxy server:
+运行服务端：
 
 ```bash
 ./build/FerrymanProxy --bind 0.0.0.0 --control-port 17000 --admin-host 127.0.0.1 --admin-port 17001 --log-file /var/log/ferryman-proxy.log
 ```
 
-One-click deployment on public Linux (install binary + systemd + firewall):
+公网 Linux 一键部署（安装二进制 + systemd + 防火墙）：
 
 ```bash
 sudo ./scripts/deploy_ferryman_proxy.sh \
@@ -294,7 +320,7 @@ sudo ./scripts/deploy_ferryman_proxy.sh \
   --admin-port 17001
 ```
 
-CLI inspect current mappings and modes:
+命令行查看当前映射：
 
 ```bash
 ./build/FerrymanProxy --list --admin-host 127.0.0.1 --admin-port 17001
@@ -302,7 +328,7 @@ CLI inspect current mappings and modes:
 ./build/FerrymanProxy --logs 200 --admin-host 127.0.0.1 --admin-port 17001
 ```
 
-Enable at boot via systemd template:
+Systemd 开机自启（模板）：
 
 ```bash
 sudo cp scripts/ferryman-proxy.service /etc/systemd/system/ferryman-proxy.service
@@ -313,57 +339,118 @@ sudo systemctl status ferryman-proxy
 
 ## HTTP API
 
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/api/auth/login` | Access key login |
-| `GET` | `/api/session/me` | Session info + host capability flags (`host_os` / `docker_installed` / `codeserver_installed` / `kvm_installed`) |
-| `GET` | `/api/files/list` | List directory |
-| `GET` | `/api/files/read` | Read file |
-| `POST` | `/api/files/write` | Write file |
-| `POST` | `/api/tasks/start` | Start async task |
-| `GET` | `/api/tasks/list` | List tasks |
-| `GET` | `/api/tasks/get` | Task detail/output |
-| `GET` | `/api/logs/tail` | Tail runtime audit logs |
-| `POST` | `/api/codeserver/config` | Update code-server port/TLS config, persist, and restart |
-| `GET` | `/api/dockurr/list` | List Dockurr VMs |
-| `POST` | `/api/dockurr/create` | Create VM (windows/macos, version/ram/disk/persist/name) |
-| `POST` | `/api/dockurr/start` | Start VM |
-| `POST` | `/api/dockurr/stop` | Stop VM |
-| `POST` | `/api/dockurr/restart` | Restart VM |
-| `GET` | `/api/dockurr/logs` | Get VM logs |
-| `GET` | `/api/dockurr/inspect` | Inspect VM metadata |
-| `GET` | `/api/docker/list` | List Docker containers |
-| `POST` | `/api/docker/start` | Start container |
-| `POST` | `/api/docker/stop` | Stop container |
-| `POST` | `/api/docker/restart` | Restart container |
-| `GET` | `/api/docker/logs` | Container logs |
-| `GET` | `/api/docker/inspect` | Container inspect output |
-| `GET` | `/api/docker/stats` | Container CPU/memory/network/block metrics |
-| `GET` | `/api/docker/processes` | Container process list |
-| `GET` | `/api/docker/files/list` | List files inside container path |
-| `GET` | `/api/docker/files/read` | Read file inside container |
-| `POST` | `/api/docker/files/write` | Write file inside container |
-| `GET` | `/api/screen/capabilities` | Screen capability negotiation |
-| `GET` | `/api/screen/sources` | List available local screens/monitors |
-| `POST` | `/api/screen/input` | Native input injection |
-| `POST` | `/api/screen/upload/preflight` | Check transfer conflicts before upload |
-| `POST` | `/api/screen/upload/begin` | Create upload session |
-| `POST` | `/api/screen/upload/chunk` | Append chunk to upload session |
-| `POST` | `/api/screen/upload/commit` | Finalize upload session |
-| `POST` | `/api/screen/upload/cancel` | Cancel upload session |
-| `GET` | `/api/health` | Health check |
-| `GET` | `/api/tunnel/state` | Tunnel config + mapping runtime state |
-| `POST` | `/api/tunnel/config` | Update FerrymanProxy host/port/token and persist |
-| `POST` | `/api/tunnel/mapping/upsert` | Add or update one TCP/UDP mapping |
-| `POST` | `/api/tunnel/mapping/delete` | Delete one mapping |
-| `POST` | `/api/tunnel/mapping/test` | Test one mapping and return pass/fail detail |
-| `GET` | `/api/tunnel/ports` | List local listening ports/process/pid |
+### 核心与宿主能力
 
-## WebSocket Channels
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `POST` | `/api/auth/login` | Access Key 登录 |
+| `GET` | `/api/session/me` | 查询会话信息 + 主机能力（`host_os` / `docker_installed` / `codeserver_installed` / `kvm_installed`） |
+| `GET` | `/api/health` | 健康检查 |
+| `GET` | `/api/files/list` | 目录列表 |
+| `GET` | `/api/files/read` | 读取文件 |
+| `POST` | `/api/files/write` | 写入文件 |
+| `POST` | `/api/tasks/start` | 启动异步任务 |
+| `GET` | `/api/tasks/list` | 任务列表 |
+| `GET` | `/api/tasks/get` | 任务详情/输出 |
+| `GET` | `/api/logs/tail` | 拉取运行日志 |
+| `POST` | `/api/codeserver/config` | 更新 code-server 端口/TLS 配置并持久化后重启 |
+
+### Dockurr / Docker
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/api/dockurr/list` | 查询 Dockurr 虚拟机列表 |
+| `POST` | `/api/dockurr/create` | 创建虚拟机（windows/macos、版本/内存/磁盘/持久化/名称） |
+| `POST` | `/api/dockurr/start` | 启动虚拟机 |
+| `POST` | `/api/dockurr/stop` | 停止虚拟机 |
+| `POST` | `/api/dockurr/restart` | 重启虚拟机 |
+| `POST` | `/api/dockurr/delete` | 删除虚拟机 |
+| `GET` | `/api/dockurr/logs` | 获取虚拟机日志 |
+| `GET` | `/api/dockurr/inspect` | 获取虚拟机详情 |
+| `GET` | `/api/docker/list` | 查询 Docker 容器列表 |
+| `POST` | `/api/docker/service/start` | 尝试启动本机 Docker 服务 |
+| `POST` | `/api/docker/start` | 启动容器 |
+| `POST` | `/api/docker/stop` | 停止容器 |
+| `POST` | `/api/docker/restart` | 重启容器 |
+| `GET` | `/api/docker/logs` | 获取容器日志 |
+| `GET` | `/api/docker/inspect` | 获取容器 inspect 信息 |
+| `GET` | `/api/docker/stats` | 获取容器 CPU/内存/网络/磁盘 I/O 指标 |
+| `GET` | `/api/docker/processes` | 获取容器进程列表 |
+| `GET` | `/api/docker/files/list` | 列出容器路径文件 |
+| `GET` | `/api/docker/files/read` | 读取容器文件 |
+| `POST` | `/api/docker/files/write` | 写入容器文件 |
+
+### 屏幕 / Tunnel
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/api/screen/capabilities` | 屏幕能力协商 |
+| `GET` | `/api/screen/sources` | 查询可用本地屏幕源 |
+| `POST` | `/api/screen/input` | 注入原生输入 |
+| `POST` | `/api/screen/upload/preflight` | 上传前冲突预检 |
+| `POST` | `/api/screen/upload/begin` | 创建上传会话 |
+| `POST` | `/api/screen/upload/chunk` | 上传分片 |
+| `POST` | `/api/screen/upload/commit` | 提交上传会话 |
+| `POST` | `/api/screen/upload/cancel` | 取消上传会话 |
+| `GET` | `/api/tunnel/state` | 获取内网穿透配置与映射运行状态 |
+| `POST` | `/api/tunnel/config` | 更新并持久化 FerrymanProxy 地址/端口/令牌 |
+| `POST` | `/api/tunnel/mapping/upsert` | 新增或更新单条 TCP/UDP 映射 |
+| `POST` | `/api/tunnel/mapping/delete` | 删除映射 |
+| `POST` | `/api/tunnel/mapping/test` | 映射测试并返回成功/失败详情 |
+| `GET` | `/api/tunnel/ports` | 列出本机监听端口/进程/PID |
+
+### CodeAgent（hapi 兼容）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/api/codeagent/runner/state` | 查询 Runner 聚合状态 |
+| `POST` | `/api/bind` | 建立 CodeAgent bearer 绑定 |
+| `GET` | `/api/events` | 拉取 CodeAgent 事件流 |
+| `POST` | `/api/visibility` | 更新事件可见性设置 |
+| `GET` | `/api/sessions` | 列出会话 |
+| `GET` | `/api/sessions/{sid}` | 查询单个会话详情 |
+| `PATCH` | `/api/sessions/{sid}` | 重命名会话 |
+| `DELETE` | `/api/sessions/{sid}` | 删除会话 |
+| `GET` | `/api/sessions/{sid}/messages` | 拉取会话消息 |
+| `POST` | `/api/sessions/{sid}/messages` | 发送会话消息 |
+| `POST` | `/api/sessions/{sid}/resume` | 恢复会话运行 |
+| `POST` | `/api/sessions/{sid}/abort` | 中止当前运行 |
+| `POST` | `/api/sessions/{sid}/archive` | 归档会话 |
+| `POST` | `/api/sessions/{sid}/permission-mode` | 更新权限模式 |
+| `POST` | `/api/sessions/{sid}/model` | 更新模型 |
+| `POST` | `/api/sessions/{sid}/reasoning-effort` | 更新推理强度 |
+| `POST` | `/api/sessions/{sid}/codex-fast` | 切换 Codex Fast 模式 |
+| `POST` | `/api/sessions/{sid}/permissions/{rid}/approve` | 批准权限请求 |
+| `POST` | `/api/sessions/{sid}/permissions/{rid}/deny` | 拒绝权限请求 |
+| `GET` | `/api/sessions/{sid}/slash-commands` | 获取斜杠命令列表 |
+| `GET` | `/api/sessions/{sid}/skills` | 获取可用 skills 列表 |
+| `GET` | `/api/sessions/{sid}/git-status` | 查询会话 Git 状态 |
+| `GET` | `/api/sessions/{sid}/git-diff-numstat` | 查询会话 Git diff 统计 |
+| `GET` | `/api/sessions/{sid}/git-diff-file` | 查询单文件 diff |
+| `GET` | `/api/sessions/{sid}/file` | 读取会话工作区文件 |
+| `GET` | `/api/sessions/{sid}/files` | 搜索会话工作区文件 |
+| `GET` | `/api/sessions/{sid}/directory` | 列出会话工作区目录 |
+| `POST` | `/api/sessions/{sid}/upload` | 上传附件到会话 |
+| `POST` | `/api/sessions/{sid}/upload/delete` | 删除已上传附件 |
+| `GET` | `/api/machines` | 列出可用机器 |
+| `POST` | `/api/machines/{mid}/spawn` | 在指定机器创建会话 |
+| `POST` | `/api/machines/{mid}/paths/exists` | 批量检查路径是否存在 |
+| `GET` | `/api/machines/{mid}/directory` | 列出指定机器目录 |
+
+### Push / Voice
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/api/push/vapid-public-key` | 获取 Web Push 公钥 |
+| `POST` | `/api/push/subscribe` | 注册 Web Push 订阅 |
+| `DELETE` | `/api/push/subscribe` | 取消 Web Push 订阅 |
+| `POST` | `/api/voice/token` | 获取实时语音会话令牌 |
+
+## WebSocket 通道
 
 ### `/ws/terminal`
 
-Actions:
+支持动作：
 
 - `open`
 - `attach`
@@ -371,79 +458,116 @@ Actions:
 - `resize`
 - `close`
 
+### `/ws/codeagent/terminal`
+
+支持动作：
+
+- `open`
+- `input`
+- `write`
+- `resize`
+- `close`
+
+### `/ws/codeagent/events`
+
+服务端推送：
+
+- CodeAgent 会话 / 机器 / 全局事件流
+- `heartbeat`
+
 ### `/ws/webrtc`
 
-Actions:
+支持动作：
 
-- `join` (room signaling peer join)
-- `signal` (SDP/ICE payload forwarding)
+- `join`（房间信令）
+- `signal`（SDP/ICE 信令转发）
 - `native_subscribe`
 - `native_unsubscribe`
 - `input_event`
 
 ### `/ws/logs`
 
-Actions:
+支持动作：
 
 - `tail`
 - `snapshot`
 
 ### `/ws/dockurr`
 
-Actions:
+支持动作：
 
 - `list`
+- `snapshot`
 - `create`
 - `start`
 - `stop`
 - `restart`
+- `delete`
 - `logs`
 - `inspect`
 
 ### `/ws/monitor`
 
-Server push:
+支持动作：
+
+- `snapshot`
+- `refresh`
+- `ping`
+
+服务端推送：
 
 - `monitor_snapshot`
 
-## Native Screen Streaming
+### `/ws/tunnel`
 
-- Transport: WebSocket binary packet (`FRM1` header)
-- Codec IDs:
+支持动作：
+
+- `snapshot`
+- `refresh`
+- `ping`
+
+服务端推送：
+
+- `tunnel_snapshot`
+
+## 原生屏幕流协议
+
+- 传输：WebSocket 二进制包（`FRM1` header）
+- 编码 ID：
   - `1`: JPEG
   - `2`: H.264
   - `3`: H.265
   - `4`: VP8
   - `5`: VP9
   - `6`: AV1
-- Backend negotiates codec/fps/resolution/bitrate based on active subscribers.
+- 后端会根据订阅者动态协商 codec/fps/分辨率/码率。
 
-If ffmpeg is unavailable, native video encoding is disabled and capability negotiation falls back accordingly.
+如果 ffmpeg 不可用，则原生视频编码能力会被禁用，并在能力协商中回退。
 
-## Security Model
+## 安全模型
 
-- LAN-oriented deployment (default host: `0.0.0.0`).
-- Access-key login required.
-- Session token required for protected HTTP/WS endpoints.
-- Login grants command/screen access by default (current behavior).
-- Key actions are auditable through:
-  - immediate backend console logs
-  - in-memory log tail (`/api/logs/tail`, `/ws/logs`)
-- Session-scoped ownership is applied to terminal/task operations.
+- 默认面向局域网部署（默认监听 `0.0.0.0`）。
+- 必须通过 Access Key 登录。
+- 受保护 HTTP/WS 接口必须携带会话令牌。
+- 当前行为为登录即授予命令/屏幕权限（无二次手动授权闸门）。
+- 核心操作可通过以下路径审计：
+  - 后端即时控制台日志
+  - 内存日志尾部（`/api/logs/tail`、`/ws/logs`）
+- 终端/任务使用会话级上下文隔离。
 
-## Build Notes
+## 构建说明
 
-- `vcpkg` manifest mode via `vcpkg.json`
-- Frontend assets are embedded by `cmake/EmbedAssets.cmake`
-- If `libhv` is missing, backend still compiles but server startup fails with guidance.
-- On macOS, native screen and input features require system permissions:
-  - Screen Recording
-  - Accessibility
+- 使用 `vcpkg.json`（manifest mode）管理 C++ 依赖。
+- 前端资源通过 `cmake/EmbedAssets.cmake` 嵌入后端。
+- 当 `libhv` 缺失时，后端仍可编译，但运行时服务启动会失败并输出提示。
+- macOS 原生能力依赖系统权限：
+  - 屏幕录制
+  - 辅助功能
 
-## Contributing
+## 参与贡献
 
-Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a PR.
+提交 PR 前请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+本项目使用 [MIT License](LICENSE)。

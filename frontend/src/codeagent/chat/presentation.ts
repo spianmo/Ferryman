@@ -1,5 +1,7 @@
 import type { AgentEvent } from '@/chat/types'
 
+type TranslateFn = (key: string, params?: Record<string, string | number>) => string
+
 export function formatUnixTimestamp(value: number): string {
     const ms = value < 1_000_000_000_000 ? value * 1000 : value
     const date = new Date(ms)
@@ -20,7 +22,7 @@ export type EventPresentation = {
     text: string
 }
 
-export function getEventPresentation(event: AgentEvent): EventPresentation {
+export function getEventPresentation(event: AgentEvent, t?: TranslateFn): EventPresentation {
     if (event.type === 'api-error') {
         const { retryAttempt, maxRetries } = event as { retryAttempt: number; maxRetries: number }
         if (maxRetries > 0 && retryAttempt >= maxRetries) {
@@ -45,6 +47,9 @@ export function getEventPresentation(event: AgentEvent): EventPresentation {
     if (event.type === 'permission-mode-changed') {
         const modeValue = (event as Record<string, unknown>).mode
         const mode = typeof modeValue === 'string' ? modeValue : 'default'
+        if (t) {
+            return { icon: '🔐', text: t('event.permissionModeChanged', { mode }) }
+        }
         return { icon: '🔐', text: `Permission mode: ${mode}` }
     }
     if (event.type === 'limit-reached') {
@@ -73,6 +78,6 @@ export function getEventPresentation(event: AgentEvent): EventPresentation {
     }
 }
 
-export function renderEventLabel(event: AgentEvent): string {
-    return getEventPresentation(event).text
+export function renderEventLabel(event: AgentEvent, t?: TranslateFn): string {
+    return getEventPresentation(event, t).text
 }

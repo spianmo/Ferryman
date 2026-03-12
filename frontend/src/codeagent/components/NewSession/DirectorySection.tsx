@@ -11,6 +11,8 @@ export function DirectorySection(props: {
     selectedIndex: number
     isDisabled: boolean
     recentPaths: string[]
+    validationMessage?: string | null
+    validationTone?: 'muted' | 'success' | 'error'
     onDirectoryChange: (value: string) => void
     onDirectoryFocus: () => void
     onDirectoryBlur: () => void
@@ -20,6 +22,11 @@ export function DirectorySection(props: {
     onBrowse: () => void
 }) {
     const { t } = useTranslation()
+    const validationClassName = props.validationTone === 'error'
+        ? 'text-red-600'
+        : props.validationTone === 'success'
+            ? 'text-emerald-600'
+            : 'text-[var(--app-hint)]'
 
     return (
         <div className="flex flex-col gap-1.5 px-3 py-3">
@@ -61,6 +68,12 @@ export function DirectorySection(props: {
                     {t('newSession.browse')}
                 </Button>
             </div>
+
+            {props.validationMessage ? (
+                <div className={`text-xs ${validationClassName}`}>
+                    {props.validationMessage}
+                </div>
+            ) : null}
 
             {props.recentPaths.length > 0 && (
                 <div className="mt-1 flex flex-col gap-1">

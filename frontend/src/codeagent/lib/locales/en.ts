@@ -117,6 +117,10 @@ export default {
   'newSession.agent': 'Agent',
   'newSession.model': 'Model',
   'newSession.model.optional': 'optional',
+  'newSession.directoryChecking': 'Checking whether the directory exists…',
+  'newSession.directoryExists': 'Directory exists and is ready to use.',
+  'newSession.directoryNotFound': 'Directory does not exist. Please check the path.',
+  'newSession.directoryCheckFailed': 'Failed to validate the directory. Please try again.',
   'newSession.create': 'Create',
   'newSession.creating': 'Creating…',
 
@@ -264,6 +268,25 @@ export default {
   'settings.about.website': 'Website',
   'settings.about.appVersion': 'App Version',
   'settings.about.protocolVersion': 'Protocol Version',
+
+  // Events
+  'event.permissionModeChanged': 'Permission mode: {mode}',
+
+  // Permission mode descriptions
+  'permissionMode.description.default': 'Claude asks when it needs elevated actions.',
+  'permissionMode.description.acceptEdits': 'Auto-apply file edits while still asking before broader actions.',
+  'permissionMode.description.plan': 'Inspect and plan without making changes.',
+  'permissionMode.description.bypassPermissions': 'Skip permission prompts. Use only in trusted environments.',
+  'permissionMode.description.ask': 'Ask before taking actions that need approval.',
+  'permissionMode.description.readOnly': 'Inspect the codebase without changing files.',
+  'permissionMode.description.auto': 'Work inside the workspace and ask before sensitive actions.',
+  'permissionMode.description.fullAccess': 'Skip approvals and sandboxing. Use only in trusted environments.',
+  'permissionMode.description.autoEdit': 'Auto-approve edit tools while prompting for everything else.',
+  'permissionMode.description.yolo': 'Auto-approve all tools. Use only in trusted environments.',
+  'permissionMode.description.allow': 'Allow requested tools without prompting.',
+  'permissionMode.description.deny': 'Deny requested tools by default.',
+  'permissionMode.description.agent': 'Run in standard agent mode.',
+  'permissionMode.description.force': 'Skip confirmation prompts and run with force enabled.',
 
   // Misc
   'misc.noMachines': 'No machines available',
