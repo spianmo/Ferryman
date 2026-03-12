@@ -8,7 +8,7 @@ type ThemeApi = {
   toggle: () => void;
 };
 
-const ThemeContext = createContext<ThemeApi | null>(null);
+export const ThemeContext = createContext<ThemeApi | null>(null);
 
 const STORAGE_KEY = "ferryman.theme";
 
@@ -49,4 +49,3 @@ export function useTheme() {
   if (!ctx) throw new Error("useTheme must be used within ThemeProvider");
   return ctx;
 }
-

@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useState } from 'react'
-import { LanguageSwitcher } from '@/components/LanguageSwitcher'
 import { Spinner } from '@/components/Spinner'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
@@ -109,11 +108,6 @@ export function LoginPrompt(props: LoginPromptProps) {
 
     return (
         <div className="relative h-full flex items-center justify-center p-4">
-            {/* Language switcher */}
-            <div className="absolute top-4 right-4">
-                <LanguageSwitcher />
-            </div>
-
             <div className="w-full max-w-sm space-y-6">
                 {/* Header */}
                 <div className="text-center space-y-2">

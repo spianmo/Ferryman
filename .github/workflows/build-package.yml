@@ -255,7 +255,7 @@ jobs:
           PKG_ROOT="package/ferryman-${{ matrix.package_suffix }}"
           mkdir -p "$PKG_ROOT"
           cp "$BIN_PATH" "$PKG_ROOT/"
-          cp README.md README_CN.md LICENSE "$PKG_ROOT/"
+          cp README.md README_EN.md LICENSE "$PKG_ROOT/"
 
           tar -czf "ferryman-${{ matrix.package_suffix }}.tar.gz" -C package "ferryman-${{ matrix.package_suffix }}"
 
@@ -272,7 +272,7 @@ jobs:
             PROXY_PKG_ROOT="package/ferryman-proxy-${{ matrix.package_suffix }}"
             mkdir -p "$PROXY_PKG_ROOT"
             cp "$PROXY_BIN_PATH" "$PROXY_PKG_ROOT/"
-            cp README.md README_CN.md LICENSE scripts/ferryman-proxy.service scripts/deploy_ferryman_proxy.sh "$PROXY_PKG_ROOT/"
+            cp README.md README_EN.md LICENSE scripts/ferryman-proxy.service scripts/deploy_ferryman_proxy.sh "$PROXY_PKG_ROOT/"
             tar -czf "ferryman-proxy-${{ matrix.package_suffix }}.tar.gz" -C package "ferryman-proxy-${{ matrix.package_suffix }}"
           fi
 
@@ -292,7 +292,7 @@ jobs:
           $pkgRoot = "package/ferryman-${{ matrix.package_suffix }}"
           New-Item -ItemType Directory -Path $pkgRoot -Force | Out-Null
           Copy-Item $binPath "$pkgRoot/Ferryman.exe" -Force
-          Copy-Item README.md, README_CN.md, LICENSE $pkgRoot -Force
+          Copy-Item README.md, README_EN.md, LICENSE $pkgRoot -Force
 
           $zipPath = "ferryman-${{ matrix.package_suffix }}.zip"
           if (Test-Path $zipPath) {

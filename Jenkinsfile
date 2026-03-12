@@ -121,7 +121,7 @@ fi
 PKG_ROOT="package/ferryman-${cfg.packageSuffix}"
 mkdir -p "\$PKG_ROOT"
 cp "\$BIN_PATH" "\$PKG_ROOT/"
-cp README.md README_CN.md LICENSE "\$PKG_ROOT/"
+cp README.md README_EN.md LICENSE "\$PKG_ROOT/"
 tar -czf "ferryman-${cfg.packageSuffix}.tar.gz" -C package "ferryman-${cfg.packageSuffix}"
 
 if [[ "${cfg.isMac}" == "false" ]]; then
@@ -136,7 +136,7 @@ if [[ "${cfg.isMac}" == "false" ]]; then
   PROXY_PKG_ROOT="package/ferryman-proxy-${cfg.packageSuffix}"
   mkdir -p "\$PROXY_PKG_ROOT"
   cp "\$PROXY_BIN_PATH" "\$PROXY_PKG_ROOT/"
-  cp README.md README_CN.md LICENSE scripts/ferryman-proxy.service scripts/deploy_ferryman_proxy.sh "\$PROXY_PKG_ROOT/"
+  cp README.md README_EN.md LICENSE scripts/ferryman-proxy.service scripts/deploy_ferryman_proxy.sh "\$PROXY_PKG_ROOT/"
   tar -czf "ferryman-proxy-${cfg.packageSuffix}.tar.gz" -C package "ferryman-proxy-${cfg.packageSuffix}"
 fi
 """
@@ -209,7 +209,7 @@ if (-not $binPath) {
 $pkgRoot = "package/ferryman-$env:PACKAGE_SUFFIX"
 New-Item -ItemType Directory -Path $pkgRoot -Force | Out-Null
 Copy-Item $binPath "$pkgRoot/Ferryman.exe" -Force
-Copy-Item README.md, README_CN.md, LICENSE $pkgRoot -Force
+Copy-Item README.md, README_EN.md, LICENSE $pkgRoot -Force
 $zipPath = "ferryman-$env:PACKAGE_SUFFIX.zip"
 if (Test-Path $zipPath) {
   Remove-Item $zipPath -Force

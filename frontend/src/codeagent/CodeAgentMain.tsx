@@ -9,6 +9,7 @@ import { getTelegramWebApp, isTelegramEnvironment, loadTelegramSdk } from './hoo
 import { queryClient } from './lib/query-client'
 import { createAppRouter } from './router'
 import { I18nProvider } from './lib/i18n-context'
+import { ThemeProvider } from './lib/theme-context'
 
 function getStartParam(): string | null {
     const query = new URLSearchParams(window.location.search)
@@ -47,12 +48,14 @@ async function bootstrapCodeAgentStandalone() {
 
     ReactDOM.createRoot(document.getElementById('root')!).render(
         <React.StrictMode>
-            <I18nProvider>
-                <QueryClientProvider client={queryClient}>
-                    <RouterProvider router={router} />
-                    {import.meta.env.DEV ? <ReactQueryDevtools initialIsOpen={false} /> : null}
-                </QueryClientProvider>
-            </I18nProvider>
+            <ThemeProvider>
+                <I18nProvider>
+                    <QueryClientProvider client={queryClient}>
+                        <RouterProvider router={router} />
+                        {import.meta.env.DEV ? <ReactQueryDevtools initialIsOpen={false} /> : null}
+                    </QueryClientProvider>
+                </I18nProvider>
+            </ThemeProvider>
         </React.StrictMode>
     )
 }
