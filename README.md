@@ -20,9 +20,7 @@ With a public FerrymanProxy or your own FerrymanProxy deployed on a public Linux
 It is not just a web terminal and not just another remote desktop.
 Ferryman is built for the new **AI agent + remote host** workflow: agents keep working, humans step in occasionally, and every intervention needs full context, enough control, and an auditable trail. It can also surface and import existing local Codex / Claude / Cursor / Gemini / OpenCode sessions so you can continue from the context already in your head instead of reconstructing it from memory.
 
-
-https://github.com/user-attachments/assets/af71187c-1914-415c-9c09-50561c4222ff
-
+https://github.com/user-attachments/assets/0d09c388-0b69-4130-a261-b386dc34e211
 
 ## Why Developers Care About Ferryman
 
