@@ -1,5 +1,5 @@
 <p align="center">
-    <img src="banner.png" style="border-radius: 12px;" alt="Ferryman banner">
+    <img src="FurinaBanner.png" style="border-radius: 12px;" alt="Ferryman banner">
 </p>
 
 # Ferryman
