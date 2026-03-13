@@ -1,6 +1,4 @@
-<p align="center">
-    <img src="FurinaBanner.png" style="border-radius: 12px;" alt="Ferryman banner">
-</p>
+![Ferryman banner](FurinaBanner.png)
 
 # Ferryman
 
@@ -22,11 +20,7 @@ With a public FerrymanProxy or your own FerrymanProxy deployed on a public Linux
 It is not just a web terminal and not just another remote desktop.
 Ferryman is built for the new **AI agent + remote host** workflow: agents keep working, humans step in occasionally, and every intervention needs full context, enough control, and an auditable trail. It can also surface and import existing local Codex / Claude / Cursor / Gemini / OpenCode sessions so you can continue from the context already in your head instead of reconstructing it from memory.
 
-<p align="center">
-  <a href="https://ai-1258209752.cos.ap-shanghai.myqcloud.com/blog/demo.gif">
-    <img src="https://ai-1258209752.cos.ap-shanghai.myqcloud.com/blog/demo.gif" alt="Ferryman demo GIF">
-  </a>
-</p>
+![Ferryman demo GIF](https://ai-1258209752.cos.ap-shanghai.myqcloud.com/blog/demo.gif)
 
 ## Why Developers Care About Ferryman
 
