@@ -22,6 +22,12 @@ Ferryman 也把 **移动端兼容适配** 当成一等公民。
 它不是单纯的 Web Terminal，也不是另一个远程桌面。  
 Ferryman 面向的是新一代 **AI Agent + 远程主机** 工作流：Agent 持续执行，人类低频介入，但每次介入都需要完整上下文、足够控制权，以及可审计的运行痕迹。它也支持把本机已有的 Codex / Claude / Cursor / Gemini / OpenCode 会话接进来，尽量无缝续上你的心智 context，而不是让你隔了半小时之后重新回忆“它到底改到哪一步了”。
 
+<p align="center">
+  <a href="https://ai-1258209752.cos.ap-shanghai.myqcloud.com/blog/demo.gif">
+    <img src="https://ai-1258209752.cos.ap-shanghai.myqcloud.com/blog/demo.gif" alt="Ferryman 演示 GIF">
+  </a>
+</p>
+
 ## 为什么开发者会在意 Ferryman
 
 - **围绕 AI 编程而不是泛远控设计**：原生整合 CodeAgent、终端、文件、Git、附件、事件流与权限交互。
