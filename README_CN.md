@@ -11,7 +11,7 @@
 ![Native Stream](https://img.shields.io/badge/Native%20Stream-JPEG%2FH264%2FH265%2FVP8%2FVP9%2FAV1-0EA5E9)
 ![Platforms](https://img.shields.io/badge/Platforms-macOS%20%7C%20Linux%20%7C%20Windows-334155)
 
-[English](README_EN.md) | 中文
+[English](README.md) | 中文
 
 Ferryman 把一台你信任的机器，变成一个可从浏览器随时接入的 **AI 编程控制台**。  
 当 Claude / Codex / Cursor / Gemini / OpenCode 这类 CLI Agent 在远端持续跑任务时，你不该被迫守在电脑前，也不该在 SSH、Web IDE、远控软件和容器面板之间来回切换。AI 也不会因为你去买咖啡、挤地铁，或者走在路上掏出手机看一眼，就突然学会主动汇报它刚刚把仓库改成了什么样。Ferryman 让你在同一个界面里查看进度、审批操作、读写工作区、接管终端，并在需要时直接打开 IDE、屏幕流或主机运维能力。
