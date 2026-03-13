@@ -110,7 +110,7 @@ For CodeAgent HTTP/WS or payload changes, check these areas together:
 For user-facing docs, build steps, API descriptions, or feature summaries, keep both README files aligned:
 
 - `README.md`
-- `README_EN.md`
+- `README_CN.md`
 
 ### 4) Keep i18n in sync
 
