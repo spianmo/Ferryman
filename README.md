@@ -21,7 +21,7 @@ It is not just a web terminal and not just another remote desktop.
 Ferryman is built for the new **AI agent + remote host** workflow: agents keep working, humans step in occasionally, and every intervention needs full context, enough control, and an auditable trail. It can also surface and import existing local Codex / Claude / Cursor / Gemini / OpenCode sessions so you can continue from the context already in your head instead of reconstructing it from memory.
 
 
-https://github.com/user-attachments/assets/94492fd1-a8e9-4841-b12c-a90641dd2b43
+https://github.com/user-attachments/assets/af71187c-1914-415c-9c09-50561c4222ff
 
 
 ## Why Developers Care About Ferryman
