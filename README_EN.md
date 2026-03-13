@@ -11,7 +11,7 @@
 ![Native Stream](https://img.shields.io/badge/Native%20Stream-JPEG%2FH264%2FH265%2FVP8%2FVP9%2FAV1-0EA5E9)
 ![Platforms](https://img.shields.io/badge/Platforms-macOS%20%7C%20Linux%20%7C%20Windows-334155)
 
-English | [中文](README.md)
+English | [中文](README_CN.md)
 
 Ferryman turns a machine you trust into a browser-accessible **AI coding control plane**.
 When Claude / Codex / Cursor / Gemini / OpenCode style CLI agents are running long tasks on a remote host, you should not need to babysit the machine or bounce between SSH, a web IDE, a remote desktop tool, and infra dashboards. AI also does not magically become self-explanatory just because you left your desk, grabbed coffee, or checked on it from your phone mid-walk. Ferryman keeps that workflow in one place: check progress, approve actions, browse and edit workspace files, take over the terminal, and jump into IDE, screen streaming, or host operations when needed.
